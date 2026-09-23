@@ -497,7 +497,13 @@ void Renderer::DrawScene(const DrawSceneDesc& drawDesc) const noexcept
 	// Reflection Pass
 	{
 		auto section = Locator::profiler::value().BeginScoped(Profiler::Stage::ReflectionPass);
+#if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
+		// Switch minimal graphics: keep the sea, skip rendering the whole scene a second time into
+		// its reflection. The water then reflects only what the reflection buffer last held.
+		if (false)
+#else
 		if (drawDesc.drawWater)
+#endif
 		{
 			DrawSceneDesc drawPassDesc = drawDesc;
 

@@ -23,6 +23,12 @@ add_compile_definitions(
   _GNU_SOURCE=1
 )
 add_compile_options("-D__is_target_os(x)=0")
+# Minimal graphics on the Switch: no water-reflection pass (the scene rendered twice), no bump maps.
+# Off with -DOPENBLACK_SWITCH_MINIMAL_GRAPHICS=OFF.
+option(OPENBLACK_SWITCH_MINIMAL_GRAPHICS "Switch: skip water reflections and bump mapping" ON)
+if(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
+  add_compile_definitions(OPENBLACK_SWITCH_MINIMAL_GRAPHICS=1)
+endif()
 # openblack calls std::memcpy in a few files without <cstring>; desktop standard libraries pull it in
 # through other headers, newlib's libstdc++ does not.
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include cstring>")

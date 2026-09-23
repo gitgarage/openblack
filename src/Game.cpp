@@ -112,6 +112,11 @@ Game::Game(Arguments&& args) noexcept
 	config.graphicsBackend = args.graphicsBackend;
 	config.vsync = args.vsync;
 	config.guiScale = args.guiScale;
+#if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
+	// Switch minimal graphics (with the skipped reflection pass in Renderer.cpp): no bump mapping.
+	config.bumpMapStrength = 0.0f;
+	config.smallBumpMapStrength = 0.0f;
+#endif
 }
 
 Game::~Game() noexcept
