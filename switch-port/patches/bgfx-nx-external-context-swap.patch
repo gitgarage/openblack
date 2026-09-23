@@ -1,3 +1,15 @@
+diff --git a/include/bgfx/embedded_shader.h b/include/bgfx/embedded_shader.h
+index ed6fda9..087bcf7 100644
+--- a/include/bgfx/embedded_shader.h
++++ b/include/bgfx/embedded_shader.h
+@@ -28,6 +28,7 @@
+ 	|| BX_PLATFORM_PS5                  \
+ 	)
+ #define BGFX_PLATFORM_SUPPORTS_ESSL (0  \
++	|| BX_PLATFORM_NX /* openblack switch-port: GLES on the Switch */ \
+ 	|| BX_PLATFORM_ANDROID              \
+ 	|| BX_PLATFORM_EMSCRIPTEN           \
+ 	|| BX_PLATFORM_IOS                  \
 diff --git a/src/glcontext_egl.cpp b/src/glcontext_egl.cpp
 index 46cf504..1eea290 100644
 --- a/src/glcontext_egl.cpp
