@@ -85,6 +85,16 @@ void logAllocationFailure(const char* what, size_t size)
 	inside = false;
 }
 
+// The link's own progress: SD log only, since the link is what is failing when these are written.
+void linkLog(const char* line)
+{
+	if (g_logFile != nullptr)
+	{
+		fputs(line, g_logFile);
+		fflush(g_logFile);
+	}
+}
+
 // Every 500ms, one line: how full memory is. The last one before a death shows how close it was.
 Thread g_memThread;
 volatile bool g_memRunning = true;
@@ -152,14 +162,16 @@ extern "C" int __wrap_main(int argc, char** argv)
 	// The log file is opened before stdout is redirected, so its own writes go to the SD card, not
 	// back through the redirect.
 	g_logFile = fopen(k_LogPath, "w");
-	// 12s: when the Switch is host, the tablet drops off the bus and comes back as an accessory, which
-	// took longer than the 5s this first waited (the log said "link down", the tablet then opened it).
-	bool link = atlasLinkInit(12000);
+	// The link comes up in the background, retried for as long as openblack runs, so a slow or
+	// failed handshake never delays or loses anything: lines written before it connects are sent
+	// first once it does, and each failed attempt's reason goes to the SD log.
+	atlasLinkStartBackground(linkLog);
+	bool link = false;
 	devoptab_list[STD_OUT] = &g_teeDevoptab;
 	devoptab_list[STD_ERR] = &g_teeDevoptab;
 	setvbuf(stdout, nullptr, _IOLBF, 0);
 	setvbuf(stderr, nullptr, _IONBF, 0);
-	printf("openblack for Switch: usb link %s, game path %s\n", atlasLinkMode(), k_GamePath);
+	printf("openblack for Switch: usb link connecting in the background, game path %s\n", k_GamePath);
 	(void)link;
 	u64 used, total;
 	memoryMiB(used, total);
