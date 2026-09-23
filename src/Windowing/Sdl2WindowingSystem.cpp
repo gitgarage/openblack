@@ -66,7 +66,20 @@ Sdl2WindowingSystem::Sdl2WindowingSystem(const std::string& title, int width, in
 	}
 
 	SDL_ShowCursor(SDL_DISABLE);
+#if defined(__SWITCH__)
+	// The Switch's SDL video driver always builds its window on an EGL surface, and never loads EGL
+	// when told the context is external ("EGL not initialized"). So SDL makes the window's GLES
+	// context here and bgfx is handed it (Renderer.cpp); bgfx presents through SDL's surface.
+	SDL_SetHint(SDL_HINT_VIDEO_EXTERNAL_CONTEXT, "0");
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+	extraFlags |= SDL_WINDOW_OPENGL;
+#else
 	SDL_SetHint(SDL_HINT_VIDEO_EXTERNAL_CONTEXT, "1");
+#endif
 
 	uint32_t flags = SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | extraFlags;
 	if (displayMode == DisplayMode::Fullscreen)
@@ -90,6 +103,17 @@ Sdl2WindowingSystem::Sdl2WindowingSystem(const std::string& title, int width, in
 		throw std::runtime_error("Failed creating SDL2 window: " + std::string(SDL_GetError()));
 	}
 
+#if defined(__SWITCH__)
+	SDL_GLContext context = SDL_GL_CreateContext(window.get());
+	if (context == nullptr || SDL_GL_MakeCurrent(window.get(), context) != 0)
+	{
+		SPDLOG_LOGGER_ERROR(spdlog::get("graphics"), "Failed to create the GLES context: '{}'", SDL_GetError());
+		throw std::runtime_error("Failed creating GLES context: " + std::string(SDL_GetError()));
+	}
+	SDL_GL_SetSwapInterval(1);
+	SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "Switch: SDL window with GLES context {}", static_cast<void*>(context));
+#endif
+
 	_window = std::move(window);
 }
 
@@ -101,6 +125,12 @@ void* Sdl2WindowingSystem::GetHandle() const
 Sdl2WindowingSystem::NativeHandles Sdl2WindowingSystem::GetNativeHandles() const
 {
 	NativeHandles result {nullptr, nullptr};
+#if defined(__SWITCH__)
+	// No SysWM info on the Switch; bgfx draws with SDL's context (see the constructor), so the
+	// native window is only informational here.
+	result.nativeWindow = _window.get();
+	return result;
+#endif
 #if defined(__EMSCRIPTEN__)
 	static const char* canvas = "#canvas";
 	nativeWindow = const_cast<void*>(reinterpret_cast<const void*>(canvas));

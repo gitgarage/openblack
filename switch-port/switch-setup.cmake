@@ -42,6 +42,9 @@ set(BGFX_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BGFX_INSTALL OFF CACHE BOOL "" FORCE)
 set(BGFX_CUSTOM_TARGETS OFF CACHE BOOL "" FORCE)
 set(BGFX_CONFIG_VIDEO OFF CACHE BOOL "" FORCE)
+# Single-threaded, as switch-spike ran: bgfx renders on the calling thread, where SDL's GLES context
+# is current (it is made there by Sdl2WindowingSystem and handed to bgfx).
+set(BGFX_CONFIG_MULTITHREADED OFF CACHE BOOL "" FORCE)
 add_subdirectory(${OB_ROOT}/switch-spike/deps/bgfx.cmake bgfx EXCLUDE_FROM_ALL)
 target_include_directories(bgfx BEFORE PRIVATE ${PORTLIBS}/include) # Mesa's EGL headers, not bgfx's
 # Imported rather than ALIAS: openblack adds bgfx::bx to bgfx::bgfx's links, which an alias refuses.

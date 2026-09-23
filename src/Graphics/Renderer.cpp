@@ -231,6 +231,9 @@ std::unique_ptr<RendererInterface> RendererInterface::Create(GraphicsBackend bac
 		const auto handles = window.GetNativeHandles();
 		init.platformData.nwh = handles.nativeWindow;
 		init.platformData.ndt = handles.nativeDisplay;
+#if defined(__SWITCH__)
+		init.platformData.context = SDL_GL_GetCurrentContext(); // made by Sdl2WindowingSystem
+#endif
 	}
 
 	uint32_t bgfxReset = BGFX_RESET_NONE;

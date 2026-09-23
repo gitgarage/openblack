@@ -48,7 +48,9 @@ extern "C" int __wrap_main(int argc, char** argv)
 	// The log file is opened before stdout is redirected, so its own writes go to the SD card, not
 	// back through the redirect.
 	g_logFile = fopen(k_LogPath, "w");
-	bool link = atlasLinkInit(5000);
+	// 12s: when the Switch is host, the tablet drops off the bus and comes back as an accessory, which
+	// took longer than the 5s this first waited (the log said "link down", the tablet then opened it).
+	bool link = atlasLinkInit(12000);
 	devoptab_list[STD_OUT] = &g_teeDevoptab;
 	devoptab_list[STD_ERR] = &g_teeDevoptab;
 	setvbuf(stdout, nullptr, _IOLBF, 0);

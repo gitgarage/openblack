@@ -1,0 +1,19 @@
+diff --git a/src/glcontext_egl.cpp b/src/glcontext_egl.cpp
+index 46cf504..1eea290 100644
+--- a/src/glcontext_egl.cpp
++++ b/src/glcontext_egl.cpp
+@@ -597,6 +597,14 @@ WL_EGL_IMPORT
+ 			{
+ 				EGL_CHECK(eglSwapBuffers(m_display, m_surface) );
+ 			}
++#	if BX_PLATFORM_NX
++			// Switch (openblack switch-port): the app's windowing (SDL) owns the EGL surface and
++			// handed bgfx its context, so bgfx made no surface of its own. Present the current one.
++			else if (NULL != g_platformData.context)
++			{
++				EGL_CHECK(eglSwapBuffers(eglGetCurrentDisplay(), eglGetCurrentSurface(EGL_DRAW) ) );
++			}
++#	endif // BX_PLATFORM_NX
+ 		}
+ 		else
+ 		{
