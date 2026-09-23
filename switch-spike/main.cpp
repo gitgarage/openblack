@@ -93,6 +93,9 @@ int main(int, char**)
 		return 1;
 	}
 
+	if (bgfx::getRendererType() != bgfx::RendererType::OpenGLES)
+		logf("WARNING: asked for OpenGLES but got %s - the caps below are that renderer's, not the GPU's\n",
+			bgfx::getRendererName(bgfx::getRendererType()));
 	const bgfx::Caps* caps = bgfx::getCaps();
 	logf("bgfx::init OK. renderer=%s vendorId=0x%04x deviceId=0x%04x\n",
 		bgfx::getRendererName(bgfx::getRendererType()), caps->vendorId, caps->deviceId);

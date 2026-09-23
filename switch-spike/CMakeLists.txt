@@ -12,6 +12,10 @@ add_compile_definitions(
   BGFX_CONFIG_RENDERER_VULKAN=0
   BGFX_CONFIG_RENDERER_OPENGL=0
   BGFX_CONFIG_RENDERER_WEBGPU=0
+  # Must be named: once any BGFX_CONFIG_RENDERER_* is defined, bgfx's config.h stops picking
+  # platform defaults and sets every unnamed renderer to 0 - GLES included. Without this line the
+  # first console run silently got the Noop renderer and a black screen (2026-09-22). 31 = ES 3.1.
+  BGFX_CONFIG_RENDERER_OPENGLES=31
   # newlib hides POSIX functions (ftello, ...) under strict -std=c++NN unless asked.
   _GNU_SOURCE=1
 )
@@ -28,11 +32,14 @@ set(BGFX_CUSTOM_TARGETS OFF CACHE BOOL "" FORCE)
 set(BGFX_CONFIG_MULTITHREADED OFF CACHE BOOL "" FORCE) # no render thread: one less thing to go wrong
 set(BGFX_CONFIG_VIDEO OFF CACHE BOOL "" FORCE)
 add_subdirectory(deps/bgfx.cmake EXCLUDE_FROM_ALL)
+# bgfx bundles Khronos EGL headers whose eglplatform.h stops at "Platform not recognized" for the
+# Switch; devkitPro's Mesa headers (portlibs) have the generic fallback. Search those first.
+target_include_directories(bgfx BEFORE PRIVATE $ENV{DEVKITPRO}/portlibs/switch/include)
 
 # Live log over the USB-C cable to the Pixel Tablet - ../../atlas-usb-link, mounted at /atlas-usb-link
 # by build.sh.
-add_executable(bgfx_spike main.cpp ${ATLAS_USB_LINK_DIR}/source/atlas_usb_link.c)
+add_executable(bgfx_spike main.cpp compat/posix_memalign.c ${ATLAS_USB_LINK_DIR}/source/atlas_usb_link.c)
 target_include_directories(bgfx_spike PRIVATE ${ATLAS_USB_LINK_DIR}/source)
 target_compile_features(bgfx_spike PRIVATE cxx_std_20)
-target_link_libraries(bgfx_spike PRIVATE bgfx bx bimg EGL glapi drm_nouveau nx)
+target_link_libraries(bgfx_spike PRIVATE bgfx bx bimg GLESv2 EGL glapi drm_nouveau nx)
 nx_create_nro(bgfx_spike)
