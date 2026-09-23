@@ -16,6 +16,10 @@
 #include <vector>
 
 extern "C" int __real_main(int argc, char** argv);
+extern "C" void* __real_malloc(size_t size);
+extern "C" void* __real_calloc(size_t count, size_t size);
+extern "C" void* __real_realloc(void* ptr, size_t size);
+extern "C" void* __real_memalign(size_t alignment, size_t size);
 
 namespace
 {
@@ -41,7 +45,107 @@ devoptab_t g_teeDevoptab = [] {
 	d.write_r = teeWrite;
 	return d;
 }();
+// This process's memory, in MiB: what it has used and what it is allowed. An applet (launched from
+// the Album) gets a small slice of RAM; a title override (hold R on a game) gets nearly all of it.
+void memoryMiB(u64& used, u64& total)
+{
+	used = total = 0;
+	svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+	svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+	used >>= 20;
+	total >>= 20;
+}
+
+// Written straight to the link and the file, with no printf and no allocation, so it is safe to
+// call from inside a failing malloc.
+void rawLog(const char* text, size_t len)
+{
+	atlasLinkWrite(text, len);
+	if (g_logFile != nullptr)
+	{
+		fwrite(text, 1, len, g_logFile);
+		fflush(g_logFile);
+	}
+}
+
+void logAllocationFailure(const char* what, size_t size)
+{
+	static __thread bool inside = false; // a failure while logging a failure must not recurse
+	if (inside)
+	{
+		return;
+	}
+	inside = true;
+	u64 used, total;
+	memoryMiB(used, total);
+	char line[160];
+	int n = snprintf(line, sizeof(line), "[mem] ALLOCATION FAILED: %s(%zu bytes = %zu KiB), process using %lu of %lu MiB\n",
+	                 what, size, size >> 10, used, total);
+	rawLog(line, static_cast<size_t>(n));
+	inside = false;
+}
+
+// Every 500ms, one line: how full memory is. The last one before a death shows how close it was.
+Thread g_memThread;
+volatile bool g_memRunning = true;
+void memoryThread(void*)
+{
+	u64 lastUsed = ~0ull;
+	while (g_memRunning)
+	{
+		u64 used, total;
+		memoryMiB(used, total);
+		if (used != lastUsed) // only when it changes, to keep the log readable
+		{
+			char line[96];
+			int n = snprintf(line, sizeof(line), "[mem] %lu / %lu MiB used\n", used, total);
+			rawLog(line, static_cast<size_t>(n));
+			lastUsed = used;
+		}
+		svcSleepThread(500'000'000ULL);
+	}
+}
 } // namespace
+
+extern "C" void* __wrap_malloc(size_t size)
+{
+	void* p = __real_malloc(size);
+	if (p == nullptr && size != 0)
+	{
+		logAllocationFailure("malloc", size);
+	}
+	return p;
+}
+
+extern "C" void* __wrap_calloc(size_t count, size_t size)
+{
+	void* p = __real_calloc(count, size);
+	if (p == nullptr && count != 0 && size != 0)
+	{
+		logAllocationFailure("calloc", count * size);
+	}
+	return p;
+}
+
+extern "C" void* __wrap_realloc(void* ptr, size_t size)
+{
+	void* p = __real_realloc(ptr, size);
+	if (p == nullptr && size != 0)
+	{
+		logAllocationFailure("realloc", size);
+	}
+	return p;
+}
+
+extern "C" void* __wrap_memalign(size_t alignment, size_t size)
+{
+	void* p = __real_memalign(alignment, size);
+	if (p == nullptr && size != 0)
+	{
+		logAllocationFailure("memalign", size);
+	}
+	return p;
+}
 
 extern "C" int __wrap_main(int argc, char** argv)
 {
@@ -57,6 +161,15 @@ extern "C" int __wrap_main(int argc, char** argv)
 	setvbuf(stderr, nullptr, _IONBF, 0);
 	printf("openblack for Switch: usb link %s, game path %s\n", atlasLinkMode(), k_GamePath);
 	(void)link;
+	u64 used, total;
+	memoryMiB(used, total);
+	AppletType appletType = appletGetAppletType();
+	printf("[mem] start: %lu / %lu MiB, running as %s (applet type %d)\n", used, total,
+	       appletType == AppletType_Application || appletType == AppletType_SystemApplication ? "an application (full memory)"
+	                                                                                         : "an applet (limited memory)",
+	       static_cast<int>(appletType));
+	threadCreate(&g_memThread, memoryThread, nullptr, nullptr, 0x4000, 0x3F, -2);
+	threadStart(&g_memThread);
 
 	std::vector<char*> args(argv, argv + argc);
 	const char* extra[] = {"--game-path", k_GamePath, "--log-file", "stdout", "--width", "1280", "--height", "720"};
@@ -68,6 +181,9 @@ extern "C" int __wrap_main(int argc, char** argv)
 
 	int result = __real_main(static_cast<int>(args.size()) - 1, args.data());
 	printf("openblack exited with %d\n", result);
+	g_memRunning = false;
+	threadWaitForExit(&g_memThread);
+	threadClose(&g_memThread);
 	atlasLinkExit();
 	if (g_logFile != nullptr)
 	{

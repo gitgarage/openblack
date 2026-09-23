@@ -118,6 +118,8 @@ function(_switch_finish)
     ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_main.cpp)
   # switch_main.cpp's __wrap_main runs first: USB link, stdout to the link, the game path argument.
   target_link_options(openblack PRIVATE -Wl,--wrap=main)
+  # Allocation failures are logged (switch_main.cpp): the first console runs died mid-load.
+  target_link_options(openblack PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=memalign)
   # main.cpp needs cxxopts too; on a desktop it comes from the system include path.
   target_include_directories(openblack PRIVATE ${ATLAS_USB_LINK_DIR}/source ${CXXOPTS_INCLUDE_DIRS})
   target_link_libraries(openblack PRIVATE glm::glm) # main.cpp's headers need glm; a desktop has it system-wide
