@@ -3,7 +3,7 @@
 # than this laptop has). Output: build/bgfx_spike.nro
 set -euo pipefail
 cd "$(dirname "$0")"
-docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/work -w /work devkitpro/devkita64:latest bash -c '
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/work -v "$(cd "$PWD/../../atlas-usb-link" && pwd)":/atlas-usb-link -w /work devkitpro/devkita64:latest bash -c '
   set -e
   export DEVKITPRO=/opt/devkitpro
   export PATH=$DEVKITPRO/devkitA64/bin:$DEVKITPRO/tools/bin:$PATH

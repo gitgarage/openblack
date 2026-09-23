@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(bgfx_spike LANGUAGES C CXX)
+set(ATLAS_USB_LINK_DIR /atlas-usb-link CACHE PATH "atlas-usb-link checkout")
 
 # Feasibility spike: does bgfx run on homebrew Switch at all? bgfx only knows the Switch as
 # BX_PLATFORM_NX (Nintendo's official SDK, keyed on __NX__). That platform is already static-EGL
@@ -28,7 +29,10 @@ set(BGFX_CONFIG_MULTITHREADED OFF CACHE BOOL "" FORCE) # no render thread: one l
 set(BGFX_CONFIG_VIDEO OFF CACHE BOOL "" FORCE)
 add_subdirectory(deps/bgfx.cmake EXCLUDE_FROM_ALL)
 
-add_executable(bgfx_spike main.cpp)
+# Live log over the USB-C cable to the Pixel Tablet - ../../atlas-usb-link, mounted at /atlas-usb-link
+# by build.sh.
+add_executable(bgfx_spike main.cpp ${ATLAS_USB_LINK_DIR}/source/atlas_usb_link.c)
+target_include_directories(bgfx_spike PRIVATE ${ATLAS_USB_LINK_DIR}/source)
 target_compile_features(bgfx_spike PRIVATE cxx_std_20)
 target_link_libraries(bgfx_spike PRIVATE bgfx bx bimg EGL glapi drm_nouveau nx)
 nx_create_nro(bgfx_spike)

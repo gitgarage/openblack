@@ -3,6 +3,8 @@
 // can be read back from the SD card. Press + to quit early.
 #include <switch.h>
 
+#include "atlas_usb_link.h"
+
 #include <bgfx/bgfx.h>
 #include <bgfx/platform.h>
 
@@ -11,15 +13,23 @@
 
 static FILE* g_log = nullptr;
 
+// Every line goes to the SD card and, live, over the USB-C cable to the Pixel Tablet
+// (atlas_usb_link) - so a run can be read without taking the SD card anywhere.
 static void logf(const char* fmt, ...)
 {
-	if (!g_log)
-		return;
+	char line[1024];
 	va_list ap;
 	va_start(ap, fmt);
-	vfprintf(g_log, fmt, ap);
+	int n = vsnprintf(line, sizeof(line), fmt, ap);
 	va_end(ap);
-	fflush(g_log);
+	if (n <= 0)
+		return;
+	if (g_log)
+	{
+		fputs(line, g_log);
+		fflush(g_log);
+	}
+	atlasLinkWrite(line, (size_t)(n < (int)sizeof(line) ? n : (int)sizeof(line) - 1));
 }
 
 // bgfx reports its own failures (context creation, missing extensions) through this - without it a
@@ -32,11 +42,9 @@ struct SpikeCallback : bgfx::CallbackI
 	}
 	void traceVargs(const char* file, uint16_t line, const char* fmt, va_list args) override
 	{
-		if (!g_log)
-			return;
-		fprintf(g_log, "bgfx %s:%u ", file, line);
-		vfprintf(g_log, fmt, args);
-		fflush(g_log);
+		char msg[768];
+		vsnprintf(msg, sizeof(msg), fmt, args);
+		logf("bgfx %s:%u %s", file, line, msg);
 	}
 	void profilerBegin(const char*, uint32_t, const char*, uint16_t) override {}
 	void profilerBeginLiteral(const char*, uint32_t, const char*, uint16_t) override {}
@@ -53,7 +61,8 @@ struct SpikeCallback : bgfx::CallbackI
 int main(int, char**)
 {
 	g_log = fopen("sdmc:/bgfx-spike.log", "w");
-	logf("bgfx spike starting\n");
+	bool link = atlasLinkInit(5000);
+	logf("bgfx spike starting (usb link %s)\n", link ? "up" : "not found");
 
 	padConfigureInput(1, HidNpadStyleSet_NpadStandard);
 	PadState pad;
@@ -80,6 +89,7 @@ int main(int, char**)
 		logf("bgfx::init FAILED\n");
 		if (g_log)
 			fclose(g_log);
+		atlasLinkExit();
 		return 1;
 	}
 
@@ -111,5 +121,6 @@ int main(int, char**)
 	bgfx::shutdown();
 	logf("shutdown OK\n");
 	fclose(g_log);
+	atlasLinkExit();
 	return 0;
 }
