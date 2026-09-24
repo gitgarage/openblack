@@ -433,20 +433,34 @@ void SpiritPointGameThing() // 010 SPIRIT_POINT_GAME_THING
 	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
+// Whether a point is on screen: within the camera's view cone (half-angle about half the vertical FOV
+// widened for a 16:9 screen).
+bool InFieldOfView(const glm::vec3& position)
+{
+	const auto& camera = Locator::camera::value();
+	const auto toPoint = position - camera.GetOrigin();
+	const float length = glm::length(toPoint);
+	if (length < 0.001f)
+	{
+		return true;
+	}
+	constexpr float k_CosHalfAngle = 0.82f; // ~35 degrees
+	return glm::dot(toPoint / length, glm::normalize(camera.GetForward())) >= k_CosHalfAngle;
+}
+
 void GameThingFieldOfView() // 011 GAME_THING_FIELD_OF_VIEW
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const auto object = Pop().uintVal;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	const auto* transform = object != 0 && registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+	Pushb(transform != nullptr && InFieldOfView(transform->position));
 }
 
 void PosFieldOfView() // 012 POS_FIELD_OF_VIEW
 {
-	[[maybe_unused]] const auto position = PopVec();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const auto position = PopVec();
+	Pushb(InFieldOfView(position));
 }
 
 void RunText() // 013 RUN_TEXT
@@ -1080,11 +1094,10 @@ void Played() // 064 PLAYED
 
 void RandomUlong() // 065 RANDOM_ULONG
 {
-	[[maybe_unused]] const auto max = Pop().intVal;
-	[[maybe_unused]] const auto min = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushi(0);
+	const auto max = Pop().intVal;
+	const auto min = Pop().intVal;
+	// Inclusive, like RANDOM's range.
+	Pushi(max <= min ? min : min + rand() % (max - min + 1));
 }
 
 void SetGamespeed() // 066 SET_GAMESPEED
