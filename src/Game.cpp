@@ -9,6 +9,7 @@
 
 #include "Game.h"
 
+#include <cstdlib>
 #include <string>
 
 #include <LHVM.h>
@@ -278,6 +279,16 @@ bool Game::GameLogicLoop() noexcept
 
 	auto& lhvm = Locator::vm::value();
 	lhvm.LookIn(lhvm::ScriptType::All);
+	if (std::getenv("OPENBLACK_TRACE_VM") != nullptr && _turnCount % 50 == 0) // temporary diagnostic
+	{
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "VM turn {}: {} task(s)", _turnCount, lhvm.GetTasks().size());
+		for (const auto& [id, task] : lhvm.GetTasks())
+		{
+			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "  task {} '{}' ip {} waiting {} inHandler {} sleeping {} stop {}", id,
+			                   task.name, task.instructionAddress, task.waitingTaskId, task.inExceptionHandler, task.sleeping,
+			                   task.stop);
+		}
+	}
 
 	_lastGameLoopTime = currentTime;
 	_turnDeltaTime = delta;
@@ -801,12 +812,24 @@ bool Game::Run() noexcept
 
 	auto& fileSystem = Locator::filesystem::value();
 
+	if (std::getenv("OPENBLACK_START_UNPAUSED") != nullptr) // temporary diagnostic: headless campaign runs
+	{
+		_paused = false;
+	}
+
 	auto challengePath = fileSystem.GetPath<filesystem::Path::Quests>() / "challenge.chl";
 	if (fileSystem.Exists(challengePath))
 	{
 		auto& chlapi = Locator::chlapi::value();
 		auto& lhvm = Locator::vm::value();
-		lhvm.Initialise(&chlapi.GetFunctionsTable(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+		// The error callback was nullptr, so every VM error - an unknown script, a stack fault inside
+		// the campaign - vanished silently and the campaign simply never ran (2026-09-23).
+		lhvm.Initialise(&chlapi.GetFunctionsTable(), nullptr, nullptr, nullptr,
+		                [](lhvm::ErrorCode code, const std::string v0, uint32_t v1) {
+			                SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "LHVM error: {} ({} / {})",
+			                                    lhvm::k_ErrorMsg.at(static_cast<size_t>(code)), v0, v1);
+		                },
+		                nullptr, nullptr);
 		try
 		{
 			lhvm.LoadBinary(fileSystem.ReadAll(challengePath));

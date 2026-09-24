@@ -9,6 +9,8 @@
 //   Right stick           -> Z / U (rotate left/right), A / Q (tilt up/down)
 //   R / L                 -> mouse wheel (zoom in/out), repeating while held
 //   X / Y                 -> Space (zoom to temple) / C (zoom to creature)
+//   +                     -> P (pause/unpause - openblack starts paused, so nothing simulates until
+//                            this is pressed)
 #include <SDL.h>
 #include <switch.h>
 
@@ -97,6 +99,7 @@ void switchInputFrame()
 
 	setKey(SDL_SCANCODE_SPACE, (held & HidNpadButton_X) != 0);
 	setKey(SDL_SCANCODE_C, (held & HidNpadButton_Y) != 0);
+	setKey(SDL_SCANCODE_P, (held & HidNpadButton_Plus) != 0);
 
 	setMouseButton(g_zrDown, SDL_BUTTON_LEFT, (held & HidNpadButton_ZR) != 0);
 	setMouseButton(g_zlDown, SDL_BUTTON_RIGHT, (held & HidNpadButton_ZL) != 0);
