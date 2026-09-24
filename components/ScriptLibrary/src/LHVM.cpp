@@ -1348,7 +1348,39 @@ void LHVM::Opcode23Cast(VMTask& task, const VMInstruction& instruction)
 	}
 	else // Mode::CAST
 	{
-		Push(Pop(), instruction.type);
+		// Numeric casts convert the value (CASTI of 1.0 is 1, CASTF of 1 is 1.0); natives read the
+		// field for the type they expect. Object and vector casts only retag.
+		DataType from;
+		auto value = Pop(from);
+		const bool fromInt = from == DataType::Int || from == DataType::Boolean;
+		switch (instruction.type)
+		{
+		case DataType::Int:
+			if (from == DataType::Float)
+			{
+				value = VMValue(static_cast<int32_t>(value.floatVal));
+			}
+			break;
+		case DataType::Float:
+			if (fromInt)
+			{
+				value = VMValue(static_cast<float>(value.intVal));
+			}
+			break;
+		case DataType::Boolean:
+			if (from == DataType::Float)
+			{
+				value = VMValue(value.floatVal != 0.0f ? 1 : 0);
+			}
+			else if (fromInt)
+			{
+				value = VMValue(value.intVal != 0 ? 1 : 0);
+			}
+			break;
+		default:
+			break;
+		}
+		Push(value, instruction.type);
 	}
 }
 

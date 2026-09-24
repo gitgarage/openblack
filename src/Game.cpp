@@ -287,9 +287,16 @@ bool Game::GameLogicLoop() noexcept
 		                   Locator::camera::value().IsScriptControlled() ? " scripted" : "");
 		for (const auto& [id, task] : lhvm.GetTasks())
 		{
-			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "  task {} '{}' ip {} waiting {} inHandler {} sleeping {} stop {}", id,
-			                   task.name, task.instructionAddress, task.waitingTaskId, task.inExceptionHandler, task.sleeping,
-			                   task.stop);
+			const auto& code = lhvm.GetInstructions();
+			std::string at;
+			for (uint32_t k = task.instructionAddress >= 2 ? task.instructionAddress - 2 : 0;
+			     k < std::min<uint32_t>(task.instructionAddress + 2, static_cast<uint32_t>(code.size())); ++k)
+			{
+				at += fmt::format("{}{} {} | ", k == task.instructionAddress ? ">" : "",
+				                  lhvm::k_OpcodeNames.at(static_cast<size_t>(code[k].code)), code[k].data.intVal);
+			}
+			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "  task {} '{}' ip {} waiting {} sleeping {} at: {}", id, task.name,
+			                   task.instructionAddress, task.waitingTaskId, task.sleeping, at);
 		}
 	}
 

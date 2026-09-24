@@ -79,6 +79,10 @@ uint32_t VillagerDecideWhatToDo(LivingAction& action)
 
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto entity = registry.ToEntity(action);
+	if (registry.AllOf<ScriptMove>(entity))
+	{
+		return 0; // held by a script, which decides where it goes
+	}
 
 	const auto& transform = registry.Get<Transform>(entity);
 	auto& wallHug = registry.Get<WallHug>(entity);
@@ -116,6 +120,20 @@ uint32_t VillagerMoveToPos(LivingAction& action)
 	// (leaving only a FinalStep tag). When none of them remain, we've arrived.
 	const bool stillMoving =
 	    registry.AnyOf<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag>(entity);
+	if (auto* scriptMove = registry.TryGet<ScriptMove>(entity))
+	{
+		// Scripts compare positions exactly, and the pathfinder can get stuck on scenery: land on the
+		// target when the walk ends or after ~30 s of trying, then stand still until told otherwise.
+		constexpr uint32_t k_ScriptMoveGiveUpTurns = 300;
+		if (!scriptMove->arrived && (!stillMoving || ++scriptMove->turns > k_ScriptMoveGiveUpTurns))
+		{
+			registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
+			                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
+			registry.Get<Transform>(entity).position = scriptMove->target;
+			scriptMove->arrived = true;
+		}
+		return 0;
+	}
 	if (!stillMoving)
 	{
 		registry.Remove<MoveStateFinalStepTag, MoveStateArrivedTag>(entity);

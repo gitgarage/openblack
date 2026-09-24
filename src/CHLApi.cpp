@@ -9,12 +9,15 @@
 
 #include "CHLApi.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 
+#include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <LHVM.h>
@@ -30,7 +33,19 @@
 #include "3D/TempleInteriorInterface.h"
 #include "Camera/Camera.h"
 #include "ECS/Archetypes/MobileStaticArchetype.h"
+#include "ECS/Archetypes/VillagerArchetype.h"
+#include "ECS/Components/Abode.h"
+#include "ECS/Components/Creature.h"
+#include "ECS/Components/Feature.h"
+#include "ECS/Components/Field.h"
+#include "ECS/Components/Temple.h"
+#include "ECS/Components/Town.h"
 #include "ECS/Components/Transform.h"
+#include "ECS/Components/Tree.h"
+#include "ECS/Components/Villager.h"
+#include "ECS/Components/LivingAction.h"
+#include "ECS/Components/WallHug.h"
+#include "ECS/Systems/LivingActionSystemInterface.h"
 #include "ECS/Registry.h"
 #include "ECS/Systems/HandSystemInterface.h"
 #include "Enums.h"
@@ -45,6 +60,16 @@ using namespace openblack::ecs::archetypes;
 using openblack::Locator;
 using openblack::MobileStaticInfo;
 using openblack::ecs::components::Transform;
+using openblack::ecs::components::LivingAction;
+using openblack::ecs::components::MoveStateArrivedTag;
+using openblack::ecs::components::MoveStateExitCircleTag;
+using openblack::ecs::components::MoveStateFinalStepTag;
+using openblack::ecs::components::MoveStateLinearTag;
+using openblack::ecs::components::MoveStateOrbitTag;
+using openblack::ecs::components::MoveStateStepThroughTag;
+using openblack::ecs::components::ScriptMove;
+using openblack::ecs::components::WallHug;
+using openblack::ecs::components::WallHugObjectReference;
 using openblack::ecs::systems::HandSystemInterface;
 using openblack::lhvm::DataType;
 using openblack::lhvm::VMValue;
@@ -117,8 +142,30 @@ entt::entity CreateScriptObject(const ObjectType type, uint32_t subtype, const g
 	case ObjectType::Rock: // TODO(Daniels118): add a Rock archetype
 		return MobileStaticArchetype::Create(position, static_cast<MobileStaticInfo>(subtype), altitude, xAngleRadians,
 		                                     yAngleRadians, zAngleRadians, scale);
+	case ObjectType::Marker:
+	{
+		// A named point for the script: nothing to draw, just somewhere to measure from and move to.
+		auto& registry = Locator::entitiesRegistry::value();
+		const auto entity = registry.Create();
+		// Like everything the game creates, it sits on the land; the script's height is only approximate.
+		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		registry.Assign<Transform>(entity, glm::vec3(position.x, ground, position.z), glm::mat3(1.0f), glm::vec3(1.0f));
+		return entity;
+	}
+	case ObjectType::Villager:
+	case ObjectType::VillagerChild:
+		// The script subtype is the VILLAGER_INFO number; the abode position picks the home town.
+		return VillagerArchetype::Create(position, position, static_cast<VillagerInfo>(subtype),
+		                                 type == ObjectType::VillagerChild ? 10 : 30);
 	default:
-		SPDLOG_LOGGER_DEBUG(spdlog::get("game"), "CreateScriptObject not implemented for type {}", static_cast<int>(type));
+	{
+		static std::set<std::pair<ObjectType, uint32_t>> warned;
+		if (warned.emplace(type, subtype).second)
+		{
+			SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "CREATE not implemented for script type {} subtype {}",
+			                   static_cast<int>(type), subtype);
+		}
+	}
 	}
 	return static_cast<entt::entity>(0);
 }
@@ -198,6 +245,17 @@ bool g_dialogueActive = false;
 // once it has been up long enough to read (TEXT_READ).
 int g_lastTextId = -1;
 std::chrono::steady_clock::time_point g_lastTextShown {};
+// SET_SCRIPT_ULONG animations, by object: when each counts as played (see SetScriptUlong).
+constexpr std::chrono::milliseconds k_AnimationPlayTime {1500};
+std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_animationEnd;
+// When the current SET_FADE / SET_FADE_IN finishes.
+std::chrono::steady_clock::time_point g_fadeEnd {};
+
+void StartFade(float seconds)
+{
+	g_fadeEnd = std::chrono::steady_clock::now() +
+	            std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<float>(std::max(seconds, 0.0f)));
+}
 constexpr auto k_TextReadTime = std::chrono::seconds(2);
 // The last object the player clicked, until a GAME_THING_CLICKED for it consumes it.
 uint32_t g_clickedThing = 0;
@@ -207,6 +265,87 @@ void NotifyGameThingClicked(uint32_t entity)
 {
 	g_clickedThing = entity;
 }
+
+
+namespace
+{
+// Black & White's "call <type> [<subtype>] [near <position> [radius <r>]]": the nearest existing
+// object of that script object type. Subtype 5000 is how the campaign asks for any subtype (it
+// comes with every type), and a negative one is taken the same way.
+constexpr int k_AnySubtype = 5000;
+
+bool SubtypeMatches(int wanted, int actual)
+{
+	return wanted == k_AnySubtype || wanted < 0 || wanted == actual;
+}
+
+template <typename Component, typename SubtypeOf>
+void NearestOf(int subtype, const glm::vec3& position, float& bestDistance2, entt::entity& best, SubtypeOf subtypeOf)
+{
+	Locator::entitiesRegistry::value().Each<const Component, const Transform>(
+	    [&](entt::entity entity, const Component& component, const Transform& transform) {
+		    if (!SubtypeMatches(subtype, subtypeOf(component)))
+		    {
+			    return;
+		    }
+		    const auto offset = transform.position - position;
+		    const float distance2 = glm::dot(offset, offset);
+		    if (distance2 < bestDistance2)
+		    {
+			    bestDistance2 = distance2;
+			    best = entity;
+		    }
+	    });
+}
+
+// entt::null (0 to the script) when nothing matches within radius, or the type isn't mapped yet.
+entt::entity FindNearestScriptObject(int type, int subtype, const glm::vec3& position, float radius)
+{
+	float bestDistance2 = radius * radius;
+	entt::entity best = entt::null;
+	// Numbers are the script's own object types (ScriptEnums.h), not openblack's Enums.h ObjectType.
+	switch (static_cast<ObjectType>(type))
+	{
+	case ObjectType::Villager:
+	case ObjectType::VillagerChild:
+		NearestOf<ecs::components::Villager>(subtype, position, bestDistance2, best,
+		                                     [](const ecs::components::Villager& v) { return static_cast<int>(v.number); });
+		break;
+	case ObjectType::Abode:
+		NearestOf<ecs::components::Abode>(subtype, position, bestDistance2, best,
+		                                  [](const ecs::components::Abode& a) { return static_cast<int>(a.type); });
+		break;
+	case ObjectType::Feature:
+		NearestOf<ecs::components::Feature>(subtype, position, bestDistance2, best,
+		                                    [](const ecs::components::Feature& f) { return static_cast<int>(f.type); });
+		break;
+	case ObjectType::Tree:
+		NearestOf<ecs::components::Tree>(subtype, position, bestDistance2, best,
+		                                 [](const ecs::components::Tree& t) { return static_cast<int>(t.type); });
+		break;
+	case ObjectType::Town:
+		NearestOf<ecs::components::Town>(subtype, position, bestDistance2, best, [](const ecs::components::Town&) { return 0; });
+		break;
+	case ObjectType::Creature:
+		NearestOf<ecs::components::Creature>(subtype, position, bestDistance2, best,
+		                                     [](const ecs::components::Creature&) { return 0; });
+		break;
+	case ObjectType::Citadel:
+		NearestOf<ecs::components::Temple>(subtype, position, bestDistance2, best, [](const ecs::components::Temple&) { return 0; });
+		break;
+	default:
+	{
+		static std::set<int> s_reported;
+		if (s_reported.insert(type).second)
+		{
+			SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "CALL: script object type {} is not mapped to openblack entities yet", type);
+		}
+		break;
+	}
+	}
+	return best;
+}
+} // namespace
 
 void SetCameraPosition() // 001 SET_CAMERA_POSITION
 {
@@ -365,11 +504,12 @@ void SetScriptFloat() // 019 SET_SCRIPT_FLOAT
 
 void SetScriptUlong() // 020 SET_SCRIPT_ULONG
 {
-	[[maybe_unused]] const auto loop = Pop().intVal;
+	const auto loop = Pop().intVal;
 	[[maybe_unused]] const auto animation = Pop().intVal;
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto object = Pop().uintVal;
+	// Villagers have no animation playback yet: treat each play of the animation as a fixed length, so
+	// scripts waiting on PLAYED move on as if it ran.
+	g_animationEnd[object] = std::chrono::steady_clock::now() + k_AnimationPlayTime * std::max(loop, 1);
 }
 
 void GetProperty() // 021 GET_PROPERTY
@@ -437,12 +577,12 @@ void GetDistance() // 025 GET_DISTANCE
 void Call() // 026 CALL
 {
 	[[maybe_unused]] const auto excludingScripted = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto subtype = Pop().intVal;
-	[[maybe_unused]] const auto type = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	const auto position = PopVec();
+	const auto subtype = Pop().intVal;
+	const auto type = Pop().intVal;
+	// "call <type> at <position>": the object at that spot - nearest within a small radius.
+	const auto object = FindNearestScriptObject(type, subtype, position, 20.0f);
+	Pusho(object == entt::null ? 0 : static_cast<uint32_t>(object));
 }
 
 void Create() // 027 CREATE
@@ -492,10 +632,47 @@ void SetWidescreen() // 032 SET_WIDESCREEN
 void MoveGameThing() // 033 MOVE_GAME_THING
 {
 	[[maybe_unused]] const auto radius = Popf();
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto position = PopVec();
+	const auto objId = Pop().uintVal;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(objId);
+	if (objId == 0 || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
+	{
+		return;
+	}
+
+	SPDLOG_LOGGER_DEBUG(spdlog::get("scripting"), "MOVE_GAME_THING {} from ({:.1f}, {:.1f}, {:.1f}) to ({:.1f}, {:.1f}, {:.1f}) radius {}",
+	                    objId, registry.Get<Transform>(entity).position.x, registry.Get<Transform>(entity).position.y,
+	                    registry.Get<Transform>(entity).position.z, position.x, position.y, position.z, radius);
+	auto* wallHug = registry.TryGet<WallHug>(entity);
+	auto* action = registry.TryGet<LivingAction>(entity);
+	// The pathfinder indexes its grid without bounds checks: only walk to targets on the map.
+	constexpr float k_MapMin = 30.0f;
+	constexpr float k_MapMax = 5090.0f;
+	const auto onMap = [&](const glm::vec3& p) {
+		return p.x >= k_MapMin && p.x <= k_MapMax && p.z >= k_MapMin && p.z <= k_MapMax;
+	};
+	const auto& from = registry.Get<Transform>(entity).position;
+	if (!onMap(position) || !onMap(from))
+	{
+		// Usually a target measured from an object CREATE doesn't make yet (its position reads as 0, 0).
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "MOVE_GAME_THING {} from ({:.0f}, {:.0f}) to ({:.0f}, {:.0f}) is off the map: ignored",
+		                   objId, from.x, from.z, position.x, position.z);
+		return;
+	}
+	if (wallHug == nullptr || action == nullptr)
+	{
+		registry.Get<Transform>(entity).position = position; // nothing walks it: place it
+		return;
+	}
+
+	registry.AssignOrReplace<ScriptMove>(entity, position, 0u, false);
+	wallHug->goal = glm::vec2(position.x, position.z);
+	wallHug->step = glm::vec2(0.0f);
+	registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
+	                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
+	registry.Assign<MoveStateLinearTag>(entity);
+	Locator::livingActionSystem::value().VillagerSetState(*action, LivingAction::Index::Top, VillagerStates::MoveToPos, true);
 }
 
 void SetFocus() // 034 SET_FOCUS
@@ -646,13 +823,12 @@ void PositionFollow() // 050 POSITION_FOLLOW
 void CallNear() // 051 CALL_NEAR
 {
 	[[maybe_unused]] const auto excludingScripted = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto radius = Popf();
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto subtype = Pop().intVal;
-	[[maybe_unused]] const auto type = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto radius = Popf();
+	const auto position = PopVec();
+	const auto subtype = Pop().intVal;
+	const auto type = Pop().intVal;
+	const auto object = FindNearestScriptObject(type, subtype, position, radius);
+	Pusho(object == entt::null ? 0 : static_cast<uint32_t>(object));
 }
 
 void SpecialEffectPosition() // 052 SPECIAL_EFFECT_POSITION
@@ -780,10 +956,14 @@ void SetInterfaceInteraction() // 063 SET_INTERFACE_INTERACTION
 
 void Played() // 064 PLAYED
 {
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const auto obj = Pop().uintVal;
+	const auto it = g_animationEnd.find(obj);
+	const bool played = it == g_animationEnd.end() || std::chrono::steady_clock::now() >= it->second;
+	if (played && it != g_animationEnd.end())
+	{
+		g_animationEnd.erase(it);
+	}
+	Pushb(played);
 }
 
 void RandomUlong() // 065 RANDOM_ULONG
@@ -930,24 +1110,31 @@ void CreatureSetDesireMaximum() // 080 CREATURE_SET_DESIRE_MAXIMUM
 	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
+// The table the camera enums index has not been found in the game data yet. Until it is, answer with
+// where the camera is now: an on-map point near the scene, so scripted walks to it complete.
+void PushCameraEnumStandIn(const char* function, int32_t cameraEnum, const glm::vec3& standIn)
+{
+	static std::set<std::pair<std::string, int32_t>> warned;
+	if (warned.emplace(function, cameraEnum).second)
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "{}({}): camera enum table not loaded, using the camera's current point",
+		                   function, cameraEnum);
+	}
+	Pushv(standIn.x);
+	Pushv(standIn.y);
+	Pushv(standIn.z);
+}
+
 void ConvertCameraPosition() // 081 CONVERT_CAMERA_POSITION
 {
-	[[maybe_unused]] const auto unk0 = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushv(0.0f); // x
-	Pushv(0.0f); // y
-	Pushv(0.0f); // z
+	const auto cameraEnum = Pop().intVal;
+	PushCameraEnumStandIn("CONVERT_CAMERA_POSITION", cameraEnum, Locator::camera::value().GetOrigin());
 }
 
 void ConvertCameraFocus() // 082 CONVERT_CAMERA_FOCUS
 {
-	[[maybe_unused]] const auto camera_enum = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushv(0.0f); // x
-	Pushv(0.0f); // y
-	Pushv(0.0f); // z
+	const auto cameraEnum = Pop().intVal;
+	PushCameraEnumStandIn("CONVERT_CAMERA_FOCUS", cameraEnum, Locator::camera::value().GetFocus());
 }
 
 void CreatureSetPlayer() // 083 CREATURE_SET_PLAYER
@@ -1566,9 +1753,13 @@ void PositionClicked() // 158 POSITION_CLICKED
 
 void ReleaseFromScript() // 159 RELEASE_FROM_SCRIPT
 {
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto obj = Pop().uintVal;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(obj);
+	if (obj != 0 && registry.Valid(entity))
+	{
+		registry.Remove<ScriptMove>(entity); // back to the villager AI
+	}
 }
 
 void GetObjectHandIsOver() // 160 GET_OBJECT_HAND_IS_OVER
@@ -2274,26 +2465,23 @@ void CreateRewardInTown() // 240 CREATE_REWARD_IN_TOWN
 
 void SetFade() // 241 SET_FADE
 {
-	[[maybe_unused]] const auto time = Popf();
+	const auto time = Popf();
 	[[maybe_unused]] const auto blue = Popf();
 	[[maybe_unused]] const auto green = Popf();
 	[[maybe_unused]] const auto red = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// TODO: draw the fade. Only its timing is kept, so FADE_FINISHED waits as long as the game would.
+	StartFade(time);
 }
 
 void SetFadeIn() // 242 SET_FADE_IN
 {
-	[[maybe_unused]] const auto duration = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto duration = Popf();
+	StartFade(duration);
 }
 
 void FadeFinished() // 243 FADE_FINISHED
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	Pushb(std::chrono::steady_clock::now() >= g_fadeEnd);
 }
 
 void SetPlayerMagic() // 244 SET_PLAYER_MAGIC

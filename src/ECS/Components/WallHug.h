@@ -40,6 +40,15 @@ struct MoveStateTagComponent
 	glm::vec2 stepGoal;
 };
 
+// Present while a script (MOVE_GAME_THING) owns a living's movement: the villager AI does not
+// wander it, and on arrival it is placed exactly on `target` (scripts wait for a distance of 0).
+struct ScriptMove
+{
+	glm::vec3 target;
+	uint32_t turns;
+	bool arrived;
+};
+
 using MoveStateLinearTag = MoveStateTagComponent<MoveState::Linear>;
 using MoveStateOrbitTag = MoveStateTagComponent<MoveState::Orbit>;
 using MoveStateExitCircleTag = MoveStateTagComponent<MoveState::ExitCircle>;
