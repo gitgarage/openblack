@@ -215,7 +215,7 @@ void Camera::Update(std::chrono::microseconds dt)
 {
 	using namespace std::chrono_literals;
 
-	const auto updateInfo = _model->Update(dt, *this);
+	const auto updateInfo = _scriptControl ? std::nullopt : _model->Update(dt, *this);
 
 	if (updateInfo)
 	{
@@ -241,7 +241,51 @@ void Camera::Update(std::chrono::microseconds dt)
 
 void Camera::HandleActions(std::chrono::microseconds dt)
 {
-	_model->HandleActions(dt);
+	if (!_scriptControl)
+	{
+		_model->HandleActions(dt);
+	}
+}
+
+Camera& Camera::SetScriptControl(bool enabled)
+{
+	if (enabled && !_scriptControl)
+	{
+		// Scripted moves start from wherever the camera is now.
+		_scriptOriginTarget = GetOrigin();
+		_scriptFocusTarget = GetFocus();
+	}
+	else if (!enabled && _scriptControl)
+	{
+		// Hand the view back without a jump: the player model continues from here.
+		_model->SetFlight(GetOrigin(), GetFocus());
+	}
+	_scriptControl = enabled;
+	return *this;
+}
+
+Camera& Camera::ScriptMoveOrigin(const glm::vec3& target, std::chrono::microseconds duration)
+{
+	using namespace std::chrono_literals;
+	const auto zero = glm::zero<glm::vec3>();
+	_scriptOriginTarget = target;
+	SetOriginInterpolator(GetOrigin(), _scriptOriginTarget, zero, zero);
+	SetFocusInterpolator(GetFocus(), _scriptFocusTarget, zero, zero);
+	SetInterpolatorDuration(duration);
+	SetInterpolatorTime(0us);
+	return *this;
+}
+
+Camera& Camera::ScriptMoveFocus(const glm::vec3& target, std::chrono::microseconds duration)
+{
+	using namespace std::chrono_literals;
+	const auto zero = glm::zero<glm::vec3>();
+	_scriptFocusTarget = target;
+	SetOriginInterpolator(GetOrigin(), _scriptOriginTarget, zero, zero);
+	SetFocusInterpolator(GetFocus(), _scriptFocusTarget, zero, zero);
+	SetInterpolatorDuration(duration);
+	SetInterpolatorTime(0us);
+	return *this;
 }
 
 const glm::mat4& Camera::GetProjectionMatrix() const

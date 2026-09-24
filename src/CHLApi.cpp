@@ -9,6 +9,7 @@
 
 #include "CHLApi.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -204,18 +205,18 @@ void SetCameraFocus() // 002 SET_CAMERA_FOCUS
 
 void MoveCameraPosition() // 003 MOVE_CAMERA_POSITION
 {
-	// const auto time = Popf();
-	// const auto position = PopVec();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto time = Popf();
+	const auto position = PopVec();
+	auto& camera = Locator::camera::value();
+	camera.ScriptMoveOrigin(position, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<float>(time)));
 }
 
 void MoveCameraFocus() // 004 MOVE_CAMERA_FOCUS
 {
-	// const auto time = Popf();
-	// const auto position = PopVec();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto time = Popf();
+	const auto position = PopVec();
+	auto& camera = Locator::camera::value();
+	camera.ScriptMoveFocus(position, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<float>(time)));
 }
 
 void GetCameraPosition() // 005 GET_CAMERA_POSITION
@@ -446,22 +447,21 @@ void DllGettime() // 029 DLL_GETTIME
 
 void StartCameraControl() // 030 START_CAMERA_CONTROL
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	// Always granted: nothing else in openblack competes for the camera yet.
+	Locator::camera::value().SetScriptControl(true);
+	Pushb(true);
 }
 
 void EndCameraControl() // 031 END_CAMERA_CONTROL
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	Locator::camera::value().SetScriptControl(false);
 }
 
 void SetWidescreen() // 032 SET_WIDESCREEN
 {
-	// const auto enabled = static_cast<bool>(Pop().intVal);
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto enabled = static_cast<bool>(Pop().intVal);
+	// State only for now: the letterbox bars themselves are not drawn yet.
+	Locator::camera::value().SetWidescreen(enabled);
 }
 
 void MoveGameThing() // 033 MOVE_GAME_THING
@@ -483,9 +483,7 @@ void SetFocus() // 034 SET_FOCUS
 
 void HasCameraArrived() // 035 HAS_CAMERA_ARRIVED
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	Pushb(Locator::camera::value().HasScriptMoveArrived());
 }
 
 void FlockCreate() // 036 FLOCK_CREATE

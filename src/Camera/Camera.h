@@ -104,6 +104,23 @@ public:
 	void Update(std::chrono::microseconds dt);
 	void HandleActions(std::chrono::microseconds dt);
 
+	// Script control (CHL START/END_CAMERA_CONTROL): while on, the player camera model neither
+	// reads input nor replaces the interpolators, so a scripted move plays out uninterrupted.
+	Camera& SetScriptControl(bool enabled);
+	[[nodiscard]] bool IsScriptControlled() const { return _scriptControl; }
+	// A scripted move of origin and/or focus to a target over a duration (CHL MOVE_CAMERA_*). The
+	// other of the two keeps heading for its last scripted target, so position and focus moves
+	// issued back to back play together.
+	Camera& ScriptMoveOrigin(const glm::vec3& target, std::chrono::microseconds duration);
+	Camera& ScriptMoveFocus(const glm::vec3& target, std::chrono::microseconds duration);
+	[[nodiscard]] bool HasScriptMoveArrived() const { return GetInterpolatorT() >= 1.0f; }
+	Camera& SetWidescreen(bool enabled)
+	{
+		_widescreen = enabled;
+		return *this;
+	}
+	[[nodiscard]] bool IsWidescreen() const { return _widescreen; }
+
 	[[nodiscard]] glm::mat4 GetRotationMatrix() const;
 	[[nodiscard]] Projection GetCameraProjection() const;
 
@@ -114,6 +131,10 @@ protected:
 	ZoomInterpolator3f _originInterpolators;
 	ZoomInterpolator3f _focusInterpolators;
 	// As a value between 0 and _interpolatorDuration
+	bool _scriptControl = false;
+	bool _widescreen = false;
+	glm::vec3 _scriptOriginTarget {0.0f};
+	glm::vec3 _scriptFocusTarget {0.0f};
 	std::chrono::microseconds _interpolatorTime = std::chrono::microseconds::zero();
 	std::chrono::microseconds _interpolatorDuration = std::chrono::microseconds::zero();
 	float _xFov = 0.0f; // TODO(#707): This should be a zoomer for animations
