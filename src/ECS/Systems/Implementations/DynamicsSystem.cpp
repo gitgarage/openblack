@@ -78,9 +78,11 @@ void DynamicsSystem::AddRigidBody(btRigidBody* object)
 void DynamicsSystem::RegisterRigidBodies()
 {
 	auto& registry = Locator::entitiesRegistry::value();
-	registry.Each<RigidBody>([this](RigidBody& body) {
+	registry.Each<RigidBody>([this](entt::entity entity, RigidBody& body) {
 		body.handle.setUserIndex(static_cast<int>(RigidBodyType::Entity));
-		body.handle.setUserIndex2(0);
+		// The entity, so a raycast hit (RigidBodyDetails::id) says which object it was - this was 0,
+		// which made clicking objects impossible (CHL GAME_THING_CLICKED).
+		body.handle.setUserIndex2(static_cast<int>(entt::to_integral(entity)));
 		body.handle.setUserPointer(this);
 		AddRigidBody(&body.handle);
 	});

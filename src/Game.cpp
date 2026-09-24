@@ -395,6 +395,15 @@ bool Game::Update() noexcept
 					if (auto hit = dynamicsSystem.RayCastClosestHit(rayOrigin, rayDirection, 1e10f))
 					{
 						intersectionTransform = hit->first;
+						// A left-button press on a game object is a click for the scripts
+						// (GAME_THING_CLICKED). ZR and touchscreen taps arrive as the left button.
+						static bool s_leftWasDown = false;
+						const bool leftDown = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0;
+						if (leftDown && !s_leftWasDown && hit->second.type == RigidBodyType::Entity && hit->second.id != 0)
+						{
+							chlapi::NotifyGameThingClicked(static_cast<uint32_t>(hit->second.id));
+						}
+						s_leftWasDown = leftDown;
 					}
 					else // For the water
 					{

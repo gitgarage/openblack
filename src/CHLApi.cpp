@@ -21,6 +21,8 @@
 #include <LHVMTypes.h>
 #include <entt/entity/entity.hpp>
 #include <entt/entity/fwd.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/euler_angles.hpp>
 #include <glm/vec3.hpp>
 #include <spdlog/spdlog.h>
 
@@ -187,6 +189,25 @@ CHLApi::CHLApi()
 
 void None() {} // 000 NONE
 
+
+namespace
+{
+// One conversation at a time, as in the original: START_DIALOGUE takes it, END_DIALOGUE gives it back.
+bool g_dialogueActive = false;
+// The line RUN_TEXT last showed, and when. There is no text display yet, so a line counts as read
+// once it has been up long enough to read (TEXT_READ).
+int g_lastTextId = -1;
+std::chrono::steady_clock::time_point g_lastTextShown {};
+constexpr auto k_TextReadTime = std::chrono::seconds(2);
+// The last object the player clicked, until a GAME_THING_CLICKED for it consumes it.
+uint32_t g_clickedThing = 0;
+} // namespace
+
+void NotifyGameThingClicked(uint32_t entity)
+{
+	g_clickedThing = entity;
+}
+
 void SetCameraPosition() // 001 SET_CAMERA_POSITION
 {
 	const auto position = PopVec();
@@ -284,10 +305,12 @@ void PosFieldOfView() // 012 POS_FIELD_OF_VIEW
 void RunText() // 013 RUN_TEXT
 {
 	[[maybe_unused]] const auto withInteraction = Pop().intVal;
-	[[maybe_unused]] const auto textID = Pop().intVal;
+	const auto textID = Pop().intVal;
 	[[maybe_unused]] const auto singleLine = static_cast<bool>(Pop().intVal);
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// No text display yet: the line is logged, and TEXT_READ reports it read after k_TextReadTime.
+	g_lastTextId = textID;
+	g_lastTextShown = std::chrono::steady_clock::now();
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "RUN_TEXT: text {}", textID);
 }
 
 void TempText() // 014 TEMP_TEXT
@@ -301,17 +324,19 @@ void TempText() // 014 TEMP_TEXT
 
 void TextRead() // 015 TEXT_READ
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const bool read = g_lastTextId < 0 || std::chrono::steady_clock::now() - g_lastTextShown >= k_TextReadTime;
+	Pushb(read);
 }
 
 void GameThingClicked() // 016 GAME_THING_CLICKED
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const auto object = Pop().uintVal;
+	const bool clicked = object != 0 && object == g_clickedThing;
+	if (clicked)
+	{
+		g_clickedThing = 0;
+	}
+	Pushb(clicked);
 }
 
 void SetScriptState() // 017 SET_SCRIPT_STATE
@@ -475,10 +500,23 @@ void MoveGameThing() // 033 MOVE_GAME_THING
 
 void SetFocus() // 034 SET_FOCUS
 {
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto position = PopVec();
+	const auto object = Pop().uintVal;
+	// Turn the object to face the position, about the vertical axis, with the same yaw convention
+	// the archetypes use to place objects (eulerAngleY(-yaw)).
+	if (object != 0)
+	{
+		auto& registry = Locator::entitiesRegistry::value();
+		if (auto* transform = registry.TryGet<Transform>(static_cast<entt::entity>(object)))
+		{
+			const auto toTarget = position - transform->position;
+			if (toTarget.x != 0.0f || toTarget.z != 0.0f)
+			{
+				const float yaw = std::atan2(toTarget.x, toTarget.z);
+				transform->rotation = glm::mat3(glm::eulerAngleY(-yaw));
+			}
+		}
+	}
 }
 
 void HasCameraArrived() // 035 HAS_CAMERA_ARRIVED
@@ -1194,15 +1232,14 @@ void RunCameraPath() // 119 RUN_CAMERA_PATH
 
 void StartDialogue() // 120 START_DIALOGUE
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const bool granted = !g_dialogueActive;
+	g_dialogueActive = true;
+	Pushb(granted);
 }
 
 void EndDialogue() // 121 END_DIALOGUE
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	g_dialogueActive = false;
 }
 
 void IsDialogueReady() // 122 IS_DIALOGUE_READY

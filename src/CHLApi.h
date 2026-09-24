@@ -36,4 +36,8 @@ private:
 	std::vector<lhvm::NativeFunction> _functionsTable;
 };
 
+// The player clicked a game object (the entity id under the cursor at a left-button press).
+// GAME_THING_CLICKED reports it once to the script that asks about that object.
+void NotifyGameThingClicked(uint32_t entity);
+
 } // namespace openblack::chlapi
