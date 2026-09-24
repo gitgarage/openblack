@@ -753,21 +753,67 @@ void SetWidescreen() // 032 SET_WIDESCREEN
 	Locator::camera::value().SetWidescreen(enabled);
 }
 
-void MoveGameThing() // 033 MOVE_GAME_THING
+// Script walks (WALK_PATH) and flocks (FLOCK_*), updated once per game turn by UpdateScriptTurn.
+namespace
 {
-	[[maybe_unused]] const auto radius = Popf();
-	const auto position = PopVec();
-	const auto objId = Pop().uintVal;
+struct ScriptWalk
+{
+	std::vector<glm::vec3> points; // the track's ground curve, sampled
+	std::vector<float> lengths;    // distance along it at each point
+	float at;                      // distance walked so far
+	float end;                     // distance to stop at (may be below `at`: walking backwards)
+};
+std::unordered_map<uint32_t, ScriptWalk> g_walks;
+
+struct Flock
+{
+	std::vector<uint32_t> members;
+	uint32_t leader = 0;
+};
+std::unordered_map<uint32_t, Flock> g_flocks;
+
+constexpr int32_t k_SpeedProperty = 11; // what scripts set to make livings run (0.9), walk (0.4) or stop (0)
+constexpr float k_WalkUnitsPerTurn = 1.2f; // at speed 1: ~12 units/s, a family run along a track
+
+float SpeedFactor(uint32_t object)
+{
+	const auto it = g_objectProperties.find(PropertyKey(object, k_SpeedProperty));
+	return it != g_objectProperties.end() ? it->second : 1.0f;
+}
+
+void FaceTowards(Transform& transform, const glm::vec3& target)
+{
+	const auto toTarget = target - transform.position;
+	if (toTarget.x != 0.0f || toTarget.z != 0.0f)
+	{
+		transform.rotation = glm::mat3(glm::eulerAngleY(-std::atan2(toTarget.x, toTarget.z)));
+	}
+}
+
+// Hold a living for the script: the villager AI leaves it alone and the pathfinder doesn't move it.
+void HoldForScript(entt::entity entity, const glm::vec3& at)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	registry.AssignOrReplace<ScriptMove>(entity, at, 0u, true);
+	if (auto* wallHug = registry.TryGet<WallHug>(entity))
+	{
+		wallHug->goal = glm::vec2(at.x, at.z);
+	}
+	registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
+	                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
+}
+
+// Walk (or place) a game thing at a position. Returns false if the move was refused.
+bool MoveThingTo(uint32_t objId, const glm::vec3& position)
+{
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto entity = static_cast<entt::entity>(objId);
 	if (objId == 0 || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
 	{
-		return;
+		return false;
 	}
+	g_walks.erase(objId); // a move replaces any track walk
 
-	SPDLOG_LOGGER_DEBUG(spdlog::get("scripting"), "MOVE_GAME_THING {} from ({:.1f}, {:.1f}, {:.1f}) to ({:.1f}, {:.1f}, {:.1f}) radius {}",
-	                    objId, registry.Get<Transform>(entity).position.x, registry.Get<Transform>(entity).position.y,
-	                    registry.Get<Transform>(entity).position.z, position.x, position.y, position.z, radius);
 	auto* wallHug = registry.TryGet<WallHug>(entity);
 	auto* action = registry.TryGet<LivingAction>(entity);
 	// The pathfinder indexes its grid without bounds checks: only walk to targets on the map.
@@ -782,12 +828,12 @@ void MoveGameThing() // 033 MOVE_GAME_THING
 		// Usually a target measured from an object CREATE doesn't make yet (its position reads as 0, 0).
 		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "MOVE_GAME_THING {} from ({:.0f}, {:.0f}) to ({:.0f}, {:.0f}) is off the map: ignored",
 		                   objId, from.x, from.z, position.x, position.z);
-		return;
+		return false;
 	}
 	if (wallHug == nullptr || action == nullptr)
 	{
 		registry.Get<Transform>(entity).position = position; // nothing walks it: place it
-		return;
+		return true;
 	}
 
 	registry.AssignOrReplace<ScriptMove>(entity, position, 0u, false);
@@ -797,6 +843,51 @@ void MoveGameThing() // 033 MOVE_GAME_THING
 	                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
 	registry.Assign<MoveStateLinearTag>(entity);
 	Locator::livingActionSystem::value().VillagerSetState(*action, LivingAction::Index::Top, VillagerStates::MoveToPos, true);
+	return true;
+}
+
+// A flock moves as a group: its members (not the leader, who is moved on his own) gather around the
+// position. Re-sent every turn by scripts that keep a flock with its leader, so a member is only re-routed
+// once the target has moved on or it has stopped.
+void MoveFlockTo(uint32_t flockId, Flock& flock, const glm::vec3& position)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	if (auto* transform = registry.TryGet<Transform>(static_cast<entt::entity>(flockId)))
+	{
+		transform->position = position;
+	}
+	constexpr float k_Spacing = 3.0f;
+	constexpr float k_Retarget = 4.0f;
+	size_t index = 0;
+	for (const auto member : flock.members)
+	{
+		if (member == flock.leader)
+		{
+			continue;
+		}
+		const float angle = glm::two_pi<float>() * static_cast<float>(index++) / 5.0f + 2.0f;
+		auto target = position + glm::vec3(std::cos(angle), 0.0f, std::sin(angle)) * k_Spacing;
+		target.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(target.x, target.z));
+		const auto* move = registry.TryGet<ScriptMove>(static_cast<entt::entity>(member));
+		if (move == nullptr || move->arrived || glm::distance(move->target, target) > k_Retarget)
+		{
+			MoveThingTo(member, target);
+		}
+	}
+}
+} // namespace
+
+void MoveGameThing() // 033 MOVE_GAME_THING
+{
+	[[maybe_unused]] const auto radius = Popf();
+	const auto position = PopVec();
+	const auto objId = Pop().uintVal;
+	if (auto flock = g_flocks.find(objId); flock != g_flocks.end())
+	{
+		MoveFlockTo(objId, flock->second, position);
+		return;
+	}
+	MoveThingTo(objId, position);
 }
 
 void SetFocus() // 034 SET_FOCUS
@@ -827,53 +918,69 @@ void HasCameraArrived() // 035 HAS_CAMERA_ARRIVED
 
 void FlockCreate() // 036 FLOCK_CREATE
 {
-	[[maybe_unused]] const auto position = PopVec();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto position = PopVec();
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = registry.Create();
+	registry.Assign<Transform>(entity, position, glm::mat3(1.0f), glm::vec3(1.0f));
+	g_flocks[static_cast<uint32_t>(entity)] = {};
+	Pusho(static_cast<uint32_t>(entity));
 }
 
 void FlockAttach() // 037 FLOCK_ATTACH
 {
-	[[maybe_unused]] const auto asLeader = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto flock = Pop().uintVal;
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto asLeader = static_cast<bool>(Pop().intVal);
+	const auto flockId = Pop().uintVal;
+	const auto obj = Pop().uintVal;
+	if (auto flock = g_flocks.find(flockId); flock != g_flocks.end() && obj != 0)
+	{
+		auto& members = flock->second.members;
+		if (std::find(members.begin(), members.end(), obj) == members.end())
+		{
+			members.push_back(obj);
+		}
+		if (asLeader)
+		{
+			flock->second.leader = obj;
+		}
+	}
+	Pusho(obj);
 }
 
 void FlockDetach() // 038 FLOCK_DETACH
 {
-	[[maybe_unused]] const auto flock = Pop().uintVal;
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto flockId = Pop().uintVal;
+	const auto obj = Pop().uintVal;
+	if (auto flock = g_flocks.find(flockId); flock != g_flocks.end())
+	{
+		auto& members = flock->second.members;
+		members.erase(std::remove(members.begin(), members.end(), obj), members.end());
+		if (flock->second.leader == obj)
+		{
+			flock->second.leader = 0;
+		}
+	}
+	Pusho(obj);
 }
 
 void FlockDisband() // 039 FLOCK_DISBAND
 {
-	[[maybe_unused]] const auto flock = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	g_flocks.erase(Pop().uintVal);
 }
 
 void IdSize() // 040 ID_SIZE
 {
-	[[maybe_unused]] const auto container = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	const auto container = Pop().uintVal;
+	const auto flock = g_flocks.find(container);
+	Pushf(flock != g_flocks.end() ? static_cast<float>(flock->second.members.size()) : 0.0f);
 }
 
 void FlockMember() // 041 FLOCK_MEMBER
 {
-	[[maybe_unused]] const auto flock = Pop().uintVal;
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const auto flockId = Pop().uintVal;
+	const auto obj = Pop().uintVal;
+	const auto flock = g_flocks.find(flockId);
+	Pushb(flock != g_flocks.end() &&
+	      std::find(flock->second.members.begin(), flock->second.members.end(), obj) != flock->second.members.end());
 }
 
 void GetHandPosition() // 042 GET_HAND_POSITION
@@ -2091,15 +2198,144 @@ void SetTarget() // 176 SET_TARGET
 	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
+// Tracks ("Track<N>" in camera.edt, where runblack.exe's WALK_PATH looks them up) are camera paths: a
+// camera spline and a focus spline, each n keyframes with two Bezier control points between keys. A
+// track of n keys is 76 + 88n bytes: camera keys at +40, focus keys at +76+44n, each followed by its
+// 2(n-1) control points. Livings walk the focus curve, which lies on the ground.
+std::vector<glm::vec3> LoadTrackGround(int32_t track)
+{
+	static std::unordered_map<int32_t, std::vector<glm::vec3>> cache;
+	if (const auto it = cache.find(track); it != cache.end())
+	{
+		return it->second;
+	}
+	auto& fileSystem = Locator::filesystem::value();
+	std::vector<glm::vec3> curve;
+	std::vector<uint8_t> data;
+	try
+	{
+		data = fileSystem.ReadAll(fileSystem.GetPath<openblack::filesystem::Path::Data>() / "camera.edt");
+	}
+	catch (const std::exception& e)
+	{
+		SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "Could not read camera.edt: {}", e.what());
+	}
+	const std::string key = "Track" + std::to_string(track);
+	for (size_t i = 0; i + 36 < data.size(); ++i)
+	{
+		if (std::memcmp(&data[i], key.c_str(), key.size() + 1) != 0)
+		{
+			continue;
+		}
+		uint32_t length;
+		std::memcpy(&length, &data[i + 32], sizeof(length));
+		const uint8_t* body = &data[i + 36];
+		uint32_t n;
+		std::memcpy(&n, body + 8, sizeof(n));
+		if (n < 2 || i + 36 + length > data.size() || length != 76 + 88 * n)
+		{
+			continue;
+		}
+		auto vec = [&](size_t at) {
+			glm::vec3 v;
+			std::memcpy(&v, body + at, sizeof(v));
+			return v;
+		};
+		const size_t keys = 76 + 44 * n;
+		const size_t controls = keys + 12 * n;
+		constexpr int k_Samples = 12;
+		for (uint32_t k = 0; k + 1 < n; ++k)
+		{
+			const auto p0 = vec(keys + 12 * k);
+			const auto c0 = vec(controls + 24 * k);
+			const auto c1 = vec(controls + 24 * k + 12);
+			const auto p1 = vec(keys + 12 * (k + 1));
+			for (int j = (k == 0 ? 0 : 1); j <= k_Samples; ++j)
+			{
+				const float t = static_cast<float>(j) / k_Samples;
+				const float u = 1.0f - t;
+				curve.push_back(u * u * u * p0 + 3.0f * u * u * t * c0 + 3.0f * u * t * t * c1 + t * t * t * p1);
+			}
+		}
+		break;
+	}
+	if (curve.empty())
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "Track {} not found in camera.edt", track);
+	}
+	cache[track] = curve;
+	return curve;
+}
+
 void WalkPath() // 177 WALK_PATH
 {
-	[[maybe_unused]] const auto valTo = Popf();
-	[[maybe_unused]] const auto valFrom = Popf();
-	[[maybe_unused]] const auto camera_enum = Pop().intVal;
-	[[maybe_unused]] const auto forward = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto valTo = Popf();
+	const auto valFrom = Popf();
+	const auto track = Pop().intVal;
+	const auto forward = static_cast<bool>(Pop().intVal);
+	const auto object = Pop().uintVal;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	auto curve = LoadTrackGround(track);
+	if (object == 0 || !registry.Valid(entity) || !registry.AllOf<Transform>(entity) || curve.size() < 2)
+	{
+		return;
+	}
+	ScriptWalk walk;
+	walk.lengths.push_back(0.0f);
+	for (size_t i = 1; i < curve.size(); ++i)
+	{
+		walk.lengths.push_back(walk.lengths.back() + glm::distance(curve[i - 1], curve[i]));
+	}
+	walk.points = std::move(curve);
+	const float total = walk.lengths.back();
+	walk.at = std::clamp(forward ? valFrom : 1.0f - valFrom, 0.0f, 1.0f) * total;
+	walk.end = std::clamp(forward ? valTo : 1.0f - valTo, 0.0f, 1.0f) * total;
+	HoldForScript(entity, walk.points.back());
+	g_walks[object] = std::move(walk);
+}
+
+void UpdateScriptTurn()
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	for (auto it = g_walks.begin(); it != g_walks.end();)
+	{
+		const auto entity = static_cast<entt::entity>(it->first);
+		auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+		if (transform == nullptr)
+		{
+			it = g_walks.erase(it);
+			continue;
+		}
+		auto& walk = it->second;
+		const float step = k_WalkUnitsPerTurn * std::max(SpeedFactor(it->first), 0.0f);
+		walk.at = walk.end >= walk.at ? std::min(walk.at + step, walk.end) : std::max(walk.at - step, walk.end);
+
+		const auto next = std::upper_bound(walk.lengths.begin(), walk.lengths.end(), walk.at);
+		const size_t i = std::clamp<size_t>(static_cast<size_t>(next - walk.lengths.begin()), 1, walk.points.size() - 1);
+		const float span = walk.lengths[i] - walk.lengths[i - 1];
+		const float t = span > 0.0f ? (walk.at - walk.lengths[i - 1]) / span : 1.0f;
+		auto position = glm::mix(walk.points[i - 1], walk.points[i], std::clamp(t, 0.0f, 1.0f));
+		position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		if (step > 0.0f)
+		{
+			FaceTowards(*transform, walk.end >= walk.at ? walk.points[i] : walk.points[i - 1]);
+		}
+		transform->position = position;
+		// Keep the pathfinder's goal with the walker: it puts any living standing at its goal back onto it
+		// (a final step), which would pull this one back to wherever it last walked to.
+		if (auto* wallHug = registry.TryGet<WallHug>(entity))
+		{
+			wallHug->goal = glm::vec2(position.x, position.z);
+		}
+		registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
+		                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
+		if (auto* move = registry.TryGet<ScriptMove>(entity))
+		{
+			move->target = position; // stands here when the walk ends
+		}
+		it = walk.at == walk.end ? g_walks.erase(it) : std::next(it);
+	}
 }
 
 void FocusAndPositionFollow() // 178 FOCUS_AND_POSITION_FOLLOW

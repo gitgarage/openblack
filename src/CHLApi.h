@@ -47,4 +47,7 @@ void NotifyGameThingClicked(uint32_t entity);
 // drives the camera and returns where the hand is on screen (0..1), which replaces the mouse.
 std::optional<glm::vec2> UpdateHandDemo();
 
+// Once per game turn: moves livings walking a track (WALK_PATH) at their script speed.
+void UpdateScriptTurn();
+
 } // namespace openblack::chlapi
