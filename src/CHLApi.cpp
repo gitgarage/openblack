@@ -10,6 +10,8 @@
 #include "CHLApi.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -49,6 +51,7 @@
 #include "ECS/Registry.h"
 #include "ECS/Systems/HandSystemInterface.h"
 #include "Enums.h"
+#include "FileSystem/FileSystemInterface.h"
 #include "Locator.h"
 #include "ScriptHeaders/ScriptEnums.h"
 
@@ -248,6 +251,11 @@ std::chrono::steady_clock::time_point g_lastTextShown {};
 // SET_SCRIPT_ULONG animations, by object: when each counts as played (see SetScriptUlong).
 constexpr std::chrono::milliseconds k_AnimationPlayTime {1500};
 std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_animationEnd;
+// Hand demo timing (see PlayHandDemo).
+constexpr std::chrono::seconds k_HandDemoLength {12};
+constexpr std::chrono::seconds k_HandDemoTriggerInterval {3};
+std::chrono::steady_clock::time_point g_handDemoEnd {};
+std::chrono::steady_clock::time_point g_handDemoNextTrigger {};
 // When the current SET_FADE / SET_FADE_IN finishes.
 std::chrono::steady_clock::time_point g_fadeEnd {};
 
@@ -1110,31 +1118,90 @@ void CreatureSetDesireMaximum() // 080 CREATURE_SET_DESIRE_MAXIMUM
 	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
-// The table the camera enums index has not been found in the game data yet. Until it is, answer with
-// where the camera is now: an on-map point near the scene, so scripted walks to it complete.
-void PushCameraEnumStandIn(const char* function, int32_t cameraEnum, const glm::vec3& standIn)
+// The camera enums (CONVERT_CAMERA_POSITION/FOCUS) are records in Data/camera.edt, the camera editor's
+// store: each is a 32-byte key "Cam<enum>", a uint32 length (32), then position xyz, focus xyz and two
+// floats this doesn't use. Found by reading runblack.exe: its lookup does sprintf("Cam%d") and a get on
+// that file.
+struct CameraEnumEntry
 {
-	static std::set<std::pair<std::string, int32_t>> warned;
-	if (warned.emplace(function, cameraEnum).second)
+	glm::vec3 position;
+	glm::vec3 focus;
+};
+
+const std::unordered_map<int32_t, CameraEnumEntry>& CameraEnumTable()
+{
+	static std::unordered_map<int32_t, CameraEnumEntry> table;
+	static bool loaded = false;
+	if (loaded)
 	{
-		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "{}({}): camera enum table not loaded, using the camera's current point",
-		                   function, cameraEnum);
+		return table;
 	}
-	Pushv(standIn.x);
-	Pushv(standIn.y);
-	Pushv(standIn.z);
+	loaded = true;
+	std::vector<uint8_t> data;
+	try
+	{
+		auto& fileSystem = Locator::filesystem::value();
+		data = fileSystem.ReadAll(fileSystem.GetPath<openblack::filesystem::Path::Data>() / "camera.edt");
+	}
+	catch (const std::exception& e)
+	{
+		SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "Could not read camera.edt: {}", e.what());
+		return table;
+	}
+	constexpr size_t k_KeySize = 32;
+	constexpr size_t k_RecordSize = k_KeySize + sizeof(uint32_t) + 6 * sizeof(float);
+	for (size_t i = 0; i + k_RecordSize <= data.size(); ++i)
+	{
+		if (data[i] != 'C' || data[i + 1] != 'a' || data[i + 2] != 'm')
+		{
+			continue;
+		}
+		size_t end = i + 3;
+		int32_t id = 0;
+		while (end < i + k_KeySize && data[end] >= '0' && data[end] <= '9')
+		{
+			id = id * 10 + (data[end++] - '0');
+		}
+		uint32_t length;
+		std::memcpy(&length, &data[i + k_KeySize], sizeof(length));
+		if (end == i + 3 || data[end] != 0 || length != 32)
+		{
+			continue;
+		}
+		std::array<float, 6> v {};
+		std::memcpy(v.data(), &data[i + k_KeySize + sizeof(uint32_t)], sizeof(v));
+		table[id] = {{v[0], v[1], v[2]}, {v[3], v[4], v[5]}};
+		i += k_RecordSize - 1;
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Loaded {} camera enums from camera.edt", table.size());
+	return table;
+}
+
+void PushCameraEnum(const char* function, int32_t cameraEnum, bool focus)
+{
+	glm::vec3 result(0.0f);
+	const auto& table = CameraEnumTable();
+	if (const auto it = table.find(cameraEnum); it != table.end())
+	{
+		result = focus ? it->second.focus : it->second.position;
+	}
+	else
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "{}({}): no such camera enum", function, cameraEnum);
+	}
+	Pushv(result.x);
+	Pushv(result.y);
+	Pushv(result.z);
 }
 
 void ConvertCameraPosition() // 081 CONVERT_CAMERA_POSITION
 {
-	const auto cameraEnum = Pop().intVal;
-	PushCameraEnumStandIn("CONVERT_CAMERA_POSITION", cameraEnum, Locator::camera::value().GetOrigin());
+	PushCameraEnum("CONVERT_CAMERA_POSITION", Pop().intVal, false);
 }
 
 void ConvertCameraFocus() // 082 CONVERT_CAMERA_FOCUS
 {
-	const auto cameraEnum = Pop().intVal;
-	PushCameraEnumStandIn("CONVERT_CAMERA_FOCUS", cameraEnum, Locator::camera::value().GetFocus());
+	PushCameraEnum("CONVERT_CAMERA_FOCUS", Pop().intVal, true);
 }
 
 void CreatureSetPlayer() // 083 CREATURE_SET_PLAYER
@@ -2687,16 +2754,18 @@ void PlayHandDemo() // 266 PLAY_HAND_DEMO
 {
 	[[maybe_unused]] const auto withoutHandModify = static_cast<bool>(Pop().intVal);
 	[[maybe_unused]] const auto withPause = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto string = PopString();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto string = PopString();
+	// TODO: play the recording (Data/HandDemo/*.hnd). Until then only its timing is kept: the triggers
+	// scripts wait on come at a steady pace and the demo ends after a fixed length.
+	SPDLOG_LOGGER_DEBUG(spdlog::get("scripting"), "PLAY_HAND_DEMO {} (timing only)", string);
+	const auto now = std::chrono::steady_clock::now();
+	g_handDemoEnd = now + k_HandDemoLength;
+	g_handDemoNextTrigger = now + k_HandDemoTriggerInterval;
 }
 
 void IsPlayingHandDemo() // 267 IS_PLAYING_HAND_DEMO
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	Pushb(std::chrono::steady_clock::now() < g_handDemoEnd);
 }
 
 void GetArsePosition() // 268 GET_ARSE_POSITION
@@ -3270,9 +3339,13 @@ void LastMusicLine() // 335 LAST_MUSIC_LINE
 
 void HandDemoTrigger() // 336 HAND_DEMO_TRIGGER
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const auto now = std::chrono::steady_clock::now();
+	const bool triggered = now >= g_handDemoNextTrigger;
+	if (triggered)
+	{
+		g_handDemoNextTrigger = now + k_HandDemoTriggerInterval;
+	}
+	Pushb(triggered);
 }
 
 void GetBellyPosition() // 337 GET_BELLY_POSITION
