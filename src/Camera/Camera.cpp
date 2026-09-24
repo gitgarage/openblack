@@ -113,6 +113,14 @@ Camera& Camera::SetProjectionMatrixPerspective(float xFov, float aspect, float n
 
 Camera& Camera::SetInterpolatorTime(std::chrono::microseconds t)
 {
+	// Never past the end of the move: GetOrigin/GetFocus evaluate the cubic at t = time/duration,
+	// and past t = 1 it extrapolates without bound. The player model restarts the interpolation
+	// every few frames so it never got there; a finished scripted move did, and the camera zoomed
+	// out forever (2026-09-24).
+	if (_interpolatorDuration.count() > 0 && t > _interpolatorDuration)
+	{
+		t = _interpolatorDuration;
+	}
 	_interpolatorTime = t;
 
 	return *this;

@@ -281,7 +281,10 @@ bool Game::GameLogicLoop() noexcept
 	lhvm.LookIn(lhvm::ScriptType::All);
 	if (std::getenv("OPENBLACK_TRACE_VM") != nullptr && _turnCount % 50 == 0) // temporary diagnostic
 	{
-		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "VM turn {}: {} task(s)", _turnCount, lhvm.GetTasks().size());
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "VM turn {}: {} task(s), camera origin ({:.0f}, {:.0f}, {:.0f}){}",
+		                   _turnCount, lhvm.GetTasks().size(), Locator::camera::value().GetOrigin().x,
+		                   Locator::camera::value().GetOrigin().y, Locator::camera::value().GetOrigin().z,
+		                   Locator::camera::value().IsScriptControlled() ? " scripted" : "");
 		for (const auto& [id, task] : lhvm.GetTasks())
 		{
 			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "  task {} '{}' ip {} waiting {} inHandler {} sleeping {} stop {}", id,
