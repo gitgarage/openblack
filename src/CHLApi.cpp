@@ -35,6 +35,7 @@
 #include <spdlog/spdlog.h>
 
 #include "3D/LandIslandInterface.h"
+#include "3D/SkyInterface.h"
 #include "3D/TempleInteriorInterface.h"
 #include "Camera/Camera.h"
 #include "ECS/Archetypes/MobileStaticArchetype.h"
@@ -49,12 +50,14 @@
 #include "ECS/Components/Tree.h"
 #include "ECS/Components/Villager.h"
 #include "ECS/Components/LivingAction.h"
+#include "ECS/Components/Mesh.h"
 #include "ECS/Components/WallHug.h"
 #include "ECS/Systems/LivingActionSystemInterface.h"
 #include "ECS/Registry.h"
 #include "ECS/Systems/HandSystemInterface.h"
 #include "Enums.h"
 #include "FileSystem/FileSystemInterface.h"
+#include "InfoConstants.h"
 #include "Locator.h"
 #include "ScriptHeaders/ScriptEnums.h"
 
@@ -541,10 +544,10 @@ enum class Prop : int32_t
 	Health = 1,
 	Angle = 2,
 	Scale = 8,
-	Age = 15,
-	XPos = 22,
-	YPos = 23,
-	ZPos = 24,
+	Age = 16, // one more entry than openblack's ObjectPropertyType before here: scripts set 16 to ages (3-33)
+	XPos = 23,
+	YPos = 24,
+	ZPos = 25,
 };
 
 std::unordered_map<uint64_t, float> g_objectProperties;
@@ -640,7 +643,14 @@ void SetProperty() // 022 SET_PROPERTY
 	case Prop::Age:
 		if (villager != nullptr)
 		{
+			using openblack::ecs::components::Villager;
 			villager->age = static_cast<uint32_t>(std::max(value, 0.0f));
+			villager->lifeStage = villager->age < 18 ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
+			if (auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(entity))
+			{
+				const auto type = openblack::GVillagerInfo::Find(villager->tribe, villager->number);
+				mesh->id = VillagerArchetype::MeshResource(type, villager->age);
+			}
 		}
 		break;
 	case Prop::XPos:
@@ -753,7 +763,7 @@ void SetWidescreen() // 032 SET_WIDESCREEN
 	Locator::camera::value().SetWidescreen(enabled);
 }
 
-// Script walks (WALK_PATH) and flocks (FLOCK_*), updated once per game turn by UpdateScriptTurn.
+// Script walks (WALK_PATH) and flocks (FLOCK_*), moved every frame by UpdateScriptFrame.
 namespace
 {
 struct ScriptWalk
@@ -773,7 +783,10 @@ struct Flock
 std::unordered_map<uint32_t, Flock> g_flocks;
 
 constexpr int32_t k_SpeedProperty = 11; // what scripts set to make livings run (0.9), walk (0.4) or stop (0)
-constexpr float k_WalkUnitsPerTurn = 1.2f; // at speed 1: ~12 units/s, a family run along a track
+constexpr float k_UnitsPerSecond = 5.0f; // at speed 1: a family jog along a track
+
+// Flock members following their leader: moved every frame straight to their spot by the leader.
+std::unordered_map<uint32_t, glm::vec3> g_followers;
 
 float SpeedFactor(uint32_t object)
 {
@@ -812,7 +825,8 @@ bool MoveThingTo(uint32_t objId, const glm::vec3& position)
 	{
 		return false;
 	}
-	g_walks.erase(objId); // a move replaces any track walk
+	g_walks.erase(objId); // a move replaces any track walk or following
+	g_followers.erase(objId);
 
 	auto* wallHug = registry.TryGet<WallHug>(entity);
 	auto* action = registry.TryGet<LivingAction>(entity);
@@ -846,9 +860,9 @@ bool MoveThingTo(uint32_t objId, const glm::vec3& position)
 	return true;
 }
 
-// A flock moves as a group: its members (not the leader, who is moved on his own) gather around the
-// position. Re-sent every turn by scripts that keep a flock with its leader, so a member is only re-routed
-// once the target has moved on or it has stopped.
+// A flock moves as a group: its members (not the leader, who is moved on his own) gather round the
+// position. Scripts that keep a flock with its leader re-send this every turn; the members then close in
+// smoothly every frame (UpdateScriptFrame) rather than being re-routed through the pathfinder each turn.
 void MoveFlockTo(uint32_t flockId, Flock& flock, const glm::vec3& position)
 {
 	auto& registry = Locator::entitiesRegistry::value();
@@ -857,22 +871,22 @@ void MoveFlockTo(uint32_t flockId, Flock& flock, const glm::vec3& position)
 		transform->position = position;
 	}
 	constexpr float k_Spacing = 3.0f;
-	constexpr float k_Retarget = 4.0f;
 	size_t index = 0;
 	for (const auto member : flock.members)
 	{
-		if (member == flock.leader)
+		const auto entity = static_cast<entt::entity>(member);
+		if (member == flock.leader || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
 		{
 			continue;
 		}
 		const float angle = glm::two_pi<float>() * static_cast<float>(index++) / 5.0f + 2.0f;
-		auto target = position + glm::vec3(std::cos(angle), 0.0f, std::sin(angle)) * k_Spacing;
-		target.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(target.x, target.z));
-		const auto* move = registry.TryGet<ScriptMove>(static_cast<entt::entity>(member));
-		if (move == nullptr || move->arrived || glm::distance(move->target, target) > k_Retarget)
+		const auto target = position + glm::vec3(std::cos(angle), 0.0f, std::sin(angle)) * k_Spacing;
+		if (g_followers.find(member) == g_followers.end())
 		{
-			MoveThingTo(member, target);
+			g_walks.erase(member);
+			HoldForScript(entity, registry.Get<Transform>(entity).position);
 		}
+		g_followers[member] = target;
 	}
 }
 } // namespace
@@ -1650,18 +1664,35 @@ void RemoveReference() // 111 REMOVE_REFERENCE
 	Pusho(objId);
 }
 
+// The game clock, in hours (0-24), which the sky's light follows. MOVE_GAME_TIME eases it to an hour.
+namespace
+{
+float g_gameHour = 12.0f;
+struct GameTimeMove
+{
+	float from;
+	float to;
+	float seconds;
+	float elapsed;
+};
+std::optional<GameTimeMove> g_gameTimeMove;
+
+void ApplyGameHour(float hour)
+{
+	g_gameHour = std::fmod(std::fmod(hour, 24.0f) + 24.0f, 24.0f);
+	Locator::skySystem::value().SetTime(g_gameHour);
+}
+} // namespace
+
 void SetGameTime() // 112 SET_GAME_TIME
 {
-	[[maybe_unused]] const auto time = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	g_gameTimeMove.reset();
+	ApplyGameHour(Popf());
 }
 
 void GetGameTime() // 113 GET_GAME_TIME
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	Pushf(g_gameHour);
 }
 
 void GetRealTime() // 114 GET_REAL_TIME
@@ -2295,8 +2326,33 @@ void WalkPath() // 177 WALK_PATH
 	g_walks[object] = std::move(walk);
 }
 
-void UpdateScriptTurn()
+namespace
 {
+// Put a script-moved living at a position on the ground, facing where it is heading, and keep the
+// pathfinder's goal with it: the pathfinder puts any living standing at its goal back onto it (a final
+// step), which would pull this one back to wherever it last stopped.
+void PlaceMover(entt::entity entity, Transform& transform, glm::vec3 position, const glm::vec3& heading)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+	FaceTowards(transform, heading);
+	transform.position = position;
+	if (auto* wallHug = registry.TryGet<WallHug>(entity))
+	{
+		wallHug->goal = glm::vec2(position.x, position.z);
+	}
+	registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
+	                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
+	if (auto* move = registry.TryGet<ScriptMove>(entity))
+	{
+		move->target = position; // stands here when it stops
+	}
+}
+} // namespace
+
+void UpdateScriptFrame(std::chrono::microseconds dt)
+{
+	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
 	auto& registry = Locator::entitiesRegistry::value();
 	for (auto it = g_walks.begin(); it != g_walks.end();)
 	{
@@ -2308,33 +2364,52 @@ void UpdateScriptTurn()
 			continue;
 		}
 		auto& walk = it->second;
-		const float step = k_WalkUnitsPerTurn * std::max(SpeedFactor(it->first), 0.0f);
-		walk.at = walk.end >= walk.at ? std::min(walk.at + step, walk.end) : std::max(walk.at - step, walk.end);
-
-		const auto next = std::upper_bound(walk.lengths.begin(), walk.lengths.end(), walk.at);
-		const size_t i = std::clamp<size_t>(static_cast<size_t>(next - walk.lengths.begin()), 1, walk.points.size() - 1);
-		const float span = walk.lengths[i] - walk.lengths[i - 1];
-		const float t = span > 0.0f ? (walk.at - walk.lengths[i - 1]) / span : 1.0f;
-		auto position = glm::mix(walk.points[i - 1], walk.points[i], std::clamp(t, 0.0f, 1.0f));
-		position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		const float step = k_UnitsPerSecond * std::max(SpeedFactor(it->first), 0.0f) * seconds;
 		if (step > 0.0f)
 		{
-			FaceTowards(*transform, walk.end >= walk.at ? walk.points[i] : walk.points[i - 1]);
-		}
-		transform->position = position;
-		// Keep the pathfinder's goal with the walker: it puts any living standing at its goal back onto it
-		// (a final step), which would pull this one back to wherever it last walked to.
-		if (auto* wallHug = registry.TryGet<WallHug>(entity))
-		{
-			wallHug->goal = glm::vec2(position.x, position.z);
-		}
-		registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
-		                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
-		if (auto* move = registry.TryGet<ScriptMove>(entity))
-		{
-			move->target = position; // stands here when the walk ends
+			walk.at = walk.end >= walk.at ? std::min(walk.at + step, walk.end) : std::max(walk.at - step, walk.end);
+			const auto next = std::upper_bound(walk.lengths.begin(), walk.lengths.end(), walk.at);
+			const size_t i = std::clamp<size_t>(static_cast<size_t>(next - walk.lengths.begin()), 1, walk.points.size() - 1);
+			const float span = walk.lengths[i] - walk.lengths[i - 1];
+			const float t = span > 0.0f ? (walk.at - walk.lengths[i - 1]) / span : 1.0f;
+			const auto position = glm::mix(walk.points[i - 1], walk.points[i], std::clamp(t, 0.0f, 1.0f));
+			PlaceMover(entity, *transform, position, walk.end >= walk.at ? walk.points[i] : walk.points[i - 1]);
 		}
 		it = walk.at == walk.end ? g_walks.erase(it) : std::next(it);
+	}
+
+	if (g_gameTimeMove)
+	{
+		auto& move = *g_gameTimeMove;
+		move.elapsed += seconds;
+		const float t = move.seconds > 0.0f ? std::min(move.elapsed / move.seconds, 1.0f) : 1.0f;
+		ApplyGameHour(glm::mix(move.from, move.to, t));
+		if (t >= 1.0f)
+		{
+			g_gameTimeMove.reset();
+		}
+	}
+
+	for (auto it = g_followers.begin(); it != g_followers.end();)
+	{
+		const auto entity = static_cast<entt::entity>(it->first);
+		auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+		if (transform == nullptr)
+		{
+			it = g_followers.erase(it);
+			continue;
+		}
+		const auto toTarget = glm::vec2(it->second.x - transform->position.x, it->second.z - transform->position.z);
+		const float distance = glm::length(toTarget);
+		// Close in at up to a run, faster when far behind so a member never loses the leader.
+		const float speed = k_UnitsPerSecond * std::clamp(distance / 4.0f, 0.0f, 1.5f);
+		if (distance > 0.05f)
+		{
+			const float step = std::min(distance, speed * seconds);
+			const auto position = transform->position + glm::vec3(toTarget.x, 0.0f, toTarget.y) / distance * step;
+			PlaceMover(entity, *transform, position, it->second);
+		}
+		++it;
 	}
 }
 
@@ -3465,10 +3540,15 @@ void GameTimeOnOff() // 288 GAME_TIME_ON_OFF
 
 void MoveGameTime() // 289 MOVE_GAME_TIME
 {
-	[[maybe_unused]] const auto duration = Popf();
-	[[maybe_unused]] const auto hourOfTheDay = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto duration = Popf();
+	const auto hourOfTheDay = Popf();
+	// Forwards round the clock: 23 -> 10 passes through midnight.
+	float to = hourOfTheDay;
+	while (to < g_gameHour)
+	{
+		to += 24.0f;
+	}
+	g_gameTimeMove = GameTimeMove {g_gameHour, to, std::max(duration, 0.0f), 0.0f};
 }
 
 void SetHighGraphicsDetail() // 290 SET_HIGH_GRAPHICS_DETAIL

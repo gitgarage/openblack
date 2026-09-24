@@ -58,10 +58,16 @@ entt::entity VillagerArchetype::Create([[maybe_unused]] const glm::vec3& abodePo
 	registry.Assign<Villager>(entity, health, static_cast<uint32_t>(age), hunger, lifeStage, sex, info.tribeType,
 	                          info.villagerNumber, task, town, abode);
 	registry.Assign<WallHug>(entity, glm::vec2(), glm::vec2(), 0.0f, GetSpeedStateSpeed(info.speedGroup.speedDefault));
-	const auto resourceId = resources::HashIdentifier(info.highDetail);
-	registry.Assign<Mesh>(entity, resourceId, static_cast<int8_t>(0), static_cast<int8_t>(0));
+	registry.Assign<Mesh>(entity, MeshResource(type, age), static_cast<int8_t>(0), static_cast<int8_t>(0));
 	auto turnsSinceStateChange = Locator::rng::value().NextValue<uint16_t>(1, 500);
 	registry.Assign<LivingAction>(entity, VillagerStates::Created, turnsSinceStateChange);
 
 	return entity;
+}
+
+entt::id_type VillagerArchetype::MeshResource(VillagerInfo type, uint32_t age)
+{
+	const auto& info = Locator::infoConstants::value().villager.at(static_cast<size_t>(type));
+	const bool child = age < 18 && info.childMeshHigh != MeshId::Dummy;
+	return resources::HashIdentifier(child ? info.childMeshHigh : info.highDetail);
 }

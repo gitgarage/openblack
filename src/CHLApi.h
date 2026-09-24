@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <optional>
 
 #include <glm/vec2.hpp>
@@ -47,7 +48,8 @@ void NotifyGameThingClicked(uint32_t entity);
 // drives the camera and returns where the hand is on screen (0..1), which replaces the mouse.
 std::optional<glm::vec2> UpdateHandDemo();
 
-// Once per game turn: moves livings walking a track (WALK_PATH) at their script speed.
-void UpdateScriptTurn();
+// Every frame the game isn't paused: moves livings walking a track (WALK_PATH) at their script speed,
+// and flock members after their leader, smoothly rather than a step per game turn.
+void UpdateScriptFrame(std::chrono::microseconds dt);
 
 } // namespace openblack::chlapi

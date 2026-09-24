@@ -11,6 +11,15 @@ SAMPLER2D(s3_footprints, 3);
 
 uniform vec4 u_skyAndBump;
 
+// Light colour for the time of day, on the sky's scale: 0 night, 1 dusk, 2 day. The warm dusk and cool
+// night colours are approximations matched by eye to the original game, not values from its data.
+vec3 timeOfDayTint(float skyType)
+{
+	vec3 night = vec3(0.55f, 0.6f, 0.85f);
+	vec3 dusk = vec3(1.0f, 0.66f, 0.44f);
+	return skyType < 1.0f ? mix(night, dusk, skyType) : mix(dusk, vec3(1.0f, 1.0f, 1.0f), skyType - 1.0f);
+}
+
 void main()
 {
 	// unpack uniforms
@@ -56,6 +65,8 @@ void main()
 	// apply light map
 	float skyBightness = skyType / 2.0f;
 	col = col * mix(0.25f, clamp(v_lightLevel * 2.0f, 0.5f, 1.0f), skyBightness);
+
+	col.rgb = col.rgb * timeOfDayTint(skyType);
 
 	gl_FragColor = vec4(col.rgb, v_waterAlpha);
 
