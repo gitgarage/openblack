@@ -520,22 +520,126 @@ void SetScriptUlong() // 020 SET_SCRIPT_ULONG
 	g_animationEnd[object] = std::chrono::steady_clock::now() + k_AnimationPlayTime * std::max(loop, 1);
 }
 
+// Object properties (ObjectPropertyType, B&W1 numbering). The ones openblack models are read from and
+// written to the entity; the rest are remembered per object, so scripts read back what they set.
+namespace
+{
+enum class Prop : int32_t
+{
+	Health = 1,
+	Angle = 2,
+	Scale = 8,
+	Age = 15,
+	XPos = 22,
+	YPos = 23,
+	ZPos = 24,
+};
+
+std::unordered_map<uint64_t, float> g_objectProperties;
+
+uint64_t PropertyKey(uint32_t object, int32_t prop)
+{
+	return (static_cast<uint64_t>(object) << 32) | static_cast<uint32_t>(prop);
+}
+
+float YawDegrees(const glm::mat3& rotation)
+{
+	return glm::degrees(std::atan2(rotation[2][0], rotation[2][2]));
+}
+} // namespace
+
 void GetProperty() // 021 GET_PROPERTY
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	[[maybe_unused]] const auto prop = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushi(0);
+	const auto object = Pop().uintVal;
+	const auto prop = Pop().intVal;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	const bool valid = object != 0 && registry.Valid(entity);
+	const auto* transform = valid ? registry.TryGet<Transform>(entity) : nullptr;
+	const auto* villager = valid ? registry.TryGet<openblack::ecs::components::Villager>(entity) : nullptr;
+
+	float value = 0.0f;
+	if (const auto it = g_objectProperties.find(PropertyKey(object, prop)); it != g_objectProperties.end())
+	{
+		value = it->second;
+	}
+	switch (static_cast<Prop>(prop))
+	{
+	case Prop::Health:
+		value = villager != nullptr ? static_cast<float>(villager->health) / 100.0f : value;
+		break;
+	case Prop::Angle:
+		value = transform != nullptr ? YawDegrees(transform->rotation) : value;
+		break;
+	case Prop::Scale:
+		value = transform != nullptr ? transform->scale.x : value;
+		break;
+	case Prop::Age:
+		value = villager != nullptr ? static_cast<float>(villager->age) : value;
+		break;
+	case Prop::XPos:
+		value = transform != nullptr ? transform->position.x : value;
+		break;
+	case Prop::YPos:
+		value = transform != nullptr ? transform->position.y : value;
+		break;
+	case Prop::ZPos:
+		value = transform != nullptr ? transform->position.z : value;
+		break;
+	}
+	Pushf(value);
 }
 
 void SetProperty() // 022 SET_PROPERTY
 {
-	[[maybe_unused]] const auto val = Popf();
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	[[maybe_unused]] const auto prop = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto value = Popf();
+	const auto object = Pop().uintVal;
+	const auto prop = Pop().intVal;
+	g_objectProperties[PropertyKey(object, prop)] = value;
+
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	if (object == 0 || !registry.Valid(entity))
+	{
+		return;
+	}
+	auto* transform = registry.TryGet<Transform>(entity);
+	auto* villager = registry.TryGet<openblack::ecs::components::Villager>(entity);
+	switch (static_cast<Prop>(prop))
+	{
+	case Prop::Health:
+		if (villager != nullptr)
+		{
+			villager->health = static_cast<uint32_t>(std::clamp(value, 0.0f, 1.0f) * 100.0f);
+		}
+		break;
+	case Prop::Angle:
+		if (transform != nullptr)
+		{
+			transform->rotation = glm::mat3(glm::eulerAngleY(glm::radians(value)));
+		}
+		break;
+	case Prop::Scale:
+		if (transform != nullptr)
+		{
+			transform->scale = glm::vec3(value);
+		}
+		break;
+	case Prop::Age:
+		if (villager != nullptr)
+		{
+			villager->age = static_cast<uint32_t>(std::max(value, 0.0f));
+		}
+		break;
+	case Prop::XPos:
+	case Prop::YPos:
+	case Prop::ZPos:
+		if (transform != nullptr)
+		{
+			transform->position[prop - static_cast<int32_t>(Prop::XPos)] = value;
+		}
+		break;
+	}
 }
 
 void GetPosition() // 023 GET_POSITION
@@ -1498,9 +1602,7 @@ void EndDialogue() // 121 END_DIALOGUE
 
 void IsDialogueReady() // 122 IS_DIALOGUE_READY
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	Pushb(!g_dialogueActive); // scripts check this before START_DIALOGUE
 }
 
 void ChangeWeatherProperties() // 123 CHANGE_WEATHER_PROPERTIES
