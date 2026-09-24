@@ -62,6 +62,10 @@
 #include <spdlog/sinks/android_sink.h>
 #endif
 
+#if defined(__SWITCH__)
+void switchInputFrame();
+#endif
+
 using namespace openblack;
 using namespace openblack::lhscriptx;
 using namespace std::chrono_literals;
@@ -320,6 +324,9 @@ bool Game::Update() noexcept
 		{
 			Locator::gameActionSystem::value().Frame();
 		}
+#if defined(__SWITCH__)
+		switchInputFrame(); // switch-port/switch_input.cpp: Joy-Con as SDL key/mouse events
+#endif
 		SDL_Event e;
 		while (SDL_PollEvent(&e) != 0)
 		{
