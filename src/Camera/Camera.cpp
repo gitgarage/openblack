@@ -274,6 +274,7 @@ Camera& Camera::SetScriptControl(bool enabled)
 
 Camera& Camera::ScriptMoveOrigin(const glm::vec3& target, std::chrono::microseconds duration)
 {
+	++_scriptMoveCount;
 	using namespace std::chrono_literals;
 	const auto zero = glm::zero<glm::vec3>();
 	_scriptOriginTarget = target;
@@ -286,6 +287,7 @@ Camera& Camera::ScriptMoveOrigin(const glm::vec3& target, std::chrono::microseco
 
 Camera& Camera::ScriptMoveFocus(const glm::vec3& target, std::chrono::microseconds duration)
 {
+	++_scriptMoveCount;
 	using namespace std::chrono_literals;
 	const auto zero = glm::zero<glm::vec3>();
 	_scriptFocusTarget = target;

@@ -12,6 +12,9 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <filesystem>
+#include <optional>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -251,11 +254,6 @@ std::chrono::steady_clock::time_point g_lastTextShown {};
 // SET_SCRIPT_ULONG animations, by object: when each counts as played (see SetScriptUlong).
 constexpr std::chrono::milliseconds k_AnimationPlayTime {1500};
 std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_animationEnd;
-// Hand demo timing (see PlayHandDemo).
-constexpr std::chrono::seconds k_HandDemoLength {12};
-constexpr std::chrono::seconds k_HandDemoTriggerInterval {3};
-std::chrono::steady_clock::time_point g_handDemoEnd {};
-std::chrono::steady_clock::time_point g_handDemoNextTrigger {};
 // When the current SET_FADE / SET_FADE_IN finishes.
 std::chrono::steady_clock::time_point g_fadeEnd {};
 
@@ -2865,22 +2863,192 @@ void GetObjectFade() // 265 GET_OBJECT_FADE
 	Pushf(0.0f);
 }
 
+// Hand demos: the tutorials' recorded hand, Data/HandDemo/<name>.hnd. The file is a 0x1c-byte header then
+// 124-byte frames; the fields used here (found by comparing the recordings with the scripts):
+//   +24 / +28   hand screen position, 0..1
+//   +32..+40    camera origin          +44..+52  camera focus
+//   +64         1 on a trigger frame (HAND_DEMO_TRIGGER), where the script shows the next line
+//   +68         time in milliseconds   +96       button event (1 press, 2 release)
+// With pause, the demo holds on each trigger frame until the line shown there has been read.
+namespace
+{
+struct HandDemoFrame
+{
+	uint32_t ms;
+	glm::vec2 screen;
+	glm::vec3 origin;
+	glm::vec3 focus;
+	bool trigger;
+};
+
+struct HandDemo
+{
+	std::vector<HandDemoFrame> frames;
+	bool playing = false;
+	bool withPause = false;
+	size_t frame = 0;
+	float demoMs = 0.0f;
+	std::chrono::steady_clock::time_point lastUpdate {};
+	bool paused = false;
+	std::chrono::steady_clock::time_point pausedAt {};
+	bool triggerPending = false;
+	bool drivesCamera = true;
+	bool cameraWasScripted = false;
+	uint32_t scriptMoveCount = 0;
+} g_handDemo;
+
+std::vector<HandDemoFrame> LoadHandDemo(const std::string& name)
+{
+	auto& fileSystem = Locator::filesystem::value();
+	const auto dir = fileSystem.GetPath<openblack::filesystem::Path::Data>(true) / "HandDemo";
+	auto lower = [](std::string text) {
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+		return text;
+	};
+	const auto wanted = lower(std::filesystem::path(name).stem().string());
+	std::filesystem::path found;
+	std::error_code ec;
+	for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+	{
+		if (lower(entry.path().stem().string()) == wanted && lower(entry.path().extension().string()) == ".hnd")
+		{
+			found = entry.path();
+			break;
+		}
+	}
+	std::vector<HandDemoFrame> frames;
+	if (found.empty())
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "Hand demo {} not found in {}", name, dir.string());
+		return frames;
+	}
+	const auto data = fileSystem.ReadAll(found);
+	constexpr size_t k_Header = 0x1c;
+	constexpr size_t k_Frame = 124;
+	auto f32 = [&](size_t at) {
+		float v;
+		std::memcpy(&v, &data[at], sizeof(v));
+		return v;
+	};
+	auto u32 = [&](size_t at) {
+		uint32_t v;
+		std::memcpy(&v, &data[at], sizeof(v));
+		return v;
+	};
+	for (size_t at = k_Header; at + k_Frame <= data.size(); at += k_Frame)
+	{
+		frames.push_back({u32(at + 68), {f32(at + 24), f32(at + 28)}, {f32(at + 32), f32(at + 36), f32(at + 40)},
+		                  {f32(at + 44), f32(at + 48), f32(at + 52)}, u32(at + 64) == 1});
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Hand demo {}: {} frames, {:.1f} s", found.filename().string(),
+	                   frames.size(), frames.empty() ? 0.0f : (frames.back().ms - frames.front().ms) / 1000.0f);
+	return frames;
+}
+
+void EndHandDemo()
+{
+	if (g_handDemo.playing && g_handDemo.drivesCamera)
+	{
+		Locator::camera::value().SetScriptControl(g_handDemo.cameraWasScripted);
+	}
+	g_handDemo.playing = false;
+	g_handDemo.paused = false;
+}
+} // namespace
+
+std::optional<glm::vec2> UpdateHandDemo()
+{
+	auto& demo = g_handDemo;
+	if (!demo.playing)
+	{
+		return std::nullopt;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	const float dtMs = std::chrono::duration<float, std::milli>(now - demo.lastUpdate).count();
+	demo.lastUpdate = now;
+
+	if (demo.paused)
+	{
+		// Resume once the line the script showed at this trigger has been read (or after a while if it showed none).
+		const bool lineRead = g_lastTextShown > demo.pausedAt && now - g_lastTextShown >= k_TextReadTime;
+		if (!demo.triggerPending && (lineRead || now - demo.pausedAt > std::chrono::seconds(10)))
+		{
+			demo.paused = false;
+		}
+	}
+	else
+	{
+		demo.demoMs += dtMs;
+		const uint32_t target = demo.frames.front().ms + static_cast<uint32_t>(demo.demoMs);
+		while (demo.frame + 1 < demo.frames.size() && demo.frames[demo.frame + 1].ms <= target)
+		{
+			++demo.frame;
+			if (demo.frames[demo.frame].trigger)
+			{
+				demo.triggerPending = true;
+				if (demo.withPause)
+				{
+					demo.paused = true;
+					demo.pausedAt = now;
+					demo.demoMs = static_cast<float>(demo.frames[demo.frame].ms - demo.frames.front().ms);
+					break;
+				}
+			}
+		}
+		if (demo.frame + 1 >= demo.frames.size())
+		{
+			EndHandDemo();
+			return std::nullopt;
+		}
+	}
+
+	// Between the current frame and the next, so the hand moves smoothly at any frame rate.
+	const auto& a = demo.frames[demo.frame];
+	const auto& b = demo.frames[std::min(demo.frame + 1, demo.frames.size() - 1)];
+	const float span = static_cast<float>(b.ms - a.ms);
+	const float t = demo.paused || span <= 0.0f
+	                    ? 0.0f
+	                    : std::clamp((demo.frames.front().ms + demo.demoMs - a.ms) / span, 0.0f, 1.0f);
+
+	auto& camera = Locator::camera::value();
+	if (demo.drivesCamera && camera.GetScriptMoveCount() != demo.scriptMoveCount)
+	{
+		demo.drivesCamera = false; // the script moved the camera itself: leave it to the script
+	}
+	if (demo.drivesCamera)
+	{
+		camera.SetOrigin(glm::mix(a.origin, b.origin, t));
+		camera.SetFocus(glm::mix(a.focus, b.focus, t));
+	}
+	return glm::mix(a.screen, b.screen, t);
+}
+
 void PlayHandDemo() // 266 PLAY_HAND_DEMO
 {
 	[[maybe_unused]] const auto withoutHandModify = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto withPause = static_cast<bool>(Pop().intVal);
-	const auto string = PopString();
-	// TODO: play the recording (Data/HandDemo/*.hnd). Until then only its timing is kept: the triggers
-	// scripts wait on come at a steady pace and the demo ends after a fixed length.
-	SPDLOG_LOGGER_DEBUG(spdlog::get("scripting"), "PLAY_HAND_DEMO {} (timing only)", string);
-	const auto now = std::chrono::steady_clock::now();
-	g_handDemoEnd = now + k_HandDemoLength;
-	g_handDemoNextTrigger = now + k_HandDemoTriggerInterval;
+	const auto withPause = static_cast<bool>(Pop().intVal);
+	const auto name = PopString();
+	EndHandDemo();
+	auto frames = LoadHandDemo(name);
+	if (frames.size() < 2)
+	{
+		return;
+	}
+	auto& camera = Locator::camera::value();
+	g_handDemo = HandDemo {};
+	g_handDemo.frames = std::move(frames);
+	g_handDemo.playing = true;
+	g_handDemo.withPause = withPause;
+	g_handDemo.lastUpdate = std::chrono::steady_clock::now();
+	g_handDemo.cameraWasScripted = camera.IsScriptControlled();
+	camera.SetScriptControl(true); // the player's camera controls would fight the recording
+	g_handDemo.scriptMoveCount = camera.GetScriptMoveCount();
 }
 
 void IsPlayingHandDemo() // 267 IS_PLAYING_HAND_DEMO
 {
-	Pushb(std::chrono::steady_clock::now() < g_handDemoEnd);
+	// A demo held on a trigger counts as not playing: scripts wait on this for it to carry on.
+	Pushb(g_handDemo.playing && !g_handDemo.paused);
 }
 
 void GetArsePosition() // 268 GET_ARSE_POSITION
@@ -3454,12 +3622,8 @@ void LastMusicLine() // 335 LAST_MUSIC_LINE
 
 void HandDemoTrigger() // 336 HAND_DEMO_TRIGGER
 {
-	const auto now = std::chrono::steady_clock::now();
-	const bool triggered = now >= g_handDemoNextTrigger;
-	if (triggered)
-	{
-		g_handDemoNextTrigger = now + k_HandDemoTriggerInterval;
-	}
+	const bool triggered = g_handDemo.triggerPending;
+	g_handDemo.triggerPending = false;
 	Pushb(triggered);
 }
 

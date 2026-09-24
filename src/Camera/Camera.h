@@ -114,6 +114,8 @@ public:
 	Camera& ScriptMoveOrigin(const glm::vec3& target, std::chrono::microseconds duration);
 	Camera& ScriptMoveFocus(const glm::vec3& target, std::chrono::microseconds duration);
 	[[nodiscard]] bool HasScriptMoveArrived() const { return GetInterpolatorT() >= 1.0f; }
+	// Bumped by every ScriptMoveOrigin/Focus, so a hand demo can tell the script took the camera back.
+	[[nodiscard]] uint32_t GetScriptMoveCount() const { return _scriptMoveCount; }
 	Camera& SetWidescreen(bool enabled)
 	{
 		_widescreen = enabled;
@@ -132,6 +134,7 @@ protected:
 	ZoomInterpolator3f _focusInterpolators;
 	// As a value between 0 and _interpolatorDuration
 	bool _scriptControl = false;
+	uint32_t _scriptMoveCount = 0;
 	bool _widescreen = false;
 	glm::vec3 _scriptOriginTarget {0.0f};
 	glm::vec3 _scriptFocusTarget {0.0f};

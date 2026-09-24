@@ -396,8 +396,11 @@ bool Game::Update() noexcept
 			{
 				glm::vec3 rayOrigin;
 				glm::vec3 rayDirection;
-				camera.DeprojectScreenToWorld(static_cast<glm::vec2>(_mousePosition) / static_cast<glm::vec2>(screenSize),
-				                              rayOrigin, rayDirection);
+				// A tutorial hand demo moves the hand in place of the mouse.
+				const auto demoHand = chlapi::UpdateHandDemo();
+				const glm::vec2 handScreen =
+				    demoHand ? *demoHand : static_cast<glm::vec2>(_mousePosition) / static_cast<glm::vec2>(screenSize);
+				camera.DeprojectScreenToWorld(handScreen, rayOrigin, rayDirection);
 				auto& dynamicsSystem = Locator::dynamicsSystem::value();
 
 				if (!glm::any(glm::isnan(rayOrigin) || glm::isnan(rayDirection)))
