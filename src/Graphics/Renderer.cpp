@@ -9,7 +9,7 @@
 
 #include <memory>
 #include <cstdlib>
-#include <thread>
+#include <pthread.h>
 #include <mutex>
 #include <deque>
 #include <condition_variable>
@@ -92,6 +92,10 @@ public:
 
 	void Push(ShotJob job)
 	{
+		if (!_started)
+		{
+			return;
+		}
 		{
 			std::lock_guard lock(_mutex);
 			if (_jobs.size() >= 2)
@@ -106,9 +110,24 @@ public:
 
 private:
 	ShotWriter()
-	    : _thread([this]() { Run(); })
 	{
-		_thread.detach();
+		// PNG encoding wants a large stack: a default-sized thread crashed on the Switch at the first shot.
+		pthread_attr_t attributes;
+		pthread_attr_init(&attributes);
+		pthread_attr_setstacksize(&attributes, 1024 * 1024);
+		pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+		_started = pthread_create(
+		               &_thread, &attributes,
+		               [](void* self) -> void* {
+			               static_cast<ShotWriter*>(self)->Run();
+			               return nullptr;
+		               },
+		               this) == 0;
+		pthread_attr_destroy(&attributes);
+		if (!_started)
+		{
+			SPDLOG_LOGGER_ERROR(spdlog::get("graphics"), "Could not start the screenshot writer thread: screenshots are off");
+		}
 	}
 
 	void Run()
@@ -142,7 +161,8 @@ private:
 	std::mutex _mutex;
 	std::condition_variable _wake;
 	std::deque<ShotJob> _jobs;
-	std::thread _thread;
+	pthread_t _thread {};
+	bool _started = false;
 };
 
 struct BgfxCallback: public bgfx::CallbackI
