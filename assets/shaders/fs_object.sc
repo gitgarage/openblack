@@ -24,6 +24,11 @@ void main()
 	// unpack uniforms
 	float skyType = u_skyAlphaThreshold.x;
 	float alphaThreshold = u_skyAlphaThreshold.y;
+	// A building under construction: only built up to this world height yet (z is 1 when clipping).
+	if (u_skyAlphaThreshold.z > 0.5f && v_position.y > u_skyAlphaThreshold.w)
+	{
+		discard;
+	}
 
 	float skyBightness = skyType / 2.0f;
 

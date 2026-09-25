@@ -435,9 +435,16 @@ namespace
 std::unordered_map<const openblack::graphics::L3DMesh*, float> g_scaffoldShown;
 } // namespace
 
+std::unordered_map<const openblack::graphics::L3DMesh*, float> g_builtHeight;
+
 void openblack::graphics::SetScaffoldShown(const L3DMesh& mesh, float fraction)
 {
 	g_scaffoldShown[&mesh] = glm::clamp(fraction, 0.0f, 1.0f);
+}
+
+void openblack::graphics::SetBuiltHeight(const L3DMesh& mesh, float worldHeight)
+{
+	g_builtHeight[&mesh] = worldHeight;
 }
 
 void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSubMesh& subMesh, const L3DMeshSubmitDesc& desc,
@@ -510,11 +517,14 @@ void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSub
 			}
 			if (!desc.isSky)
 			{
+				// z/w: a building under construction is drawn up to the height it is built to.
+				const auto built = desc.scaffold == L3DMeshSubmitDesc::Scaffold::Without ? g_builtHeight.find(&mesh)
+				                                                                          : g_builtHeight.end();
 				const glm::vec4 u_skyAlphaThreshold = {
 				    Locator::skySystem::value().GetCurrentSkyType(),
 				    prim.thresholdAlpha ? prim.alphaCutoutThreshold : 0.0f,
-				    0.0f,
-				    0.0f,
+				    built != g_builtHeight.end() ? 1.0f : 0.0f,
+				    built != g_builtHeight.end() ? built->second : 0.0f,
 				};
 				desc.program->SetUniformValue("u_skyAlphaThreshold", &u_skyAlphaThreshold);
 			}

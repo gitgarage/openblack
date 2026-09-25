@@ -219,7 +219,7 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 	    },
 	    entt::exclude<TempleInteriorPart>);
 
-	// Buildings under construction: the building rises out of the ground as its scaffold comes down.
+	// Buildings under construction: the building fills in from the bottom up as its scaffold comes down.
 	_renderContext.constructionDrawDescs.clear();
 	uint32_t constructionIndex = animatedIndex; // after the animated entities' uniforms
 	registry.Each<const Mesh, const Transform, const Construction>(
@@ -229,10 +229,12 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 		    auto modelMatrix = glm::mat4(transform.rotation);
 		    modelMatrix = glm::translate(modelMatrix, transform.position * transform.rotation);
 		    modelMatrix = glm::scale(modelMatrix, transform.scale);
-		    const float sink = (1.0f - construction.built) * l3dMesh->GetBoundingBox().Size().y * transform.scale.y;
-		    auto buildingMatrix = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -sink, 0.0f)) * modelMatrix;
+		    // The building appears layer by layer from the bottom up (as the original's does).
+		    const auto box = l3dMesh->GetBoundingBox();
+		    const float bottom = transform.position.y + box.minima.y * transform.scale.y;
+		    graphics::SetBuiltHeight(*l3dMesh, bottom + construction.built * box.Size().y * transform.scale.y);
 		    modelMatrix[0][3] = static_cast<float>(defaultPoseRow(mesh.id));
-		    buildingMatrix[0][3] = modelMatrix[0][3];
+		    const auto buildingMatrix = modelMatrix;
 		    const uint32_t building = constructionIndex++;
 		    const uint32_t scaffold = constructionIndex++;
 		    _renderContext.instanceUniforms[building] = buildingMatrix;
