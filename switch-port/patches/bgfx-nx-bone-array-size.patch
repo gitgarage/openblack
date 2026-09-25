@@ -1,0 +1,21 @@
+diff --git a/src/renderer_gl.cpp b/src/renderer_gl.cpp
+index 89b1038..61fd654 100644
+--- a/src/renderer_gl.cpp
++++ b/src/renderer_gl.cpp
+@@ -5297,6 +5297,16 @@ namespace bgfx { namespace gl
+ 			PredefinedUniform::Enum predefined = nameToPredefinedUniformEnum(name);
+ 			if (PredefinedUniform::Count != predefined)
+ 			{
++#if BX_PLATFORM_NX
++				// Mesa on the Switch reports u_model (the bone array) smaller than the shader declares, and the
++				// upload is clamped to that, so only the first bone reached skinned meshes. Trust bgfx's limit.
++				if (PredefinedUniform::Model == predefined && num < 128) // openblack's vs_object.sc declares 128
++				{
++					bx::printf("bgfx: u_model reported with %d entries (loc %d, piq %d); using %d\n"
++						, int(num), int(loc), int(piqSupported), 128);
++					num = 128;
++				}
++#endif // BX_PLATFORM_NX
+ 				m_predefined[m_numPredefined].m_loc   = loc;
+ 				m_predefined[m_numPredefined].m_count = uint16_t(num);
+ 				m_predefined[m_numPredefined].m_type  = uint8_t(predefined);
