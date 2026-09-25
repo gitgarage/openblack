@@ -29,7 +29,8 @@ void main()
 #if BGFX_SHADER_LANGUAGE_HLSL > 300 || BGFX_SHADER_LANGUAGE_PSSL || BGFX_SHADER_LANGUAGE_SPIRV
 	uint modelIndex = uint(max(0, asint(a_indices.x)));
 #else
-	uint modelIndex = uint(max(0, a_indices.x));
+	// A signed index: the Switch's Mesa treated u_model as a single matrix when it was indexed with a uint.
+	int modelIndex = int(max(0.0, a_indices.x));
 #endif
 
 	v_position = mul(u_model[modelIndex], vec4(a_position.xyz, 1.0f));

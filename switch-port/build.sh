@@ -8,6 +8,9 @@ USBLINK="$(cd ../atlas-usb-link && pwd)"
 for p in switch-port/patches/*.patch; do
   git -C switch-spike/deps/bgfx.cmake/bgfx apply --check "$PWD/$p" 2>/dev/null && git -C switch-spike/deps/bgfx.cmake/bgfx apply "$PWD/$p" && echo "applied $p"
 done
+# Always regenerate the shaders: the container's timestamps left edited .sc files looking older than their
+# compiled headers, so shader changes silently never reached the Switch.
+rm -rf switch-port/build/include/generated/shaders
 docker run --rm -e KEEP_GOING="${KEEP_GOING:-}" --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/work -v "$USBLINK":/atlas-usb-link -w /work devkitpro/devkita64:latest bash -c '
   set -e
   export DEVKITPRO=/opt/devkitpro PATH=/opt/devkitpro/devkitA64/bin:/opt/devkitpro/tools/bin:$PATH
