@@ -49,6 +49,17 @@ struct RenderContext
 	std::vector<glm::mat4> instanceUniforms;
 	/// Stores information for rendering which is prepared at \ref PrepareDraw.
 	std::map<entt::id_type, const InstancedDrawDesc> instancedDrawDescs;
+	/// Animated entities, drawn one at a time with their own bone pose. Each has one instance uniform, at
+	/// `offset`, after those of the instanced draws.
+	struct AnimatedDrawDesc
+	{
+		entt::id_type meshId;
+		uint32_t offset;
+		uint32_t animation;
+		float time;
+	};
+	std::vector<AnimatedDrawDesc> animatedDrawDescs;
+	uint32_t animatedOffset = 0;
 	/// Not an actual vertex buffer, but a dynamic general purpose buffer which
 	/// stores uniform data as a GPU-side copy of \ref _instanceUniforms and
 	/// which is populated in \ref PrepareDraw and consumed in \ref DrawModels.

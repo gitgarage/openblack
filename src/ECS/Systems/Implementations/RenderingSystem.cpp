@@ -46,9 +46,15 @@ void RenderingSystem::PrepareDrawDescs(bool drawBoundingBox)
 	};
 
 	registry.Each<const Mesh, const Transform>([&prep](const Mesh& mesh, const Transform& /*unused*/) { prep(mesh, false); },
-	                                           entt::exclude<MorphWithTerrain, TempleInteriorPart>);
+	                                           entt::exclude<MorphWithTerrain, TempleInteriorPart, Animated>);
+	uint32_t animatedCount = 0;
+	registry.Each<const Mesh, const Transform, const Animated>(
+	    [&animatedCount](const Mesh&, const Transform&, const Animated&) { ++animatedCount; },
+	    entt::exclude<TempleInteriorPart>);
+	instanceCount += animatedCount;
 	registry.Each<const Mesh, const Transform, const MorphWithTerrain>(
-	    [&prep](const Mesh& mesh, const Transform& /*unused*/, const MorphWithTerrain& /*unused*/) { prep(mesh, true); });
+	    [&prep](const Mesh& mesh, const Transform& /*unused*/, const MorphWithTerrain& /*unused*/) { prep(mesh, true); },
+	    entt::exclude<Animated>);
 
 	if (drawBoundingBox)
 	{
@@ -82,6 +88,7 @@ void RenderingSystem::PrepareDrawDescs(bool drawBoundingBox)
 		                                          std::forward_as_tuple(offset, desc.first, desc.second));
 		offset += desc.first;
 	}
+	_renderContext.animatedOffset = offset; // animated entities' uniforms follow the instanced ones
 }
 
 void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
@@ -111,6 +118,26 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 			    _renderContext.instanceUniforms[idx + _renderContext.instanceUniforms.size() / 2] = boxMatrix;
 		    }
 		    offset.first->second++;
+	    },
+	    entt::exclude<TempleInteriorPart, Animated>);
+
+	_renderContext.animatedDrawDescs.clear();
+	uint32_t animatedIndex = _renderContext.animatedOffset;
+	registry.Each<const Mesh, const Transform, const Animated>(
+	    [this, &animatedIndex, drawBoundingBox](const Mesh& mesh, const Transform& transform, const Animated& animated) {
+		    auto modelMatrix = glm::mat4(transform.rotation);
+		    modelMatrix = glm::translate(modelMatrix, transform.position * transform.rotation);
+		    modelMatrix = glm::scale(modelMatrix, transform.scale);
+		    const uint32_t idx = animatedIndex++;
+		    _renderContext.instanceUniforms[idx] = modelMatrix;
+		    if (drawBoundingBox)
+		    {
+			    auto l3dMesh = entt::locator<resources::ResourcesInterface>::value().GetMeshes().Handle(mesh.id);
+			    auto box = l3dMesh->GetBoundingBox();
+			    _renderContext.instanceUniforms[idx + _renderContext.instanceUniforms.size() / 2] =
+			        modelMatrix * glm::translate(box.Center()) * glm::scale(box.Size());
+		    }
+		    _renderContext.animatedDrawDescs.push_back({mesh.id, idx, animated.animation, animated.time});
 	    },
 	    entt::exclude<TempleInteriorPart>);
 

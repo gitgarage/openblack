@@ -696,6 +696,47 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 				DrawMesh(*mesh, submitDesc, std::numeric_limits<uint8_t>::max());
 			}
 
+			// Animated meshes: one draw each, posed by their animation's frame. The animation gives each
+			// bone relative to its parent; the mesh wants them composed down the hierarchy.
+			const auto& animations = Locator::resources::value().GetAnimations();
+			for (const auto& animated : renderCtx.animatedDrawDescs)
+			{
+				auto mesh = meshManager.Handle(animated.meshId);
+				submitDesc.instanceDesc =
+				    std::make_unique<graphics::InstanceDesc>(renderCtx.instanceUniformBuffer, animated.offset, 1);
+				std::vector<glm::mat4> bones;
+				if (mesh->IsBoned())
+				{
+					bones = mesh->GetBoneMatrices();
+					const auto animationId = resources::HashIdentifier(animated.animation);
+					if (animations.Contains(animationId))
+					{
+						const auto posed = animations.Handle(animationId)->GetBoneMatrices(static_cast<uint32_t>(animated.time));
+						const auto& parents = mesh->GetBoneParents();
+						if (posed.size() == bones.size())
+						{
+							for (size_t i = 0; i < posed.size(); ++i)
+							{
+								bones[i] = parents[i] != std::numeric_limits<uint32_t>::max() ? bones[parents[i]] * posed[i]
+								                                                               : posed[i];
+							}
+						}
+					}
+					submitDesc.modelMatrices = bones.data();
+					submitDesc.matrixCount = static_cast<uint8_t>(bones.size());
+				}
+				else
+				{
+					const static auto identity = glm::mat4(1.0f);
+					submitDesc.modelMatrices = &identity;
+					submitDesc.matrixCount = 1;
+				}
+				submitDesc.isSky = false;
+				submitDesc.morphWithTerrain = false;
+				submitDesc.program = objectShaderInstanced;
+				DrawMesh(*mesh, submitDesc, std::numeric_limits<uint8_t>::max());
+			}
+
 			// Debug
 			if (desc.viewId == graphics::RenderPass::Main)
 			{

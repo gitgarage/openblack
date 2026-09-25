@@ -58,6 +58,11 @@
 #include "Enums.h"
 #include "FileSystem/FileSystemInterface.h"
 #include "InfoConstants.h"
+#include "ECS/Components/AnimatedStatic.h"
+#include "3D/AllMeshes.h"
+#include "Resources/ResourcesInterface.h"
+#include "Resources/ResourceManager.h"
+#include "Game.h"
 #include "Locator.h"
 #include "ScriptHeaders/ScriptEnums.h"
 
@@ -254,9 +259,15 @@ bool g_dialogueActive = false;
 // once it has been up long enough to read (TEXT_READ).
 int g_lastTextId = -1;
 std::chrono::steady_clock::time_point g_lastTextShown {};
-// SET_SCRIPT_ULONG animations, by object: when each counts as played (see SetScriptUlong).
-constexpr std::chrono::milliseconds k_AnimationPlayTime {1500};
-std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_animationEnd;
+// Animations scripts play on objects (SET_SCRIPT_ULONG), by object: which, and how many plays are left.
+// Villagers otherwise walk, run or stand by how fast they move (see UpdateAnimations).
+struct ScriptAnimation
+{
+	uint32_t animation;
+	float playsLeft;
+};
+std::unordered_map<uint32_t, ScriptAnimation> g_scriptAnimations;
+std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> g_pendingShots;
 // When the current SET_FADE / SET_FADE_IN finishes.
 std::chrono::steady_clock::time_point g_fadeEnd {};
 
@@ -528,11 +539,38 @@ void SetScriptFloat() // 019 SET_SCRIPT_FLOAT
 void SetScriptUlong() // 020 SET_SCRIPT_ULONG
 {
 	const auto loop = Pop().intVal;
-	[[maybe_unused]] const auto animation = Pop().intVal;
+	const auto animation = Pop().intVal;
 	const auto object = Pop().uintVal;
-	// Villagers have no animation playback yet: treat each play of the animation as a fixed length, so
-	// scripts waiting on PLAYED move on as if it ran.
-	g_animationEnd[object] = std::chrono::steady_clock::now() + k_AnimationPlayTime * std::max(loop, 1);
+	// Plays `animation` (an AnimId) `loop` times; PLAYED reports when it has finished.
+	g_scriptAnimations[object] = {static_cast<uint32_t>(animation), static_cast<float>(std::max(loop, 1))};
+	// Test hook: OPENBLACK_SHOT_ON_ANIM=<AnimId>:<ms>[,<ms>...]:<png path with %d> screenshots at those
+	// times into the animation (the %d becomes the ms).
+	if (const char* shot = std::getenv("OPENBLACK_SHOT_ON_ANIM"); shot != nullptr && std::atoi(shot) == animation)
+	{
+		const char* times = std::strchr(shot, ':');
+		const char* path = times != nullptr ? std::strchr(times + 1, ':') : nullptr;
+		if (path != nullptr)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			std::string list(times + 1, path);
+			std::stringstream stream(list);
+			for (std::string ms; std::getline(stream, ms, ',');)
+			{
+				std::string file(path + 1);
+				if (const auto at = file.find("%d"); at != std::string::npos)
+				{
+					file.replace(at, 2, ms);
+				}
+				g_pendingShots.emplace_back(file, now + std::chrono::milliseconds(std::stoi(ms)));
+			}
+		}
+	}
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	if (object != 0 && registry.Valid(entity) && registry.AllOf<openblack::ecs::components::Mesh>(entity))
+	{
+		registry.AssignOrReplace<openblack::ecs::components::Animated>(entity, static_cast<uint32_t>(animation), 0.0f);
+	}
 }
 
 // Object properties (ObjectPropertyType, B&W1 numbering). The ones openblack models are read from and
@@ -794,12 +832,16 @@ float SpeedFactor(uint32_t object)
 	return it != g_objectProperties.end() ? it->second : 1.0f;
 }
 
+// Turn an object about the vertical axis to face a point. The game's models face a quarter turn from the
+// yaw a plain atan2 gives (the opening's couple ended up side by side facing opposite ways without it).
+constexpr float k_ModelFacingOffset = glm::half_pi<float>();
+
 void FaceTowards(Transform& transform, const glm::vec3& target)
 {
 	const auto toTarget = target - transform.position;
 	if (toTarget.x != 0.0f || toTarget.z != 0.0f)
 	{
-		transform.rotation = glm::mat3(glm::eulerAngleY(-std::atan2(toTarget.x, toTarget.z)));
+		transform.rotation = glm::mat3(glm::eulerAngleY(k_ModelFacingOffset - std::atan2(toTarget.x, toTarget.z)));
 	}
 }
 
@@ -908,19 +950,12 @@ void SetFocus() // 034 SET_FOCUS
 {
 	const auto position = PopVec();
 	const auto object = Pop().uintVal;
-	// Turn the object to face the position, about the vertical axis, with the same yaw convention
-	// the archetypes use to place objects (eulerAngleY(-yaw)).
 	if (object != 0)
 	{
 		auto& registry = Locator::entitiesRegistry::value();
 		if (auto* transform = registry.TryGet<Transform>(static_cast<entt::entity>(object)))
 		{
-			const auto toTarget = position - transform->position;
-			if (toTarget.x != 0.0f || toTarget.z != 0.0f)
-			{
-				const float yaw = std::atan2(toTarget.x, toTarget.z);
-				transform->rotation = glm::mat3(glm::eulerAngleY(-yaw));
-			}
+			FaceTowards(*transform, position);
 		}
 	}
 }
@@ -1202,12 +1237,7 @@ void SetInterfaceInteraction() // 063 SET_INTERFACE_INTERACTION
 void Played() // 064 PLAYED
 {
 	const auto obj = Pop().uintVal;
-	const auto it = g_animationEnd.find(obj);
-	const bool played = it == g_animationEnd.end() || std::chrono::steady_clock::now() >= it->second;
-	if (played && it != g_animationEnd.end())
-	{
-		g_animationEnd.erase(it);
-	}
+	const bool played = g_scriptAnimations.find(obj) == g_scriptAnimations.end();
 	Pushb(played);
 }
 
@@ -2350,6 +2380,139 @@ void PlaceMover(entt::entity entity, Transform& transform, glm::vec3 position, c
 }
 } // namespace
 
+namespace
+{
+// Animation clock: the game's animations are keyframed at 15 frames a second.
+constexpr float k_AnimationFramesPerSecond = 15.0f;
+std::unordered_map<uint32_t, glm::vec3> g_lastPositions;
+
+// Animation units (keyframe time) per second of play, and one play's length in those units.
+std::pair<float, float> AnimationRate(uint32_t animation)
+{
+	const auto& animations = Locator::resources::value().GetAnimations();
+	const auto id = openblack::resources::HashIdentifier(animation);
+	if (!animations.Contains(id))
+	{
+		return {0.0f, 0.0f};
+	}
+	const auto handle = animations.Handle(id);
+	const auto frames = handle->GetFrames().size();
+	const auto duration = static_cast<float>(handle->GetDuration());
+	return {frames > 0 ? duration / static_cast<float>(frames) * k_AnimationFramesPerSecond : 0.0f, duration};
+}
+
+void UpdateAnimations(float seconds)
+{
+	using openblack::ecs::components::Animated;
+	using openblack::ecs::components::AnimatedStatic;
+	using openblack::ecs::components::Mesh;
+	using openblack::ecs::components::Villager;
+	auto& registry = Locator::entitiesRegistry::value();
+
+	// Villagers: the script's animation while it plays, else walk, run or stand by speed.
+	registry.Each<const Villager, const Mesh, const Transform>(
+	    [&registry, seconds](entt::entity entity, const Villager& villager, const Mesh&, const Transform& transform) {
+		    const auto id = static_cast<uint32_t>(entity);
+		    const auto last = g_lastPositions.find(id);
+		    const float speed = last != g_lastPositions.end() && seconds > 0.0f
+		                            ? glm::distance(glm::vec2(last->second.x, last->second.z),
+		                                            glm::vec2(transform.position.x, transform.position.z)) /
+		                                  seconds
+		                            : 0.0f;
+		    g_lastPositions[id] = transform.position;
+
+		    const bool woman = villager.sex == Villager::Sex::FEMALE;
+		    uint32_t wanted;
+		    const auto scripted = g_scriptAnimations.find(id);
+		    if (scripted != g_scriptAnimations.end())
+		    {
+			    wanted = scripted->second.animation;
+		    }
+		    else if (speed > 3.5f)
+		    {
+			    wanted = static_cast<uint32_t>(woman ? AnimId::PRunWoman : AnimId::PRunMan);
+		    }
+		    else if (speed > 0.3f)
+		    {
+			    wanted = static_cast<uint32_t>(woman ? AnimId::PWalkWoman : AnimId::PWalkMan);
+		    }
+		    else
+		    {
+			    wanted = static_cast<uint32_t>(AnimId::PStand);
+		    }
+
+		    auto* animated = registry.TryGet<Animated>(entity);
+		    if (animated == nullptr || animated->animation != wanted)
+		    {
+			    animated = &registry.AssignOrReplace<Animated>(entity, wanted, 0.0f);
+		    }
+		    const auto [rate, duration] = AnimationRate(wanted);
+		    animated->time += rate * seconds;
+		    if (scripted != g_scriptAnimations.end() && duration > 0.0f && animated->time >= duration)
+		    {
+			    animated->time -= duration;
+			    if (--scripted->second.playsLeft <= 0.0f)
+			    {
+				    g_scriptAnimations.erase(scripted); // PLAYED now reports it finished
+			    }
+		    }
+		    else if (duration > 0.0f)
+		    {
+			    animated->time = std::fmod(animated->time, duration);
+		    }
+	    });
+
+	// Anything else a script animated (not a villager): play its animation through, then drop it.
+	for (auto it = g_scriptAnimations.begin(); it != g_scriptAnimations.end();)
+	{
+		const auto entity = static_cast<entt::entity>(it->first);
+		if (!registry.Valid(entity))
+		{
+			it = g_scriptAnimations.erase(it);
+			continue;
+		}
+		if (registry.AllOf<Villager>(entity))
+		{
+			++it;
+			continue;
+		}
+		auto* animated = registry.TryGet<Animated>(entity);
+		const auto [rate, duration] = AnimationRate(it->second.animation);
+		if (animated == nullptr || duration <= 0.0f)
+		{
+			it = g_scriptAnimations.erase(it);
+			continue;
+		}
+		animated->time += rate * seconds;
+		if (animated->time >= duration)
+		{
+			animated->time -= duration;
+			if (--it->second.playsLeft <= 0.0f)
+			{
+				registry.Remove<Animated>(entity);
+				it = g_scriptAnimations.erase(it);
+				continue;
+			}
+		}
+		++it;
+	}
+
+	// Animated scenery (windmills, flags...) loops its default animation.
+	registry.Each<const AnimatedStatic, const Mesh>([&registry, seconds](entt::entity entity, const AnimatedStatic& info,
+	                                                                     const Mesh&) {
+		const auto animation =
+		    static_cast<uint32_t>(Locator::infoConstants::value().animatedStatic.at(static_cast<size_t>(info.type)).defaultAnim);
+		auto* animated = registry.TryGet<Animated>(entity);
+		if (animated == nullptr || animated->animation != animation)
+		{
+			animated = &registry.AssignOrReplace<Animated>(entity, animation, 0.0f);
+		}
+		const auto [rate, duration] = AnimationRate(animation);
+		animated->time = duration > 0.0f ? std::fmod(animated->time + rate * seconds, duration) : 0.0f;
+	});
+}
+} // namespace
+
 void UpdateScriptFrame(std::chrono::microseconds dt)
 {
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
@@ -2388,6 +2551,15 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		{
 			g_gameTimeMove.reset();
 		}
+	}
+
+	UpdateAnimations(seconds);
+	// Poses and positions changed this frame: the renderer only rebuilds its draw lists for a dirty registry.
+	registry.SetDirty();
+	if (!g_pendingShots.empty() && std::chrono::steady_clock::now() >= g_pendingShots.front().second)
+	{
+		Game::Instance()->RequestScreenshot(g_pendingShots.front().first); // one per frame
+		g_pendingShots.erase(g_pendingShots.begin());
 	}
 
 	for (auto it = g_followers.begin(); it != g_followers.end();)

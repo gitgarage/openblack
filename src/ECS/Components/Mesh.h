@@ -21,4 +21,12 @@ struct Mesh
 	int8_t bbSubmeshId;
 };
 
+// A mesh posed by an animation from AllAnims.anm instead of its default pose. `time` is in the
+// animation's own units (keyframe times); entities with this are drawn one by one, not instanced.
+struct Animated
+{
+	uint32_t animation; // AnimId
+	float time;
+};
+
 } // namespace openblack::ecs::components
