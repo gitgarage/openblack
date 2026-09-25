@@ -931,6 +931,42 @@ bool Game::Run() noexcept
 			Locator::rendererInterface::value().DrawScene(drawDesc);
 		}
 
+		// Periodic screenshots (OPENBLACK_SHOT_EVERY seconds into OPENBLACK_SHOT_DIR, emptied at start; the
+		// newest k_MaxShots are kept), so runs on a console can be looked at afterwards.
+		{
+			static const char* shotDir = std::getenv("OPENBLACK_SHOT_DIR");
+			static const float shotEvery = std::getenv("OPENBLACK_SHOT_EVERY") != nullptr
+			                                   ? static_cast<float>(std::atof(std::getenv("OPENBLACK_SHOT_EVERY")))
+			                                   : 0.0f;
+			static uint32_t shotNumber = 0;
+			static auto nextShot = std::chrono::steady_clock::now();
+			constexpr uint32_t k_MaxShots = 60;
+			if (shotDir != nullptr && shotEvery > 0.0f)
+			{
+				if (shotNumber == 0 && nextShot <= std::chrono::steady_clock::now())
+				{
+					std::error_code ec;
+					std::filesystem::create_directories(shotDir, ec);
+					for (const auto& entry : std::filesystem::directory_iterator(shotDir, ec))
+					{
+						std::filesystem::remove(entry.path(), ec);
+					}
+				}
+				if (std::chrono::steady_clock::now() >= nextShot && !_requestScreenshot.has_value())
+				{
+					++shotNumber;
+					std::error_code ec;
+					if (shotNumber > k_MaxShots)
+					{
+						std::filesystem::remove(std::filesystem::path(shotDir) / fmt::format("shot_{:04}.png", shotNumber - k_MaxShots), ec);
+					}
+					RequestScreenshot(std::filesystem::path(shotDir) / fmt::format("shot_{:04}.png", shotNumber));
+					nextShot = std::chrono::steady_clock::now() +
+					           std::chrono::milliseconds(static_cast<int>(shotEvery * 1000.0f));
+				}
+			}
+		}
+
 		{
 			auto section = profiler.BeginScoped(Profiler::Stage::GuiDraw);
 			const bool screenshotThisFrame = _requestScreenshot.has_value() && _requestScreenshot->first == _frameCount;

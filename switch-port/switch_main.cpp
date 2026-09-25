@@ -183,6 +183,13 @@ extern "C" int __wrap_main(int argc, char** argv)
 	threadCreate(&g_memThread, memoryThread, nullptr, nullptr, 0x4000, 0x3F, -2);
 	threadStart(&g_memThread);
 
+	// A screenshot every 20 s into sdmc:/switch/openblack/shots (emptied each run), which deliver.sh
+	// fetches, so a run can be looked at on the laptop afterwards.
+	setenv("OPENBLACK_SHOT_DIR", "sdmc:/switch/openblack/shots", 0);
+	setenv("OPENBLACK_SHOT_EVERY", "20", 0);
+	// Every 5 s: the camera and each script's position (what scripts are waiting on), into the log.
+	setenv("OPENBLACK_TRACE_VM", "1", 0);
+
 	std::vector<char*> args(argv, argv + argc);
 	const char* extra[] = {"--game-path", k_GamePath, "--log-file", "stdout", "--width", "1280", "--height", "720"};
 	for (const char* a : extra)
