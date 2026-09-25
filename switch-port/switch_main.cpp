@@ -11,6 +11,7 @@
 #include <switch.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/iosupport.h>
 #include <vector>
