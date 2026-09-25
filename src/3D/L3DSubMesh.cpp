@@ -30,7 +30,9 @@ struct EnhancedL3DVertex
 	glm::vec3 pos;
 	glm::vec2 uv;
 	glm::vec3 norm;
-	glm::i16vec2 index;
+	// Bone index as a float: an integer attribute is bound as a true integer on GLES 3 (bgfx uses
+	// glVertexAttribIPointer), which the shader's float a_indices then read as 0 on the Switch.
+	glm::vec2 index;
 };
 
 L3DSubMesh::L3DSubMesh(L3DMesh& mesh) noexcept
@@ -116,8 +118,8 @@ bool L3DSubMesh::Load(const l3d::L3DFile& l3d, uint32_t meshIndex) noexcept
 		verticesMemAccess[i].uv = glm::make_vec2(&verticesSpan[i].texCoord.x);
 		// TODO(bwrsandman): build normals from mesh
 		verticesMemAccess[i].norm = glm::make_vec3(&verticesSpan[i].normal.x);
-		verticesMemAccess[i].index.x = -1;
-		verticesMemAccess[i].index.y = -1;
+		verticesMemAccess[i].index.x = -1.0f;
+		verticesMemAccess[i].index.y = -1.0f;
 	}
 
 	if (nIndices == 0)
@@ -135,8 +137,8 @@ bool L3DSubMesh::Load(const l3d::L3DFile& l3d, uint32_t meshIndex) noexcept
 	{
 		for (uint32_t i = 0; i < vertexGroupSpan.vertexCount; ++i)
 		{
-			verticesMemAccess[vertexIndex].index[0] = vertexGroupSpan.boneIndex;
-			verticesMemAccess[vertexIndex].index[1] = -1;
+			verticesMemAccess[vertexIndex].index[0] = static_cast<float>(vertexGroupSpan.boneIndex);
+			verticesMemAccess[vertexIndex].index[1] = -1.0f;
 			vertexIndex++;
 		}
 	}
@@ -208,7 +210,7 @@ bool L3DSubMesh::Load(const l3d::L3DFile& l3d, uint32_t meshIndex) noexcept
 	decl.emplace_back(VertexAttrib::Attribute::Position, static_cast<uint8_t>(3), VertexAttrib::Type::Float);
 	decl.emplace_back(VertexAttrib::Attribute::TexCoord0, static_cast<uint8_t>(2), VertexAttrib::Type::Float);
 	decl.emplace_back(VertexAttrib::Attribute::Normal, static_cast<uint8_t>(3), VertexAttrib::Type::Float);
-	decl.emplace_back(VertexAttrib::Attribute::Indices, static_cast<uint8_t>(2), VertexAttrib::Type::Int16);
+	decl.emplace_back(VertexAttrib::Attribute::Indices, static_cast<uint8_t>(2), VertexAttrib::Type::Float);
 
 	// build our buffers
 	auto* vertexBuffer = new VertexBuffer(_l3dMesh.GetDebugName(), verticesMem, decl);

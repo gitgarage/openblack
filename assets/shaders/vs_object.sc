@@ -34,12 +34,8 @@ void main()
 	vec2 extentMax = u_islandExtent.zw;
 #endif // USE_HEIGHT_MAP
 
-#if BGFX_SHADER_LANGUAGE_HLSL > 300 || BGFX_SHADER_LANGUAGE_PSSL || BGFX_SHADER_LANGUAGE_SPIRV
-	uint modelIndex = uint(max(0, asint(a_indices.x)));
-#else
-	// A signed index: the Switch's Mesa treated u_model as a single matrix when it was indexed with a uint.
-	int modelIndex = int(max(0.0, a_indices.x));
-#endif
+	// The bone index is a float in the vertex data on every backend (see L3DSubMesh's EnhancedL3DVertex).
+	int modelIndex = int(max(0.0f, a_indices.x));
 
 #ifdef USE_INSTANCING
 	float boneV = (i_data0.w + 0.5f) / u_bonesSize.y;
