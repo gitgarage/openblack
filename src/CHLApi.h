@@ -54,8 +54,13 @@ std::optional<glm::vec2> UpdateHandDemo();
 void UpdateScriptFrame(std::chrono::microseconds dt);
 
 // The player's hand holding a game object (right button, ZL on the Switch): picked up when pressed over an
-// object, carried with the hand, put down on the ground under the hand when released.
+// object, carried with the hand until the button is pressed again, let go (dropped or thrown) on that release.
 bool HandPickUp(uint32_t entity);
+bool HandHolding();
+// What the hand is over that it could pick up (0 for nothing, or while it holds something).
+uint32_t HandObjectUnder();
+// The hand's pose while holding something (a name in Data/hndspec5.txt).
+constexpr const char* k_HandHoldPose = "hold_above";
 void HandCarry(const glm::vec3& handPosition);
 void HandDrop(const glm::vec3& handPosition);
 // What the hand is over this frame (0 for none), for GET_OBJECT_HAND_IS_OVER.

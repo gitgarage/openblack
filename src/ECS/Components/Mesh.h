@@ -9,7 +9,10 @@
 
 #pragma once
 
+#include <vector>
+
 #include <entt/fwd.hpp>
+#include <glm/mat4x4.hpp>
 
 namespace openblack::ecs::components
 {
@@ -27,6 +30,9 @@ struct Animated
 {
 	uint32_t animation; // AnimId
 	float time;
+	// When not empty, the bones (relative to their parents) to draw instead of the animation's: the player's
+	// hand, posed from its own pose file (see HandPoses.h).
+	std::vector<glm::mat4> localPose {};
 };
 
 } // namespace openblack::ecs::components

@@ -188,9 +188,11 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 		    {
 			    bones = l3dMesh->GetBoneMatrices();
 			    const auto animationId = resources::HashIdentifier(animated.animation);
-			    if (animations.Contains(animationId))
+			    if (!animated.localPose.empty() || animations.Contains(animationId))
 			    {
-				    const auto posed = animations.Handle(animationId)->GetBoneMatrices(static_cast<uint32_t>(animated.time));
+				    const auto posed = !animated.localPose.empty()
+				                           ? animated.localPose
+				                           : animations.Handle(animationId)->GetBoneMatrices(static_cast<uint32_t>(animated.time));
 				    const auto& parents = l3dMesh->GetBoneParents();
 				    if (posed.size() == bones.size())
 				    {

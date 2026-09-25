@@ -2620,7 +2620,7 @@ void UpdateAnimations(float seconds)
 
 namespace
 {
-constexpr float k_CarryHeight = 3.0f; // held things hang a little above the ground under the hand
+constexpr float k_CarryHeight = 1.5f; // held things sit in the hand's grip (the hand is drawn 1.5 above the ground)
 // Where the held thing was over the last moment, for the speed it's released with.
 constexpr auto k_ThrowWindow = std::chrono::milliseconds(120);
 constexpr float k_Gravity = 9.81f; // world units are metres
@@ -2639,17 +2639,31 @@ void MoveBody(entt::entity entity, const glm::vec3& position)
 }
 } // namespace
 
+bool CanPickUp(uint32_t object)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	if (object == 0 || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
+	{
+		return false;
+	}
+	// Not the things that make up the land and the towns, nor what a script has made unpickupable.
+	return !registry.AnyOf<Abode, Temple, Town, Field, Footpath, Stream, Forest, Hand>(entity) &&
+	       !g_notPickupable.contains(object);
+}
+
+uint32_t HandObjectUnder()
+{
+	return g_heldObject == 0 && CanPickUp(g_objectUnderHand) ? g_objectUnderHand : 0;
+}
+
 bool HandPickUp(uint32_t object)
 {
 	using namespace openblack::ecs::components;
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto entity = static_cast<entt::entity>(object);
-	if (g_heldObject != 0 || object == 0 || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
-	{
-		return false;
-	}
-	// Not the things that make up the land and the towns, nor what a script has made unpickupable.
-	if (registry.AnyOf<Abode, Temple, Town, Field, Footpath, Stream, Forest, Hand>(entity) || g_notPickupable.contains(object))
+	if (g_heldObject != 0 || !CanPickUp(object))
 	{
 		return false;
 	}
@@ -2673,6 +2687,11 @@ bool HandPickUp(uint32_t object)
 	                   registry.AllOf<Mobile>(entity) ? "mobile " : "", registry.AllOf<Fixed>(entity) ? "fixed " : "",
 	                   registry.AllOf<Feature>(entity) ? "feature " : "", registry.AllOf<Villager>(entity) ? "villager" : "");
 	return true;
+}
+
+bool HandHolding()
+{
+	return g_heldObject != 0;
 }
 
 void HandCarry(const glm::vec3& handPosition)
@@ -2783,13 +2802,21 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 	{
 		return std::make_pair(target, false); // hand over it
 	}
-	if (k < 1.3f)
+	if (k < 0.5f)
 	{
-		return std::make_pair(target + glm::vec3(10.0f * (k - 0.3f), 0.0f, 0.0f), true); // lift and swing at 10 m/s
+		return std::make_pair(target, true); // press: pick up
 	}
-	if (k < 1.5f)
+	if (k < 1.0f)
 	{
-		return std::make_pair(target + glm::vec3(10.0f, 0.0f, 0.0f), false); // let go
+		return std::make_pair(target, false); // release: still held
+	}
+	if (k < 2.0f)
+	{
+		return std::make_pair(target + glm::vec3(10.0f * (k - 1.0f), 0.0f, 0.0f), true); // press, swing at 10 m/s
+	}
+	if (k < 2.2f)
+	{
+		return std::make_pair(target + glm::vec3(10.0f, 0.0f, 0.0f), false); // release: thrown
 	}
 	return std::nullopt;
 }

@@ -9,6 +9,8 @@
 
 #include "Game.h"
 
+#include "HandPoses.h"
+
 #include <cstdlib>
 #include <string>
 
@@ -37,6 +39,8 @@
 #include "Debug/DebugGuiInterface.h"
 #include "ECS/Archetypes/PlayerArchetype.h"
 #include "ECS/Components/CameraBookmark.h"
+#include "ECS/Components/Hand.h"
+#include "ECS/Components/Mesh.h"
 #include "ECS/Map.h"
 #include "ECS/Registry.h"
 #include "ECS/Systems/CameraBookmarkSystemInterface.h"
@@ -478,9 +482,11 @@ bool Game::Update() noexcept
 				}
 				intersectionTransform.scale = scale;
 
-				// The right button (ZL) picks up what the hand is over, carries it, and puts it down on release.
-				// Rocks, people and logs have no physics body, so the ray lands on the ground under them: take
-				// the nearest of those within reach of that point.
+				// The right button (ZL) is the original's Action Button, as its hand demos record it (givewood,
+				// throwrock): a press over an object picks it up and the hand keeps it after the release; a second
+				// press lets go on its release - dropped where the hand is still, thrown if it is moving. Rocks,
+				// people and logs have no physics body, so the ray lands on the ground under them: take the
+				// nearest of those within reach of that point.
 				constexpr float k_HandReach = 3.0f;
 				bool rightDown = g_rightButtonDown;
 				if (const auto test = chlapi::TestPickupStep())
@@ -495,16 +501,25 @@ bool Game::Update() noexcept
 				}
 				chlapi::SetObjectUnderHand(objectUnderHand);
 				static bool s_rightWasDown = false;
-				if (rightDown && !s_rightWasDown && objectUnderHand != 0)
+				static bool s_letGoOnRelease = false;
+				if (rightDown && !s_rightWasDown)
 				{
-					chlapi::HandPickUp(objectUnderHand);
+					if (chlapi::HandHolding())
+					{
+						s_letGoOnRelease = true;
+					}
+					else if (objectUnderHand != 0)
+					{
+						chlapi::HandPickUp(objectUnderHand);
+					}
 				}
-				if (rightDown)
+				if (chlapi::HandHolding())
 				{
 					chlapi::HandCarry(intersectionTransform.position);
 				}
-				else if (s_rightWasDown)
+				if (!rightDown && s_rightWasDown && s_letGoOnRelease)
 				{
+					s_letGoOnRelease = false;
 					chlapi::HandDrop(intersectionTransform.position);
 				}
 				s_rightWasDown = rightDown;
@@ -525,6 +540,48 @@ bool Game::Update() noexcept
 				handTransform.rotation = intersectionTransform.rotation * handTransform.rotation;
 				handTransform.position += intersectionTransform.rotation * handOffset;
 				Locator::entitiesRegistry::value().SetDirty();
+			}
+
+			// The hand's pose, from the original's hand pose file: closed round what it holds, reaching over
+			// what it could take. OPENBLACK_TEST_HAND_POSE=<name>:<frame> holds one pose, to look at.
+			{
+				auto& registry = Locator::entitiesRegistry::value();
+				const auto handEntity =
+				    Locator::handSystem::value()
+				        .GetPlayerHands()[static_cast<size_t>(ecs::systems::HandSystemInterface::Side::Left)];
+				static const char* s_testPose = std::getenv("OPENBLACK_TEST_HAND_POSE");
+				std::string poseName;
+				float poseFrame = 0.0f;
+				if (s_testPose != nullptr)
+				{
+					const std::string_view test(s_testPose);
+					const auto colon = test.find(':');
+					poseName = std::string(test.substr(0, colon));
+					poseFrame = colon == std::string_view::npos ? 0.0f : std::stof(std::string(test.substr(colon + 1)));
+					// ...in front of the camera, where it can be seen without a mouse in the window.
+					auto& handTransform = registry.Get<ecs::components::Transform>(handEntity);
+					handTransform.position = camera.GetOrigin() + camera.GetForward() * 12.0f;
+					handTransform.rotation = glm::eulerAngleY(camera.GetRotation().y) * glm::eulerAngleX(glm::radians(90.0f));
+				}
+				else if (chlapi::HandHolding())
+				{
+					poseName = chlapi::k_HandHoldPose;
+					poseFrame = static_cast<float>(handposes::FrameCount(poseName) - 1);
+				}
+				else if (chlapi::HandObjectUnder() != 0)
+				{
+					poseName = "can_pickup";
+				}
+				const auto& handMesh = *Locator::resources::value().GetMeshes().Handle(ecs::components::Hand::k_MeshId);
+				auto pose = poseName.empty() ? std::vector<glm::mat4> {} : handposes::LocalBones(handMesh, poseName, poseFrame);
+				if (pose.empty())
+				{
+					registry.Remove<ecs::components::Animated>(handEntity);
+				}
+				else
+				{
+					registry.AssignOrReplace<ecs::components::Animated>(handEntity, 0u, 0.0f, std::move(pose));
+				}
 			}
 		}
 
@@ -749,6 +806,7 @@ bool Game::Initialize() noexcept
 
 		using LFromDiskTag = resources::L3DLoader::FromDiskTag;
 		meshManager.Load("hand", LFromDiskTag {}, fileSystem.GetPath<Path::CreatureMesh>() / "Hand_Boned_Base2.l3d");
+		handposes::Load();
 		meshManager.Load("coffre", LFromDiskTag {}, fileSystem.GetPath<Path::Misc>() / "coffre.l3d");
 		meshManager.Load("cone", LFromDiskTag {}, fileSystem.GetPath<Path::Data>() / "cone.l3d");
 		meshManager.Load("marker", LFromDiskTag {}, fileSystem.GetPath<Path::Data>() / "marker.l3d");
