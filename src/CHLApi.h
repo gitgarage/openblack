@@ -60,5 +60,11 @@ void HandCarry(const glm::vec3& handPosition);
 void HandDrop(const glm::vec3& handPosition);
 // What the hand is over this frame (0 for none), for GET_OBJECT_HAND_IS_OVER.
 void SetObjectUnderHand(uint32_t entity);
+// The nearest object the hand could take within `radius` of a point on the ground (0 for none): most
+// objects (rocks, people, logs) have no physics body for the hand's ray to hit.
+uint32_t FindObjectNear(const glm::vec3& point, float radius);
+// Test hook (OPENBLACK_TEST_PICKUP): where to put the hand and whether to hold the right button this
+// frame, to pick up, swing and throw the object nearest the camera's focus.
+std::optional<std::pair<glm::vec3, bool>> TestPickupStep();
 
 } // namespace openblack::chlapi

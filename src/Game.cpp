@@ -458,13 +458,27 @@ bool Game::Update() noexcept
 				intersectionTransform.scale = scale;
 
 				// The right button (ZL) picks up what the hand is over, carries it, and puts it down on release.
+				// Rocks, people and logs have no physics body, so the ray lands on the ground under them: take
+				// the nearest of those within reach of that point.
+				constexpr float k_HandReach = 3.0f;
+				bool rightDown = g_rightButtonDown;
+				if (const auto test = chlapi::TestPickupStep())
+				{
+					intersectionTransform.position = test->first;
+					objectUnderHand = 0;
+					rightDown = test->second;
+				}
+				if (objectUnderHand == 0)
+				{
+					objectUnderHand = chlapi::FindObjectNear(intersectionTransform.position, k_HandReach);
+				}
 				chlapi::SetObjectUnderHand(objectUnderHand);
 				static bool s_rightWasDown = false;
-				if (g_rightButtonDown && !s_rightWasDown && objectUnderHand != 0)
+				if (rightDown && !s_rightWasDown && objectUnderHand != 0)
 				{
 					chlapi::HandPickUp(objectUnderHand);
 				}
-				if (g_rightButtonDown)
+				if (rightDown)
 				{
 					chlapi::HandCarry(intersectionTransform.position);
 				}
@@ -472,7 +486,7 @@ bool Game::Update() noexcept
 				{
 					chlapi::HandDrop(intersectionTransform.position);
 				}
-				s_rightWasDown = g_rightButtonDown;
+				s_rightWasDown = rightDown;
 			}
 
 			if (!_handGripping)

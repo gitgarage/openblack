@@ -278,6 +278,12 @@ struct ScriptAnimation
 };
 std::unordered_map<uint32_t, ScriptAnimation> g_scriptAnimations;
 std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> g_pendingShots;
+// GET_TOTAL_EVENTS counters, by event type: 25 degrees the player has rotated the camera, 28 degrees
+// pitched, 29 metres zoomed (the tutorials ask for 60, 25 and 10-15 more than when they start).
+std::unordered_map<int32_t, float> g_totalEvents;
+// Script timers (CREATE_TIMER): when each runs out.
+std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_timers;
+uint32_t g_nextTimer = 1;
 // What the player's hand holds and is over (see HandPickUp), 0 for nothing.
 uint32_t g_heldObject = 0;
 uint32_t g_objectUnderHand = 0;
@@ -325,7 +331,9 @@ void NearestOf(int subtype, const glm::vec3& position, float& bestDistance2, ent
 		    {
 			    return;
 		    }
-		    const auto offset = transform.position - position;
+		    // On the ground plane: scripts pass points at height 0 (CALL_NEAR's Citadel query in the Land 1
+		    // opening), which by full 3D distance missed the temple standing on the land 5 units away.
+		    const auto offset = glm::vec2(transform.position.x - position.x, transform.position.z - position.z);
 		    const float distance2 = glm::dot(offset, offset);
 		    if (distance2 < bestDistance2)
 		    {
@@ -2017,26 +2025,28 @@ void RevealCountdownTimer() // 144 REVEAL_COUNTDOWN_TIMER
 
 void SetTimerTime() // 145 SET_TIMER_TIME
 {
-	[[maybe_unused]] const auto time = Popf();
-	[[maybe_unused]] const auto timer = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto time = Popf();
+	const auto timer = Pop().uintVal;
+	g_timers[timer] = std::chrono::steady_clock::now() +
+	                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<float>(std::max(time, 0.0f)));
 }
 
 void CreateTimer() // 146 CREATE_TIMER
 {
-	[[maybe_unused]] const auto timeout = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto timeout = Popf();
+	const auto timer = g_nextTimer++;
+	g_timers[timer] = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+	                                                        std::chrono::duration<float>(std::max(timeout, 0.0f)));
+	Pusho(timer);
 }
 
 void GetTimerTimeRemaining() // 147 GET_TIMER_TIME_REMAINING
 {
-	[[maybe_unused]] const auto timer = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	const auto timer = Pop().uintVal;
+	const auto it = g_timers.find(timer);
+	const float remaining =
+	    it == g_timers.end() ? 0.0f : std::chrono::duration<float>(it->second - std::chrono::steady_clock::now()).count();
+	Pushf(std::max(remaining, 0.0f));
 }
 
 void GetTimerTimeSinceSet() // 148 GET_TIMER_TIME_SINCE_SET
@@ -2699,6 +2709,71 @@ void SetObjectUnderHand(uint32_t object)
 	g_objectUnderHand = object;
 }
 
+std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
+{
+	static const bool enabled = std::getenv("OPENBLACK_TEST_PICKUP") != nullptr;
+	static auto start = std::chrono::steady_clock::now();
+	static glm::vec3 target(0.0f);
+	static bool chosen = false;
+	if (!enabled)
+	{
+		return std::nullopt;
+	}
+	const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
+	if (t < 15.0f)
+	{
+		return std::nullopt; // let the level settle
+	}
+	if (!chosen)
+	{
+		const auto focus = Locator::camera::value().GetFocus();
+		const auto object = FindObjectNear(focus, 200.0f);
+		if (object == 0)
+		{
+			return std::nullopt;
+		}
+		target = Locator::entitiesRegistry::value().Get<Transform>(static_cast<entt::entity>(object)).position;
+		chosen = true;
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test pickup: aiming at {} at ({:.1f}, {:.1f}, {:.1f})", object, target.x,
+		                   target.y, target.z);
+	}
+	const float k = t - 15.0f;
+	if (k < 0.3f)
+	{
+		return std::make_pair(target, false); // hand over it
+	}
+	if (k < 1.3f)
+	{
+		return std::make_pair(target + glm::vec3(10.0f * (k - 0.3f), 0.0f, 0.0f), true); // lift and swing at 10 m/s
+	}
+	if (k < 1.5f)
+	{
+		return std::make_pair(target + glm::vec3(10.0f, 0.0f, 0.0f), false); // let go
+	}
+	return std::nullopt;
+}
+
+uint32_t FindObjectNear(const glm::vec3& point, float radius)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	uint32_t nearest = 0;
+	float nearestDistance = radius * radius;
+	registry.Each<const Mobile, const Transform>([&](entt::entity entity, const Mobile&, const Transform& transform) {
+		const auto offset = glm::vec2(transform.position.x - point.x, transform.position.z - point.z);
+		const float distance = glm::dot(offset, offset);
+		if (distance < nearestDistance && !g_notPickupable.contains(static_cast<uint32_t>(entity)) &&
+		    static_cast<uint32_t>(entity) != g_heldObject)
+		{
+			nearestDistance = distance;
+			nearest = static_cast<uint32_t>(entity);
+		}
+	});
+	return nearest;
+}
+
+bool HandDemoPlaying(); // below, with the hand demo player
+
 void UpdateScriptFrame(std::chrono::microseconds dt)
 {
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
@@ -2740,10 +2815,48 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	}
 
 	UpdateAnimations(seconds);
+
+	// The player's own camera movement, for the GET_TOTAL_EVENTS the control tutorials watch.
+	{
+		static bool s_hasLast = false;
+		static float s_lastYaw = 0.0f, s_lastPitch = 0.0f, s_lastDistance = 0.0f;
+		const auto& camera = Locator::camera::value();
+		const auto view = camera.GetFocus() - camera.GetOrigin();
+		const float yaw = glm::degrees(std::atan2(view.x, view.z));
+		const float pitch = glm::degrees(std::atan2(view.y, glm::length(glm::vec2(view.x, view.z))));
+		const float distance = glm::length(view);
+		const bool player = !camera.IsScriptControlled() && !HandDemoPlaying();
+		if (s_hasLast && player)
+		{
+			float turned = std::abs(yaw - s_lastYaw);
+			turned = std::min(turned, 360.0f - turned);
+			g_totalEvents[25] += turned;
+			g_totalEvents[28] += std::abs(pitch - s_lastPitch);
+			g_totalEvents[29] += std::abs(distance - s_lastDistance);
+		}
+		s_lastYaw = yaw;
+		s_lastPitch = pitch;
+		s_lastDistance = distance;
+		s_hasLast = true;
+	}
 	// Test hook: OPENBLACK_TEST_FOLLOW=1 keeps the camera close behind the lead of a flock (the Land 1 family's
 	// father), as a player following them would, so the follow sequence can be checked without input.
 	static const bool s_testFollow = std::getenv("OPENBLACK_TEST_FOLLOW") != nullptr;
-	if (s_testFollow)
+	static bool s_testFollowDone = false;
+	s_testFollowDone = s_testFollowDone || g_lastTextId == 6101; // "Let's move to the Temple": the chase is over
+	// ...then, once asked to look around (5109), orbit the camera round its focus as a player would.
+	if (s_testFollow && s_testFollowDone && g_lastTextId == 5109 && !Locator::camera::value().IsScriptControlled())
+	{
+		auto& camera = Locator::camera::value();
+		const auto focus = camera.GetFocus();
+		const auto arm = camera.GetOrigin() - focus;
+		const float turn = glm::radians(30.0f) * seconds;
+		const auto rotated = glm::vec3(arm.x * std::cos(turn) - arm.z * std::sin(turn), arm.y,
+		                               arm.x * std::sin(turn) + arm.z * std::cos(turn));
+		camera.SetOrigin(focus + rotated);
+		camera.SetFocus(focus);
+	}
+	if (s_testFollow && !s_testFollowDone)
 	{
 		for (const auto& [flockId, flock] : g_flocks)
 		{
@@ -3361,10 +3474,9 @@ void GetTimeSince() // 236 GET_TIME_SINCE
 
 void GetTotalEvents() // 237 GET_TOTAL_EVENTS
 {
-	[[maybe_unused]] const auto type = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	const auto type = Pop().intVal;
+	const auto it = g_totalEvents.find(type);
+	Pushf(it != g_totalEvents.end() ? it->second : 0.0f);
 }
 
 void UpdateSnapshot() // 238 UPDATE_SNAPSHOT
@@ -3713,6 +3825,11 @@ void EndHandDemo()
 	g_handDemo.paused = false;
 }
 } // namespace
+
+bool HandDemoPlaying()
+{
+	return g_handDemo.playing;
+}
 
 std::optional<glm::vec2> UpdateHandDemo()
 {
