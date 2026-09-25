@@ -49,6 +49,10 @@ public:
 	[[nodiscard]] uint32_t GetDuration() const noexcept { return _duration; }
 	[[nodiscard]] const std::vector<Frame>& GetFrames() const noexcept { return _frames; }
 	[[nodiscard]] std::vector<glm::mat4> GetBoneMatrices(uint32_t time) const noexcept;
+	/// How far one play of the animation carries its owner: the header's float at 0x28 (walk 1.16, man's
+	/// run 2.46, 0 for animations done on the spot). Unconfirmed from the original's code; inferred from
+	/// the values across the locomotion animations.
+	[[nodiscard]] float GetDistancePerPlay() const noexcept { return _unknown_0x28; }
 
 private:
 	std::string _name;

@@ -544,7 +544,8 @@ void SetScriptUlong() // 020 SET_SCRIPT_ULONG
 	g_scriptAnimations[object] = {static_cast<uint32_t>(animation), static_cast<float>(std::max(loop, 1))};
 	// Test hook: OPENBLACK_SHOT_ON_ANIM=<AnimId>:<ms>[,<ms>...]:<png path with %d> screenshots at those
 	// times into the animation (the %d becomes the ms).
-	if (const char* shot = std::getenv("OPENBLACK_SHOT_ON_ANIM"); shot != nullptr && std::atoi(shot) == animation)
+	for (const char* shot : {std::getenv("OPENBLACK_SHOT_ON_ANIM"), std::getenv("OPENBLACK_SHOT_ON_ANIM2")})
+	if (shot != nullptr && std::atoi(shot) == animation)
 	{
 		const char* times = std::strchr(shot, ':');
 		const char* path = times != nullptr ? std::strchr(times + 1, ':') : nullptr;
@@ -820,10 +821,28 @@ struct Flock
 std::unordered_map<uint32_t, Flock> g_flocks;
 
 constexpr int32_t k_SpeedProperty = 11; // what scripts set to make livings run (0.9), walk (0.4) or stop (0)
-constexpr float k_UnitsPerSecond = 5.0f; // at speed 1: a family jog along a track
+// A living's full speed, which the script's speed property scales: a villager's fleeing speed from its
+// type's info (a Norse woman 6 m/s, a man 6.5; world units are metres), so the script's 0.2 is a stroll,
+// 0.4 a walk and 0.8-0.9 a run, and a family runs at different speeds. Anything else: 3 units/s.
+constexpr float k_UnitsPerSecond = 3.0f;
+float FullSpeed(uint32_t object)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	if (const auto* villager = registry.Valid(entity) ? registry.TryGet<openblack::ecs::components::Villager>(entity) : nullptr)
+	{
+		const auto type = openblack::GVillagerInfo::Find(villager->tribe, villager->number);
+		const auto& info = Locator::infoConstants::value().villager.at(static_cast<size_t>(type));
+		return GetSpeedStateSpeed(info.speedGroup.speedFleeing);
+	}
+	return k_UnitsPerSecond;
+}
 
 // Flock members following their leader: moved every frame straight to their spot by the leader.
 std::unordered_map<uint32_t, glm::vec3> g_followers;
+// Livings a script sent somewhere (MOVE_GAME_THING): moved every frame straight to the spot at their
+// script speed and placed exactly on it (scripts wait for a distance of 0).
+std::unordered_map<uint32_t, glm::vec3> g_scriptMoves;
 
 float SpeedFactor(uint32_t object)
 {
@@ -831,16 +850,15 @@ float SpeedFactor(uint32_t object)
 	return it != g_objectProperties.end() ? it->second : 1.0f;
 }
 
-// Turn an object about the vertical axis to face a point. The game's models face a quarter turn from the
-// yaw a plain atan2 gives (the opening's couple ended up side by side facing opposite ways without it).
-constexpr float k_ModelFacingOffset = glm::half_pi<float>();
-
+// Turn an object about the vertical axis to face a point. The game's people face their model's -Z (their
+// heels point to +Z in the walk, and a camera placed behind two villagers told to look past it saw their
+// faces until this was -Z); eulerAngleY(a) turns -Z to (-sin a, 0, -cos a).
 void FaceTowards(Transform& transform, const glm::vec3& target)
 {
 	const auto toTarget = target - transform.position;
 	if (toTarget.x != 0.0f || toTarget.z != 0.0f)
 	{
-		transform.rotation = glm::mat3(glm::eulerAngleY(k_ModelFacingOffset - std::atan2(toTarget.x, toTarget.z)));
+		transform.rotation = glm::mat3(glm::eulerAngleY(std::atan2(-toTarget.x, -toTarget.z)));
 	}
 }
 
@@ -866,8 +884,9 @@ bool MoveThingTo(uint32_t objId, const glm::vec3& position)
 	{
 		return false;
 	}
-	g_walks.erase(objId); // a move replaces any track walk or following
+	g_walks.erase(objId); // a move replaces any track walk, following or earlier move
 	g_followers.erase(objId);
+	g_scriptMoves.erase(objId);
 
 	auto* wallHug = registry.TryGet<WallHug>(entity);
 	auto* action = registry.TryGet<LivingAction>(entity);
@@ -891,13 +910,10 @@ bool MoveThingTo(uint32_t objId, const glm::vec3& position)
 		return true;
 	}
 
-	registry.AssignOrReplace<ScriptMove>(entity, position, 0u, false);
-	wallHug->goal = glm::vec2(position.x, position.z);
-	wallHug->step = glm::vec2(0.0f);
-	registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
-	                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
-	registry.Assign<MoveStateLinearTag>(entity);
+	// Not the pathfinder: its steps went a jump per game turn and faster than the villagers' own run.
+	HoldForScript(entity, from);
 	Locator::livingActionSystem::value().VillagerSetState(*action, LivingAction::Index::Top, VillagerStates::MoveToPos, true);
+	g_scriptMoves[objId] = position;
 	return true;
 }
 
@@ -2427,11 +2443,11 @@ void UpdateAnimations(float seconds)
 		    {
 			    wanted = scripted->second.animation;
 		    }
-		    else if (speed > 3.5f)
+		    else if (speed > 2.2f) // between a walk (~1.7 units/s) and a run (~2.8)
 		    {
 			    wanted = static_cast<uint32_t>(woman ? AnimId::PRunWoman : AnimId::PRunMan);
 		    }
-		    else if (speed > 0.3f)
+		    else if (speed > 0.2f)
 		    {
 			    wanted = static_cast<uint32_t>(woman ? AnimId::PWalkWoman : AnimId::PWalkMan);
 		    }
@@ -2446,7 +2462,13 @@ void UpdateAnimations(float seconds)
 			    animated = &registry.AssignOrReplace<Animated>(entity, wanted, 0.0f);
 		    }
 		    const auto [rate, duration] = AnimationRate(wanted);
-		    animated->time += rate * seconds;
+		    // Walking and running play by the ground covered, so feet keep pace with the ground.
+		    const auto& animations = Locator::resources::value().GetAnimations();
+		    const auto animationId = openblack::resources::HashIdentifier(wanted);
+		    const float stride = scripted == g_scriptAnimations.end() && animations.Contains(animationId)
+		                             ? animations.Handle(animationId)->GetDistancePerPlay()
+		                             : 0.0f;
+		    animated->time += stride > 0.0f ? duration * speed * seconds / stride : rate * seconds;
 		    if (scripted != g_scriptAnimations.end() && duration > 0.0f && animated->time >= duration)
 		    {
 			    animated->time -= duration;
@@ -2526,7 +2548,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			continue;
 		}
 		auto& walk = it->second;
-		const float step = k_UnitsPerSecond * std::max(SpeedFactor(it->first), 0.0f) * seconds;
+		const float step = FullSpeed(it->first) * std::max(SpeedFactor(it->first), 0.0f) * seconds;
 		if (step > 0.0f)
 		{
 			walk.at = walk.end >= walk.at ? std::min(walk.at + step, walk.end) : std::max(walk.at - step, walk.end);
@@ -2567,7 +2589,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			}
 			const auto at = registry.Get<Transform>(leader).position;
 			auto& camera = Locator::camera::value();
-			camera.SetOrigin(at + glm::vec3(-14.0f, 12.0f, -14.0f));
+			camera.SetOrigin(at + glm::vec3(-9.0f, 9.0f, -9.0f)); // ~16 units: close enough that they run
 			camera.SetFocus(at);
 			break;
 		}
@@ -2576,8 +2598,37 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	registry.SetDirty();
 	if (!g_pendingShots.empty() && std::chrono::steady_clock::now() >= g_pendingShots.front().second)
 	{
+		const auto& camera = Locator::camera::value();
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Test screenshot {}: camera at ({:.1f}, {:.1f}, {:.1f}) looking at ({:.1f}, {:.1f}, {:.1f})",
+		                   g_pendingShots.front().first, camera.GetOrigin().x, camera.GetOrigin().y, camera.GetOrigin().z,
+		                   camera.GetFocus().x, camera.GetFocus().y, camera.GetFocus().z);
 		Game::Instance()->RequestScreenshot(g_pendingShots.front().first); // one per frame
 		g_pendingShots.erase(g_pendingShots.begin());
+	}
+
+	for (auto it = g_scriptMoves.begin(); it != g_scriptMoves.end();)
+	{
+		const auto entity = static_cast<entt::entity>(it->first);
+		auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+		if (transform == nullptr)
+		{
+			it = g_scriptMoves.erase(it);
+			continue;
+		}
+		const auto toTarget = glm::vec2(it->second.x - transform->position.x, it->second.z - transform->position.z);
+		const float distance = glm::length(toTarget);
+		const float factor = SpeedFactor(it->first);
+		const float step = FullSpeed(it->first) * (factor > 0.0f ? factor : 0.4f) * seconds;
+		if (distance <= step)
+		{
+			PlaceMover(entity, *transform, it->second, it->second);
+			transform->position = it->second; // exactly where the script said
+			it = g_scriptMoves.erase(it);
+			continue;
+		}
+		PlaceMover(entity, *transform, transform->position + glm::vec3(toTarget.x, 0.0f, toTarget.y) / distance * step,
+		           it->second);
+		++it;
 	}
 
 	for (auto it = g_followers.begin(); it != g_followers.end();)
@@ -2592,7 +2643,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		const auto toTarget = glm::vec2(it->second.x - transform->position.x, it->second.z - transform->position.z);
 		const float distance = glm::length(toTarget);
 		// Close in at up to a run, faster when far behind so a member never loses the leader.
-		const float speed = k_UnitsPerSecond * std::clamp(distance / 4.0f, 0.0f, 1.5f);
+		const float speed = FullSpeed(it->first) * std::clamp(distance / 4.0f, 0.0f, 1.0f);
 		if (distance > 0.05f)
 		{
 			const float step = std::min(distance, speed * seconds);
