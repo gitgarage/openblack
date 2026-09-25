@@ -33,6 +33,8 @@ class Registry
 public:
 	Registry();
 	decltype(auto) Create() { return _registry.create(); }
+	// With the given identifier if it's free (test save points recreate script objects under their old ids).
+	decltype(auto) Create(entt::entity hint) { return _registry.create(hint); }
 	template <typename It>
 	void Create(It first, It last)
 	{

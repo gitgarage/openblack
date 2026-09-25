@@ -14,6 +14,8 @@
 //   X / Y                 -> Space (zoom to temple) / C (zoom to creature)
 //   +                     -> P (pause/unpause - openblack starts paused, so nothing simulates until
 //                            this is pressed)
+//   D-pad up / left       -> save test point 1 / 2 (keypad 1 / 2)
+//   D-pad down / right    -> load test point 1 / 2 (keypad 3 / 4)
 #include <cstdlib>
 
 #include <SDL.h>
@@ -176,6 +178,10 @@ void switchInputFrame()
 	setKey(SDL_SCANCODE_SPACE, (held & HidNpadButton_X) != 0);
 	setKey(SDL_SCANCODE_C, (held & HidNpadButton_Y) != 0);
 	setKey(SDL_SCANCODE_P, (held & HidNpadButton_Plus) != 0);
+	setKey(SDL_SCANCODE_KP_1, (held & HidNpadButton_Up) != 0);
+	setKey(SDL_SCANCODE_KP_2, (held & HidNpadButton_Left) != 0);
+	setKey(SDL_SCANCODE_KP_3, (held & HidNpadButton_Down) != 0);
+	setKey(SDL_SCANCODE_KP_4, (held & HidNpadButton_Right) != 0);
 
 	const u64 now = armTicksToNs(armGetSystemTick());
 	const bool zr = (held & HidNpadButton_ZR) != 0;

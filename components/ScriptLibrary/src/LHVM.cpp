@@ -9,6 +9,7 @@
 
 #include "LHVM.h"
 
+#include <type_traits>
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -325,6 +326,184 @@ int LHVM::SaveState(const std::filesystem::path& filepath)
 	LHVMFile file(LHVMVersion::BlackAndWhite, _variablesNames, _instructions, _auto, _scripts, _data, _mainStack, _variables,
 	              tasks, _ticks, _currentLineNumber, _highestTaskId, _highestScriptId, _executedInstructions);
 	file.Write(filepath);
+	return EXIT_SUCCESS;
+}
+
+namespace
+{
+template <typename T>
+void WriteRaw(std::ostream& out, const T& value)
+{
+	static_assert(std::is_trivially_copyable_v<T>);
+	out.write(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+
+template <typename T>
+bool ReadRaw(std::istream& in, T& value)
+{
+	static_assert(std::is_trivially_copyable_v<T>);
+	return static_cast<bool>(in.read(reinterpret_cast<char*>(&value), sizeof(T)));
+}
+
+void WriteString(std::ostream& out, const std::string& text)
+{
+	WriteRaw(out, static_cast<uint32_t>(text.size()));
+	out.write(text.data(), static_cast<std::streamsize>(text.size()));
+}
+
+bool ReadString(std::istream& in, std::string& text)
+{
+	uint32_t size = 0;
+	if (!ReadRaw(in, size) || size > (1U << 20))
+	{
+		return false;
+	}
+	text.resize(size);
+	return static_cast<bool>(in.read(text.data(), size));
+}
+
+void WriteVars(std::ostream& out, const std::vector<VMVar>& vars)
+{
+	WriteRaw(out, static_cast<uint32_t>(vars.size()));
+	for (const auto& var : vars)
+	{
+		WriteRaw(out, var.type);
+		WriteRaw(out, var.value);
+		WriteString(out, var.name);
+	}
+}
+
+bool ReadVars(std::istream& in, std::vector<VMVar>& vars)
+{
+	uint32_t count = 0;
+	if (!ReadRaw(in, count) || count > (1U << 20))
+	{
+		return false;
+	}
+	vars.clear();
+	vars.reserve(count);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		DataType type {};
+		VMValue value;
+		std::string name;
+		if (!ReadRaw(in, type) || !ReadRaw(in, value) || !ReadString(in, name))
+		{
+			return false;
+		}
+		vars.emplace_back(type, value, name);
+	}
+	return true;
+}
+
+constexpr uint32_t k_RuntimeMagic = 0x4E52564CU; // "LVRN"
+} // namespace
+
+int LHVM::SaveRuntime(const std::filesystem::path& filepath) const
+{
+	std::ofstream out(filepath, std::ios::binary);
+	if (!out)
+	{
+		return EXIT_FAILURE;
+	}
+	WriteRaw(out, k_RuntimeMagic);
+	WriteRaw(out, static_cast<uint32_t>(_instructions.size())); // to refuse a different script
+	WriteRaw(out, _ticks);
+	WriteRaw(out, _currentLineNumber);
+	WriteRaw(out, _highestTaskId);
+	WriteRaw(out, _highestScriptId);
+	WriteRaw(out, _executedInstructions);
+	WriteRaw(out, _mainStack);
+	WriteVars(out, _variables);
+	WriteRaw(out, static_cast<uint32_t>(_tasks.size()));
+	for (const auto& [id, task] : _tasks)
+	{
+		WriteRaw(out, id);
+		WriteVars(out, task.localVars);
+		WriteRaw(out, task.scriptId);
+		WriteRaw(out, task.id);
+		WriteRaw(out, task.instructionAddress);
+		WriteRaw(out, task.pevInstructionAddress);
+		WriteRaw(out, task.waitingTaskId);
+		WriteRaw(out, task.variablesOffset);
+		WriteRaw(out, task.stack);
+		WriteRaw(out, task.currentExceptionHandlerIndex);
+		WriteRaw(out, static_cast<uint32_t>(task.exceptionHandlerIps.size()));
+		for (const auto ip : task.exceptionHandlerIps)
+		{
+			WriteRaw(out, ip);
+		}
+		WriteRaw(out, task.ticks);
+		WriteRaw(out, task.inExceptionHandler);
+		WriteRaw(out, task.stop);
+		WriteRaw(out, task.iield);
+		WriteRaw(out, task.sleeping);
+		WriteString(out, task.name);
+		WriteString(out, task.filename);
+		WriteRaw(out, task.type);
+	}
+	return out ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+int LHVM::LoadRuntime(const std::filesystem::path& filepath)
+{
+	std::ifstream in(filepath, std::ios::binary);
+	uint32_t magic = 0;
+	uint32_t instructions = 0;
+	if (!in || !ReadRaw(in, magic) || magic != k_RuntimeMagic || !ReadRaw(in, instructions) ||
+	    instructions != _instructions.size())
+	{
+		return EXIT_FAILURE;
+	}
+	uint32_t ticks, line, highestTask, highestScript, executed;
+	VMStack mainStack;
+	std::vector<VMVar> variables;
+	uint32_t taskCount = 0;
+	if (!ReadRaw(in, ticks) || !ReadRaw(in, line) || !ReadRaw(in, highestTask) || !ReadRaw(in, highestScript) ||
+	    !ReadRaw(in, executed) || !ReadRaw(in, mainStack) || !ReadVars(in, variables) || !ReadRaw(in, taskCount))
+	{
+		return EXIT_FAILURE;
+	}
+	std::map<uint32_t, VMTask> tasks;
+	for (uint32_t i = 0; i < taskCount; ++i)
+	{
+		uint32_t key = 0;
+		VMTask task;
+		uint32_t handlers = 0;
+		if (!ReadRaw(in, key) || !ReadVars(in, task.localVars) || !ReadRaw(in, task.scriptId) || !ReadRaw(in, task.id) ||
+		    !ReadRaw(in, task.instructionAddress) || !ReadRaw(in, task.pevInstructionAddress) ||
+		    !ReadRaw(in, task.waitingTaskId) || !ReadRaw(in, task.variablesOffset) || !ReadRaw(in, task.stack) ||
+		    !ReadRaw(in, task.currentExceptionHandlerIndex) || !ReadRaw(in, handlers) || handlers > 4096)
+		{
+			return EXIT_FAILURE;
+		}
+		task.exceptionHandlerIps.resize(handlers);
+		for (auto& ip : task.exceptionHandlerIps)
+		{
+			if (!ReadRaw(in, ip))
+			{
+				return EXIT_FAILURE;
+			}
+		}
+		if (!ReadRaw(in, task.ticks) || !ReadRaw(in, task.inExceptionHandler) || !ReadRaw(in, task.stop) ||
+		    !ReadRaw(in, task.iield) || !ReadRaw(in, task.sleeping) || !ReadString(in, task.name) ||
+		    !ReadString(in, task.filename) || !ReadRaw(in, task.type))
+		{
+			return EXIT_FAILURE;
+		}
+		tasks.emplace(key, std::move(task));
+	}
+	// Replace the running state wholesale (no stop callbacks: the tasks carry on from where they were saved).
+	_tasks = std::move(tasks);
+	_variables = std::move(variables);
+	_mainStack = mainStack;
+	_currentStack = &_mainStack;
+	_currentTask = nullptr;
+	_ticks = ticks;
+	_currentLineNumber = line;
+	_highestTaskId = highestTask;
+	_highestScriptId = highestScript;
+	_executedInstructions = executed;
 	return EXIT_SUCCESS;
 }
 

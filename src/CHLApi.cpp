@@ -16,6 +16,8 @@
 #include <optional>
 #include <cctype>
 #include <deque>
+#include <fstream>
+#include <map>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -156,8 +158,39 @@ std::vector<float> PopVarArg(const int32_t argc)
 	return vals;
 }
 
+namespace
+{
+// Objects the scripts created, how to make them again (test save points): script type, subtype, age.
+struct ScriptEntityRecord
+{
+	int32_t type;
+	uint32_t subtype;
+	uint32_t age;
+};
+std::map<uint32_t, ScriptEntityRecord> g_scriptEntities;
+} // namespace
+
+entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint32_t subtype, const glm::vec3& position,
+                                  float altitude, float xAngleRadians, float yAngleRadians, const float zAngleRadians,
+                                  const float scale);
+
 entt::entity CreateScriptObject(const ObjectType type, uint32_t subtype, const glm::vec3& position, float altitude,
                                 float xAngleRadians, float yAngleRadians, const float zAngleRadians, const float scale)
+{
+	const auto entity =
+	    CreateScriptObjectOn(entt::null, type, subtype, position, altitude, xAngleRadians, yAngleRadians, zAngleRadians, scale);
+	if (entity != static_cast<entt::entity>(0) && entity != entt::null)
+	{
+		const uint32_t age = type == ObjectType::VillagerChild ? 10 : 30;
+		g_scriptEntities[static_cast<uint32_t>(entity)] = {static_cast<int32_t>(type), subtype, age};
+	}
+	return entity;
+}
+
+// Makes a script object, on the given identifier when `hint` isn't null (and it's free).
+entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint32_t subtype, const glm::vec3& position,
+                                  float altitude, float xAngleRadians, float yAngleRadians, const float zAngleRadians,
+                                  const float scale)
 {
 	// TODO(Daniels118): handle all types
 	switch (type)
@@ -170,7 +203,7 @@ entt::entity CreateScriptObject(const ObjectType type, uint32_t subtype, const g
 	{
 		// A named point for the script: nothing to draw, just somewhere to measure from and move to.
 		auto& registry = Locator::entitiesRegistry::value();
-		const auto entity = registry.Create();
+		const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
 		// Like everything the game creates, it sits on the land; the script's height is only approximate.
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
 		registry.Assign<Transform>(entity, glm::vec3(position.x, ground, position.z), glm::mat3(1.0f), glm::vec3(1.0f));
@@ -180,7 +213,7 @@ entt::entity CreateScriptObject(const ObjectType type, uint32_t subtype, const g
 	case ObjectType::VillagerChild:
 		// The script subtype is the VILLAGER_INFO number; the abode position picks the home town.
 		return VillagerArchetype::Create(position, position, static_cast<VillagerInfo>(subtype),
-		                                 type == ObjectType::VillagerChild ? 10 : 30);
+		                                 type == ObjectType::VillagerChild ? 10 : 30, hint);
 	default:
 	{
 		static std::set<std::pair<ObjectType, uint32_t>> warned;
@@ -839,6 +872,7 @@ struct ScriptWalk
 	std::vector<float> lengths;    // distance along it at each point
 	float at;                      // distance walked so far
 	float end;                     // distance to stop at (may be below `at`: walking backwards)
+	int32_t track = 0;             // the camera.edt track it follows
 };
 std::unordered_map<uint32_t, ScriptWalk> g_walks;
 
@@ -1016,6 +1050,7 @@ void FlockCreate() // 036 FLOCK_CREATE
 	const auto entity = registry.Create();
 	registry.Assign<Transform>(entity, position, glm::mat3(1.0f), glm::vec3(1.0f));
 	g_flocks[static_cast<uint32_t>(entity)] = {};
+	g_scriptEntities[static_cast<uint32_t>(entity)] = {static_cast<int32_t>(ObjectType::Marker), 0, 0}; // a flock is a point
 	Pusho(static_cast<uint32_t>(entity));
 }
 
@@ -2411,6 +2446,7 @@ void WalkPath() // 177 WALK_PATH
 	walk.at = std::clamp(forward ? valFrom : 1.0f - valFrom, 0.0f, 1.0f) * total;
 	walk.end = std::clamp(forward ? valTo : 1.0f - valTo, 0.0f, 1.0f) * total;
 	HoldForScript(entity, walk.points.back());
+	walk.track = track;
 	g_walks[object] = std::move(walk);
 }
 
@@ -2815,6 +2851,24 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	}
 
 	UpdateAnimations(seconds);
+
+	// Test hooks for the save points: OPENBLACK_TEST_SAVE_AT_TEXT=<line> saves point 1 when that line shows,
+	// OPENBLACK_TEST_LOAD_AFTER=<seconds> loads point 1 that long into the run.
+	{
+		static const int saveAtText = std::getenv("OPENBLACK_TEST_SAVE_AT_TEXT") != nullptr ? std::atoi(std::getenv("OPENBLACK_TEST_SAVE_AT_TEXT")) : -1;
+		static const float loadAfter = std::getenv("OPENBLACK_TEST_LOAD_AFTER") != nullptr ? static_cast<float>(std::atof(std::getenv("OPENBLACK_TEST_LOAD_AFTER"))) : -1.0f;
+		static bool saved = false, loaded = false;
+		static const auto start = std::chrono::steady_clock::now();
+		if (!saved && saveAtText >= 0 && g_lastTextId == saveAtText)
+		{
+			saved = SaveTestPoint(1);
+		}
+		if (!loaded && loadAfter >= 0.0f && std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count() > loadAfter)
+		{
+			loaded = true;
+			LoadTestPoint(1);
+		}
+	}
 
 	// The player's own camera movement, for the GET_TOTAL_EVENTS the control tutorials watch.
 	{
@@ -6068,6 +6122,322 @@ void CHLApi::InitFunctionsTable4()
 	CREATE_FUNCTION_BINDING("CAN_SKIP_CREATURE_TRAINING", 0, 1, CanSkipCreatureTraining);
 	CREATE_FUNCTION_BINDING("IS_KEEPING_OLD_CREATURE", 0, 1, IsKeepingOldCreature);
 	CREATE_FUNCTION_BINDING("CURRENT_PROFILE_HAS_CREATURE", 0, 1, CurrentProfileHasCreature);
+}
+
+
+// Test save points (D-pad on the Switch, keypad 1-4 on a desktop): a light snapshot for getting back to a
+// point in the story while testing, not the game's own saves. A point holds the script engine's state
+// (LHVM::SaveState), the objects the scripts created (remade under the same ids on load, since the scripts
+// hold their ids), and this file's own state: walks, flocks, speeds, timers, animations, the camera.
+namespace
+{
+std::filesystem::path TestPointDir(int slot)
+{
+	const char* dir = std::getenv("OPENBLACK_SAVEPOINT_DIR");
+	return std::filesystem::path(dir != nullptr ? dir : "savepoints") / fmt::format("point{}", slot);
+}
+
+std::string MatrixText(const glm::mat3& m)
+{
+	return fmt::format("{} {} {} {} {} {} {} {} {}", m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1],
+	                   m[2][2]);
+}
+} // namespace
+
+bool SaveTestPoint(int slot)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto dir = TestPointDir(slot);
+	std::error_code ec;
+	std::filesystem::create_directories(dir, ec);
+	if (Locator::vm::value().SaveRuntime(dir / "vm.bin") != EXIT_SUCCESS)
+	{
+		SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Test save point {}: couldn't write the script state", slot);
+		return false;
+	}
+
+	std::ofstream out(dir / "state.txt");
+	const auto now = std::chrono::steady_clock::now();
+	const auto& camera = Locator::camera::value();
+	out << fmt::format("camera {} {} {} {} {} {} {}\n", camera.GetOrigin().x, camera.GetOrigin().y, camera.GetOrigin().z,
+	                   camera.GetFocus().x, camera.GetFocus().y, camera.GetFocus().z, camera.IsScriptControlled() ? 1 : 0);
+	out << fmt::format("hour {}\n", g_gameHour);
+	out << fmt::format("dialogue {} {}\n", g_dialogueActive ? 1 : 0, g_lastTextId);
+	for (const auto& [id, record] : g_scriptEntities)
+	{
+		const auto entity = static_cast<entt::entity>(id);
+		const auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+		if (transform == nullptr)
+		{
+			continue;
+		}
+		out << fmt::format("entity {} {} {} {} {} {} {} {} {}\n", id, record.type, record.subtype, record.age,
+		                   transform->position.x, transform->position.y, transform->position.z,
+		                   MatrixText(transform->rotation), transform->scale.x);
+		if (const auto* mesh = registry.TryGet<Mesh>(entity))
+		{
+			out << fmt::format("mesh {} {}\n", id, mesh->id);
+		}
+		if (const auto* villager = registry.TryGet<Villager>(entity))
+		{
+			out << fmt::format("villager {} {} {}\n", id, villager->age, villager->health);
+		}
+		if (const auto* move = registry.TryGet<ScriptMove>(entity))
+		{
+			out << fmt::format("held {} {} {} {} {}\n", id, move->target.x, move->target.y, move->target.z, move->arrived ? 1 : 0);
+		}
+	}
+	for (const auto& [key, value] : g_objectProperties)
+	{
+		out << fmt::format("property {} {}\n", key, value);
+	}
+	for (const auto& [id, walk] : g_walks)
+	{
+		out << fmt::format("walk {} {} {} {}\n", id, walk.track, walk.at, walk.end);
+	}
+	for (const auto& [id, target] : g_followers)
+	{
+		out << fmt::format("follow {} {} {} {}\n", id, target.x, target.y, target.z);
+	}
+	for (const auto& [id, target] : g_scriptMoves)
+	{
+		out << fmt::format("move {} {} {} {}\n", id, target.x, target.y, target.z);
+	}
+	for (const auto& [id, flock] : g_flocks)
+	{
+		out << fmt::format("flock {} {}", id, flock.leader);
+		for (const auto member : flock.members)
+		{
+			out << ' ' << member;
+		}
+		out << '\n';
+	}
+	for (const auto& [id, animation] : g_scriptAnimations)
+	{
+		out << fmt::format("animation {} {} {}\n", id, animation.animation, animation.playsLeft);
+	}
+	for (const auto& [id, end] : g_timers)
+	{
+		out << fmt::format("timer {} {}\n", id, std::chrono::duration<float>(end - now).count());
+	}
+	out << fmt::format("nexttimer {}\n", g_nextTimer);
+	for (const auto& [type, value] : g_totalEvents)
+	{
+		out << fmt::format("event {} {}\n", type, value);
+	}
+	for (const auto id : g_notPickupable)
+	{
+		out << fmt::format("notpickupable {}\n", id);
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test save point {} saved to {} ({} script objects)", slot, dir.string(),
+	                   g_scriptEntities.size());
+	return true;
+}
+
+bool LoadTestPoint(int slot)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto dir = TestPointDir(slot);
+	std::ifstream in(dir / "state.txt");
+	if (!in || Locator::vm::value().LoadRuntime(dir / "vm.bin") != EXIT_SUCCESS)
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("game"), "Test save point {}: nothing saved at {}", slot, dir.string());
+		return false;
+	}
+	EndHandDemo();
+	g_heldObject = 0;
+	g_walks.clear();
+	g_followers.clear();
+	g_scriptMoves.clear();
+	g_flying.clear();
+	g_flocks.clear();
+	g_objectProperties.clear();
+	g_scriptAnimations.clear();
+	g_timers.clear();
+	g_totalEvents.clear();
+	g_notPickupable.clear();
+	g_gameTimeMove.reset();
+	const auto now = std::chrono::steady_clock::now();
+	auto seconds = [](float value) {
+		return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<float>(value));
+	};
+
+	std::string line;
+	int remade = 0;
+	while (std::getline(in, line))
+	{
+		std::istringstream fields(line);
+		std::string kind;
+		fields >> kind;
+		uint32_t id = 0;
+		if (kind == "camera")
+		{
+			glm::vec3 origin, focus;
+			int scripted;
+			fields >> origin.x >> origin.y >> origin.z >> focus.x >> focus.y >> focus.z >> scripted;
+			auto& camera = Locator::camera::value();
+			camera.SetScriptControl(scripted != 0);
+			camera.SetOrigin(origin);
+			camera.SetFocus(focus);
+		}
+		else if (kind == "hour")
+		{
+			float hour;
+			fields >> hour;
+			ApplyGameHour(hour);
+		}
+		else if (kind == "dialogue")
+		{
+			int active;
+			fields >> active >> g_lastTextId;
+			g_dialogueActive = active != 0;
+			g_lastTextShown = now - std::chrono::seconds(30); // any line up counts as read
+		}
+		else if (kind == "entity")
+		{
+			ScriptEntityRecord record {};
+			glm::vec3 position;
+			glm::mat3 rotation;
+			float scale;
+			fields >> id >> record.type >> record.subtype >> record.age >> position.x >> position.y >> position.z;
+			for (int c = 0; c < 3; ++c)
+			{
+				for (int r = 0; r < 3; ++r)
+				{
+					fields >> rotation[c][r];
+				}
+			}
+			fields >> scale;
+			const auto entity = static_cast<entt::entity>(id);
+			if (!registry.Valid(entity))
+			{
+				const auto made = CreateScriptObjectOn(entity, static_cast<ObjectType>(record.type), record.subtype, position,
+				                                       0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+				if (made != entity)
+				{
+					SPDLOG_LOGGER_WARN(spdlog::get("game"), "Test save point {}: couldn't remake object {} (type {})", slot, id,
+					                   record.type);
+					continue;
+				}
+				++remade;
+			}
+			g_scriptEntities[id] = record;
+			if (auto* transform = registry.TryGet<Transform>(entity))
+			{
+				transform->position = position;
+				transform->rotation = rotation;
+				transform->scale = glm::vec3(scale);
+			}
+		}
+		else if (kind == "mesh")
+		{
+			entt::id_type mesh;
+			fields >> id >> mesh;
+			if (auto* component = registry.TryGet<Mesh>(static_cast<entt::entity>(id)))
+			{
+				component->id = mesh;
+			}
+		}
+		else if (kind == "villager")
+		{
+			uint32_t age, health;
+			fields >> id >> age >> health;
+			if (auto* villager = registry.TryGet<Villager>(static_cast<entt::entity>(id)))
+			{
+				villager->age = age;
+				villager->health = health;
+				villager->lifeStage = age < 18 ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
+			}
+		}
+		else if (kind == "held")
+		{
+			glm::vec3 target;
+			int arrived;
+			fields >> id >> target.x >> target.y >> target.z >> arrived;
+			const auto entity = static_cast<entt::entity>(id);
+			if (registry.Valid(entity))
+			{
+				registry.AssignOrReplace<ScriptMove>(entity, target, 0u, arrived != 0);
+			}
+		}
+		else if (kind == "property")
+		{
+			uint64_t key;
+			float value;
+			fields >> key >> value;
+			g_objectProperties[key] = value;
+		}
+		else if (kind == "walk")
+		{
+			int32_t track;
+			float at, end;
+			fields >> id >> track >> at >> end;
+			auto curve = LoadTrackGround(track);
+			if (curve.size() >= 2)
+			{
+				ScriptWalk walk;
+				walk.lengths.push_back(0.0f);
+				for (size_t i = 1; i < curve.size(); ++i)
+				{
+					walk.lengths.push_back(walk.lengths.back() + glm::distance(curve[i - 1], curve[i]));
+				}
+				walk.points = std::move(curve);
+				walk.at = at;
+				walk.end = end;
+				walk.track = track;
+				g_walks[id] = std::move(walk);
+			}
+		}
+		else if (kind == "follow" || kind == "move")
+		{
+			glm::vec3 target;
+			fields >> id >> target.x >> target.y >> target.z;
+			(kind == "follow" ? g_followers : g_scriptMoves)[id] = target;
+		}
+		else if (kind == "flock")
+		{
+			Flock flock;
+			fields >> id >> flock.leader;
+			for (uint32_t member; fields >> member;)
+			{
+				flock.members.push_back(member);
+			}
+			g_flocks[id] = std::move(flock);
+		}
+		else if (kind == "animation")
+		{
+			ScriptAnimation animation {};
+			fields >> id >> animation.animation >> animation.playsLeft;
+			g_scriptAnimations[id] = animation;
+		}
+		else if (kind == "timer")
+		{
+			float remaining;
+			fields >> id >> remaining;
+			g_timers[id] = now + seconds(remaining);
+		}
+		else if (kind == "nexttimer")
+		{
+			fields >> g_nextTimer;
+		}
+		else if (kind == "event")
+		{
+			int32_t type;
+			float value;
+			fields >> type >> value;
+			g_totalEvents[type] = value;
+		}
+		else if (kind == "notpickupable")
+		{
+			fields >> id;
+			g_notPickupable.insert(id);
+		}
+	}
+	registry.SetDirty();
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test save point {} loaded from {} ({} objects remade)", slot, dir.string(), remade);
+	return true;
 }
 
 } // namespace openblack::chlapi

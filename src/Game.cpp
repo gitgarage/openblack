@@ -152,6 +152,27 @@ bool Game::ProcessEvents(const SDL_Event& event) noexcept
 	{
 		g_rightButtonDown = event.type == SDL_MOUSEBUTTONDOWN;
 	}
+	// Test save points: keypad 1/2 save points 1/2, keypad 3/4 load them (D-pad on the Switch).
+	if (event.type == SDL_KEYDOWN && event.key.repeat == 0)
+	{
+		switch (event.key.keysym.scancode)
+		{
+		case SDL_SCANCODE_KP_1:
+			chlapi::SaveTestPoint(1);
+			break;
+		case SDL_SCANCODE_KP_2:
+			chlapi::SaveTestPoint(2);
+			break;
+		case SDL_SCANCODE_KP_3:
+			chlapi::LoadTestPoint(1);
+			break;
+		case SDL_SCANCODE_KP_4:
+			chlapi::LoadTestPoint(2);
+			break;
+		default:
+			break;
+		}
+	}
 
 	if ((event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) && event.button.button == SDL_BUTTON_LEFT)
 	{

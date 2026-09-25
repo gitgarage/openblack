@@ -67,4 +67,8 @@ uint32_t FindObjectNear(const glm::vec3& point, float radius);
 // frame, to pick up, swing and throw the object nearest the camera's focus.
 std::optional<std::pair<glm::vec3, bool>> TestPickupStep();
 
+// Test save points 1 and 2 (D-pad on the Switch, keypad on a desktop), under OPENBLACK_SAVEPOINT_DIR.
+bool SaveTestPoint(int slot);
+bool LoadTestPoint(int slot);
+
 } // namespace openblack::chlapi

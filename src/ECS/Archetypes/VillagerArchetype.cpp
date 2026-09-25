@@ -31,10 +31,10 @@ using namespace openblack::ecs::components;
 using namespace openblack::ecs::systems;
 
 entt::entity VillagerArchetype::Create([[maybe_unused]] const glm::vec3& abodePosition, const glm::vec3& position,
-                                       VillagerInfo type, uint32_t age)
+                                       VillagerInfo type, uint32_t age, entt::entity hint)
 {
 	auto& registry = Locator::entitiesRegistry::value();
-	const auto entity = registry.Create();
+	const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
 
 	const auto& info = Locator::infoConstants::value().villager.at(static_cast<size_t>(type));
 

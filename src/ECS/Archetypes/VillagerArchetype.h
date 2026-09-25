@@ -11,6 +11,7 @@
 
 #include <string>
 
+#include <entt/entity/entity.hpp>
 #include <entt/fwd.hpp>
 #include <glm/fwd.hpp>
 
@@ -21,7 +22,8 @@ namespace openblack::ecs::archetypes
 class VillagerArchetype
 {
 public:
-	static entt::entity Create(const glm::vec3& abodePosition, const glm::vec3& position, VillagerInfo type, uint32_t age);
+	static entt::entity Create(const glm::vec3& abodePosition, const glm::vec3& position, VillagerInfo type, uint32_t age,
+	                           entt::entity hint = entt::null);
 	// The body for a villager of this type and age: children (under 18) have their own in the info.
 	static entt::id_type MeshResource(VillagerInfo type, uint32_t age);
 	VillagerArchetype() = delete;

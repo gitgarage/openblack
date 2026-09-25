@@ -150,6 +150,10 @@ public:
 
 	/// Write SAV file to filesystem
 	int SaveState(const std::filesystem::path& filepath);
+	/// The running state only (tasks, their stacks and locals, globals, counters), for a VM running the same
+	/// compiled script: LHVMFile::Write doesn't write yet, so SaveState's file is empty.
+	int SaveRuntime(const std::filesystem::path& filepath) const;
+	int LoadRuntime(const std::filesystem::path& filepath);
 
 	void LookIn(ScriptType allowedScriptTypesMask);
 
