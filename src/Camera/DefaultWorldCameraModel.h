@@ -105,9 +105,6 @@ private:
 
 	// State of input Action
 	glm::vec3 _rotateAroundDelta = glm::vec3(0.0f, 0.0f, 0.0f);
-	// Tilting with the tilt controls orbits round the focus, as the original's pitch does (its tutorial checks
-	// the focus stays on the temple), instead of looking up and down in place.
-	bool _tiltOrbits = false;
 	glm::vec2 _keyBoardMoveDelta = glm::vec2(0.0f, 0.0f);
 	std::optional<glm::vec3> _handPosition;
 

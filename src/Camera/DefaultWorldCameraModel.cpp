@@ -122,8 +122,10 @@ void DefaultWorldCameraModel::TiltZoom(glm::vec3& eulerAngles, float scalingFact
 	{
 		const auto pitchStep = _rotateAroundDelta.x * 0.002f;
 		eulerAngles.y -= pitchStep;
-		// Clamp the pitch angle to keep the camera within between -30 and 78.75 degrees.
-		eulerAngles.y = glm::clamp(eulerAngles.y, -1.0f / 6.0f * glm::pi<float>(), 7.0f / 16.0f * glm::pi<float>());
+		// Tilt looks from straight up to straight down (as the original's pitch; it was -30 to 78.75 degrees),
+		// short of the poles where the view would flip over.
+		constexpr float k_MaxPitch = glm::radians(89.0f);
+		eulerAngles.y = glm::clamp(eulerAngles.y, -k_MaxPitch, k_MaxPitch);
 		if (_mode == Mode::ArcBall)
 		{
 			const auto distanceFromBound = (2.0f * k_CameraInteractionStepSize) - _distanceFromBoundY;
@@ -222,7 +224,7 @@ bool DefaultWorldCameraModel::ConstrainAltitude()
 		hasBeenAdjusted = true;
 	}
 
-	if (_mode != Mode::ArcBall && _rotateAroundDelta.x != 0.0f && !_tiltOrbits)
+	if (_mode != Mode::ArcBall && _rotateAroundDelta.x != 0.0f)
 	{
 		_targetFocus = _targetOrigin + glm::normalize(_targetFocus - _targetOrigin) * _focusDistance;
 	}
@@ -322,7 +324,7 @@ void DefaultWorldCameraModel::UpdateMode(const Camera& camera, glm::vec3 eulerAn
 		break;
 	}
 
-	if (_mode != Mode::ArcBall && _rotateAroundDelta.x != 0.0f && !_tiltOrbits)
+	if (_mode != Mode::ArcBall && _rotateAroundDelta.x != 0.0f)
 	{
 		const auto diff = _targetFocus - _targetOrigin;
 		_targetOrigin = _currentOrigin;
@@ -619,7 +621,6 @@ void DefaultWorldCameraModel::HandleActions(std::chrono::microseconds dt)
 {
 	_rotateAroundDelta = glm::vec3();
 	_keyBoardMoveDelta = glm::vec2();
-	_tiltOrbits = false;
 
 	// Compute delta position (dp) based on the elapsed time and speed.
 	const auto dp = k_InteractionSpeedMultiplier * std::chrono::duration_cast<std::chrono::duration<float>>(dt).count();
@@ -637,7 +638,6 @@ void DefaultWorldCameraModel::HandleActions(std::chrono::microseconds dt)
 	{
 		const float distance = (actionSystem.Get(input::BindableActionMap::TILT_DOWN) ? -1.0f : 1.0f) * dp;
 		_rotateAroundDelta.x += distance;
-		_tiltOrbits = true;
 	}
 
 	if (actionSystem.GetAny(input::BindableActionMap::MOVE_FORWARDS, input::BindableActionMap::MOVE_BACKWARDS))
