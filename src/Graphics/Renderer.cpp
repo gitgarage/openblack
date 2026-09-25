@@ -469,6 +469,14 @@ void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSub
 			{
 				desc.program->SetTextureSampler("s_diffuse", 0, *texture);
 			}
+			if (desc.instanceDesc)
+			{
+				const auto& renderCtx = Locator::rendereringSystem::value().GetContext();
+				const glm::vec4 bonesSize = {ecs::systems::RenderContext::k_BonesPerRow * 4.0f,
+				                             static_cast<float>(ecs::systems::RenderContext::k_BoneRows), 0.0f, 0.0f};
+				desc.program->SetTextureSampler("s_bones", 2, renderCtx.boneTexture); // vs
+				desc.program->SetUniformValue("u_bonesSize", &bonesSize);             // vs
+			}
 			if (desc.morphWithTerrain)
 			{
 				desc.program->SetTextureSampler("s_heightmap", 1, heightMap);   // vs
@@ -797,101 +805,16 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 				DrawMesh(*mesh, submitDesc, std::numeric_limits<uint8_t>::max());
 			}
 
-			// Animated meshes: one draw each, posed by their animation's frame. The animation gives each
-			// bone relative to its parent; the mesh wants them composed down the hierarchy.
-			const auto& animations = Locator::resources::value().GetAnimations();
+			// Animated meshes: one draw each (their instance transform carries their own bone-texture row).
 			for (const auto& animated : renderCtx.animatedDrawDescs)
 			{
 				auto mesh = meshManager.Handle(animated.meshId);
 				submitDesc.instanceDesc =
 				    std::make_unique<graphics::InstanceDesc>(renderCtx.instanceUniformBuffer, animated.offset, 1);
-				std::vector<glm::mat4> bones;
-				// Skinning test (OPENBLACK_SKIN_CYCLE=1): every 10 s, offset 5 s from the screenshots, draw animated
-				// meshes posed (0), in their default pose (1) or with identity bones (2), logging the switch.
-				static const bool s_skinCycle = std::getenv("OPENBLACK_SKIN_CYCLE") != nullptr;
-				static const auto s_skinStart = std::chrono::steady_clock::now();
-				int skinMode = 0;
-				if (s_skinCycle)
-				{
-					const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - s_skinStart).count();
-					skinMode = static_cast<int>(((seconds + 5) / 10) % 3);
-					static int s_lastMode = -1;
-					if (skinMode != s_lastMode)
-					{
-						s_lastMode = skinMode;
-						SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "skin cycle: mode {} ({})", skinMode,
-						                   skinMode == 0 ? "posed" : skinMode == 1 ? "default pose" : "identity bones");
-					}
-				}
-				if (mesh->IsBoned() && skinMode == 2)
-				{
-					bones.assign(mesh->GetBoneMatrices().size(), glm::mat4(1.0f));
-					submitDesc.modelMatrices = bones.data();
-					submitDesc.matrixCount = static_cast<uint8_t>(bones.size());
-				}
-				else if (mesh->IsBoned() && skinMode == 1)
-				{
-					submitDesc.modelMatrices = mesh->GetBoneMatrices().data();
-					submitDesc.matrixCount = static_cast<uint8_t>(mesh->GetBoneMatrices().size());
-				}
-				else if (mesh->IsBoned())
-				{
-					bones = mesh->GetBoneMatrices();
-					const auto animationId = resources::HashIdentifier(animated.animation);
-					if (animations.Contains(animationId))
-					{
-						const auto posed = animations.Handle(animationId)->GetBoneMatrices(static_cast<uint32_t>(animated.time));
-						const auto& parents = mesh->GetBoneParents();
-						static bool s_logged = false;
-						const bool logThis = !s_logged && animated.animation == 385; // PStand: compare with the laptop
-						auto sum = [](const std::vector<glm::mat4>& m) {
-							double total = 0.0;
-							for (const auto& x : m)
-							{
-								for (int c = 0; c < 4; ++c)
-								{
-									for (int r = 0; r < 4; ++r)
-									{
-										total += static_cast<double>(x[c][r]) * (1 + c * 4 + r);
-									}
-								}
-							}
-							return total;
-						};
-						if (logThis)
-						{
-							const auto posed0 = animations.Handle(animationId)->GetBoneMatrices(0);
-							SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "skinning check: mesh bones {} sum {:.4f}, anim 385 t0 bones {} sum {:.4f}",
-							                   bones.size(), sum(bones), posed0.size(), sum(posed0));
-						}
-						if (posed.size() == bones.size())
-						{
-							for (size_t i = 0; i < posed.size(); ++i)
-							{
-								bones[i] = parents[i] != std::numeric_limits<uint32_t>::max() ? bones[parents[i]] * posed[i]
-								                                                               : posed[i];
-							}
-						}
-						if (logThis)
-						{
-							s_logged = true;
-							std::string parentList;
-							for (auto p : parents)
-							{
-								parentList += fmt::format("{} ", static_cast<int32_t>(p));
-							}
-							SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "skinning check: composed sum {:.4f}, parents {}", sum(bones), parentList);
-						}
-					}
-					submitDesc.modelMatrices = bones.data();
-					submitDesc.matrixCount = static_cast<uint8_t>(bones.size());
-				}
-				else
-				{
-					const static auto identity = glm::mat4(1.0f);
-					submitDesc.modelMatrices = &identity;
-					submitDesc.matrixCount = 1;
-				}
+				// The pose is in the bone texture (row in the instance transform, see RenderContext::boneTexture).
+				const static auto identity = glm::mat4(1.0f);
+				submitDesc.modelMatrices = &identity;
+				submitDesc.matrixCount = 1;
 				submitDesc.isSky = false;
 				submitDesc.morphWithTerrain = false;
 				submitDesc.program = objectShaderInstanced;

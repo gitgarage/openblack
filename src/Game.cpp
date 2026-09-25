@@ -669,6 +669,7 @@ bool Game::Initialize() noexcept
 		}
 	});
 
+
 	// Load loose one-off assets
 	{
 		using AFromDiskTag = resources::L3DAnimLoader::FromDiskTag;

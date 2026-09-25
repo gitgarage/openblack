@@ -18,6 +18,14 @@ SAMPLER2D(s_heightmap, 1);
 uniform vec4 u_islandExtent;
 #endif // USE_HEIGHT_MAP
 
+#ifdef USE_INSTANCING
+// Bone matrices for instanced draws come from a float texture rather than u_model: one row per pose, four
+// texels (matrix columns) per bone. The Switch's GLES driver kept only the first matrix of u_model.
+// The row is carried in the instance transform's first column's w, which is otherwise always 0.
+SAMPLER2D(s_bones, 2);
+uniform vec4 u_bonesSize; // texture width, height in texels
+#endif // USE_INSTANCING
+
 void main()
 {
 	// Unpack
@@ -33,16 +41,26 @@ void main()
 	int modelIndex = int(max(0.0, a_indices.x));
 #endif
 
-	v_position = mul(u_model[modelIndex], vec4(a_position.xyz, 1.0f));
-
 #ifdef USE_INSTANCING
+	float boneV = (i_data0.w + 0.5f) / u_bonesSize.y;
+	float boneU = (float(modelIndex) * 4.0f + 0.5f) / u_bonesSize.x;
+	float texelU = 1.0f / u_bonesSize.x;
+	mat4 bone = mtxFromCols(
+	    texture2DLod(s_bones, vec2(boneU, boneV), 0.0f),
+	    texture2DLod(s_bones, vec2(boneU + texelU, boneV), 0.0f),
+	    texture2DLod(s_bones, vec2(boneU + 2.0f * texelU, boneV), 0.0f),
+	    texture2DLod(s_bones, vec2(boneU + 3.0f * texelU, boneV), 0.0f));
+	v_position = mul(bone, vec4(a_position.xyz, 1.0f));
+
 	mat4 model;
-	model[0] = i_data0;
+	model[0] = vec4(i_data0.xyz, 0.0f);
 	model[1] = i_data1;
 	model[2] = i_data2;
 	model[3] = i_data3;
 
 	v_position = instMul(model, v_position);
+#else
+	v_position = mul(u_model[modelIndex], vec4(a_position.xyz, 1.0f));
 #endif // USE_INSTANCING
 
 #ifdef USE_HEIGHT_MAP

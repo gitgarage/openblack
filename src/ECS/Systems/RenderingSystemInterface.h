@@ -60,6 +60,17 @@ struct RenderContext
 	};
 	std::vector<AnimatedDrawDesc> animatedDrawDescs;
 	uint32_t animatedOffset = 0;
+
+	/// Bone matrices for skinned meshes, sampled by the instanced object shader instead of u_model (the
+	/// Switch's GLES driver kept only u_model's first matrix). A float texture: one row per pose, four
+	/// texels (matrix columns) per bone. Row 0 is all identity (unskinned meshes); each boned mesh type has
+	/// a row for its default pose and each animated entity one for its current pose. An instance's row is
+	/// carried in its transform's [0][3], which is otherwise 0.
+	static constexpr uint16_t k_BonesPerRow = 128;
+	static constexpr uint16_t k_BoneRows = 1024;
+	graphics::TextureHandle boneTexture;
+	std::vector<glm::mat4> boneData; // k_BonesPerRow matrices per row
+	uint32_t boneRowsUsed = 0;
 	/// Not an actual vertex buffer, but a dynamic general purpose buffer which
 	/// stores uniform data as a GPU-side copy of \ref _instanceUniforms and
 	/// which is populated in \ref PrepareDraw and consumed in \ref DrawModels.

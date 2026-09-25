@@ -30,11 +30,16 @@ using namespace openblack::ecs::systems;
 using namespace openblack::ecs::components;
 
 RenderContext::RenderContext()
-    : instanceUniformBuffer(BGFX_INVALID_HANDLE)
+    : boneTexture(graphics::fromBgfx(bgfx::TextureHandle BGFX_INVALID_HANDLE))
+    , instanceUniformBuffer(BGFX_INVALID_HANDLE)
 {
 }
 RenderContext::~RenderContext()
 {
+	if (bgfx::isValid(toBgfx(boneTexture)))
+	{
+		bgfx::destroy(toBgfx(boneTexture));
+	}
 	if (bgfx::isValid(toBgfx(instanceUniformBuffer)))
 	{
 		bgfx::destroy(toBgfx(instanceUniformBuffer));
