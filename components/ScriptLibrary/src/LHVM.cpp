@@ -343,11 +343,19 @@ void LHVM::LookIn(const ScriptType allowedScriptTypesMask)
 			else if (task.waitingTaskId == 0)
 			{
 				task.currentExceptionHandlerIndex = 0;
-				if (GetExceptionHandlersCount() > 0)
+				// The handler lookups read _currentTask, which CpuLoop clears when it returns: without this they
+				// always saw no handlers, so no exception handler (a script's "stop when..." condition) ever ran.
+				_currentTask = &task;
+				const bool hasHandlers = GetExceptionHandlersCount() > 0;
+				if (hasHandlers)
 				{
 					task.pevInstructionAddress = task.instructionAddress;
 					task.instructionAddress = GetCurrentExceptionHandlerIp(task.currentExceptionHandlerIndex);
 					task.inExceptionHandler = true;
+				}
+				_currentTask = nullptr;
+				if (hasHandlers)
+				{
 					CpuLoop(task);
 				}
 			}

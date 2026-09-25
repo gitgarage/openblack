@@ -153,7 +153,25 @@ void LandIsland::LoadFromFile(const std::filesystem::path& path)
 
 float LandIsland::GetHeightAt(glm::vec2 vec) const
 {
-	return GetCell(vec * 0.1f).altitude * LandIsland::k_HeightUnit;
+	// The height of the drawn surface: the triangle of the cell under the point, split along the diagonal
+	// LandBlock uses (top-left to bottom-right, or bottom-left to top-right when the cell's split flag is set).
+	// A plain cell lookup left anything standing mid-slope below the ground, down to its head on the Switch.
+	const auto cellPos = glm::max(vec * 0.1f, glm::vec2(0.0f));
+	const auto cell = glm::u16vec2(cellPos);
+	const float fx = cellPos.x - static_cast<float>(cell.x);
+	const float fz = cellPos.y - static_cast<float>(cell.y);
+	const auto& topLeft = GetCell(cell);
+	const float hTL = topLeft.altitude * LandIsland::k_HeightUnit;
+	const float hTR = GetCell(cell + glm::u16vec2(1, 0)).altitude * LandIsland::k_HeightUnit;
+	const float hBL = GetCell(cell + glm::u16vec2(0, 1)).altitude * LandIsland::k_HeightUnit;
+	const float hBR = GetCell(cell + glm::u16vec2(1, 1)).altitude * LandIsland::k_HeightUnit;
+	if (!topLeft.properties.split)
+	{
+		return fx >= fz ? hTL + fx * (hTR - hTL) + fz * (hBR - hTR) // top-left, top-right, bottom-right
+		                : hTL + fz * (hBL - hTL) + fx * (hBR - hBL); // top-left, bottom-left, bottom-right
+	}
+	return fx + fz <= 1.0f ? hTL + fx * (hTR - hTL) + fz * (hBL - hTL)                     // top-left, top-right, bottom-left
+	                       : hBR + (1.0f - fx) * (hBL - hBR) + (1.0f - fz) * (hTR - hBR); // bottom-right, top-right, bottom-left
 }
 
 glm::vec3 LandIsland::GetNormalAt(glm::vec2 vec) const

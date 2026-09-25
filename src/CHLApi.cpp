@@ -445,19 +445,18 @@ void SpiritPointGameThing() // 010 SPIRIT_POINT_GAME_THING
 	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
-// Whether a point is on screen: within the camera's view cone (half-angle about half the vertical FOV
-// widened for a 16:9 screen).
+// Whether a point is on screen: inside the camera's view once projected. (A fixed cone round the view
+// direction missed things low on the screen, which is where the family is when you follow them closely,
+// so the Land 1 opening never let them carry on.)
 bool InFieldOfView(const glm::vec3& position)
 {
-	const auto& camera = Locator::camera::value();
-	const auto toPoint = position - camera.GetOrigin();
-	const float length = glm::length(toPoint);
-	if (length < 0.001f)
+	const auto clip = Locator::camera::value().GetViewProjectionMatrix() * glm::vec4(position, 1.0f);
+	if (clip.w <= 0.0f)
 	{
-		return true;
+		return false; // behind the camera
 	}
-	constexpr float k_CosHalfAngle = 0.82f; // ~35 degrees
-	return glm::dot(toPoint / length, glm::normalize(camera.GetForward())) >= k_CosHalfAngle;
+	const auto ndc = glm::vec3(clip) / clip.w;
+	return std::abs(ndc.x) <= 1.0f && std::abs(ndc.y) <= 1.0f;
 }
 
 void GameThingFieldOfView() // 011 GAME_THING_FIELD_OF_VIEW
@@ -2554,6 +2553,25 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	}
 
 	UpdateAnimations(seconds);
+	// Test hook: OPENBLACK_TEST_FOLLOW=1 keeps the camera close behind the lead of a flock (the Land 1 family's
+	// father), as a player following them would, so the follow sequence can be checked without input.
+	static const bool s_testFollow = std::getenv("OPENBLACK_TEST_FOLLOW") != nullptr;
+	if (s_testFollow)
+	{
+		for (const auto& [flockId, flock] : g_flocks)
+		{
+			const auto leader = static_cast<entt::entity>(flock.leader);
+			if (flock.leader == 0 || !registry.Valid(leader) || !registry.AllOf<Transform>(leader))
+			{
+				continue;
+			}
+			const auto at = registry.Get<Transform>(leader).position;
+			auto& camera = Locator::camera::value();
+			camera.SetOrigin(at + glm::vec3(-14.0f, 12.0f, -14.0f));
+			camera.SetFocus(at);
+			break;
+		}
+	}
 	// Poses and positions changed this frame: the renderer only rebuilds its draw lists for a dirty registry.
 	registry.SetDirty();
 	if (!g_pendingShots.empty() && std::chrono::steady_clock::now() >= g_pendingShots.front().second)
