@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <optional>
 #include <cctype>
+#include <deque>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -34,6 +35,7 @@
 #include <glm/vec3.hpp>
 #include <spdlog/spdlog.h>
 
+#include "3D/L3DMesh.h"
 #include "3D/LandIslandInterface.h"
 #include "3D/SkyInterface.h"
 #include "3D/TempleInteriorInterface.h"
@@ -41,6 +43,8 @@
 #include "ECS/Archetypes/MobileStaticArchetype.h"
 #include "ECS/Archetypes/VillagerArchetype.h"
 #include "ECS/Components/Abode.h"
+#include "ECS/Components/Fixed.h"
+#include "ECS/Components/Mobile.h"
 #include "ECS/Systems/DynamicsSystemInterface.h"
 #include "ECS/Components/Forest.h"
 #include "ECS/Components/Stream.h"
@@ -277,6 +281,10 @@ std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> g_pen
 // What the player's hand holds and is over (see HandPickUp), 0 for nothing.
 uint32_t g_heldObject = 0;
 uint32_t g_objectUnderHand = 0;
+// Objects scripts have made unpickupable / unmoveable (SET_ID_PICKUPABLE / SET_ID_MOVEABLE false).
+std::unordered_set<uint32_t> g_notPickupable;
+// Thrown or dropped objects in flight: velocity, until they reach the ground (see UpdateScriptFrame).
+std::unordered_map<uint32_t, glm::vec3> g_flying;
 // When the current SET_FADE / SET_FADE_IN finishes.
 std::chrono::steady_clock::time_point g_fadeEnd {};
 
@@ -2209,18 +2217,32 @@ void FlySpirit() // 167 FLY_SPIRIT
 
 void SetIdMoveable() // 168 SET_ID_MOVEABLE
 {
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	[[maybe_unused]] const auto moveable = static_cast<bool>(Pop().intVal);
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto obj = Pop().uintVal;
+	const auto moveable = static_cast<bool>(Pop().intVal);
+	// The hand can't pick up what a script has made unpickupable or unmoveable.
+	if (moveable)
+	{
+		g_notPickupable.erase(obj);
+	}
+	else
+	{
+		g_notPickupable.insert(obj);
+	}
 }
 
 void SetIdPickupable() // 169 SET_ID_PICKUPABLE
 {
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	[[maybe_unused]] const auto pickupable = static_cast<bool>(Pop().intVal);
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto obj = Pop().uintVal;
+	const auto pickupable = static_cast<bool>(Pop().intVal);
+	// The hand can't pick up what a script has made unpickupable or unmoveable.
+	if (pickupable)
+	{
+		g_notPickupable.erase(obj);
+	}
+	else
+	{
+		g_notPickupable.insert(obj);
+	}
 }
 
 void IsOnFire() // 170 IS_ON_FIRE
@@ -2548,6 +2570,10 @@ void UpdateAnimations(float seconds)
 namespace
 {
 constexpr float k_CarryHeight = 3.0f; // held things hang a little above the ground under the hand
+// Where the held thing was over the last moment, for the speed it's released with.
+constexpr auto k_ThrowWindow = std::chrono::milliseconds(120);
+constexpr float k_Gravity = 9.81f; // world units are metres
+std::deque<std::pair<std::chrono::steady_clock::time_point, glm::vec3>> g_handTrail;
 
 void MoveBody(entt::entity entity, const glm::vec3& position)
 {
@@ -2571,11 +2597,12 @@ bool HandPickUp(uint32_t object)
 	{
 		return false;
 	}
-	// Not the things that make up the land and the towns.
-	if (registry.AnyOf<Abode, Temple, Town, Field, Footpath, Stream, Forest, Hand>(entity))
+	// Not the things that make up the land and the towns, nor what a script has made unpickupable.
+	if (registry.AnyOf<Abode, Temple, Town, Field, Footpath, Stream, Forest, Hand>(entity) || g_notPickupable.contains(object))
 	{
 		return false;
 	}
+	g_flying.erase(object);
 	g_walks.erase(object);
 	g_followers.erase(object);
 	g_scriptMoves.erase(object);
@@ -2588,7 +2615,12 @@ bool HandPickUp(uint32_t object)
 		Locator::dynamicsSystem::value().RemoveRigidBody(&body->handle); // or the hand's ray would hit it
 	}
 	g_heldObject = object;
-	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand picked up {}", object);
+	g_handTrail.clear();
+	const auto* mesh = registry.TryGet<Mesh>(entity);
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand picked up {} (mesh {}, {}{}{}{})", object,
+	                   mesh != nullptr ? Locator::resources::value().GetMeshes().Handle(mesh->id)->GetDebugName() : "none",
+	                   registry.AllOf<Mobile>(entity) ? "mobile " : "", registry.AllOf<Fixed>(entity) ? "fixed " : "",
+	                   registry.AllOf<Feature>(entity) ? "feature " : "", registry.AllOf<Villager>(entity) ? "villager" : "");
 	return true;
 }
 
@@ -2604,6 +2636,11 @@ void HandCarry(const glm::vec3& handPosition)
 	const auto position = handPosition + glm::vec3(0.0f, k_CarryHeight, 0.0f);
 	registry.Get<openblack::ecs::components::Transform>(entity).position = position;
 	MoveBody(entity, position);
+	g_handTrail.emplace_back(std::chrono::steady_clock::now(), position);
+	while (g_handTrail.size() > 2 && g_handTrail.front().first < std::chrono::steady_clock::now() - k_ThrowWindow)
+	{
+		g_handTrail.pop_front();
+	}
 }
 
 void HandDrop(const glm::vec3& handPosition)
@@ -2615,6 +2652,31 @@ void HandDrop(const glm::vec3& handPosition)
 	if (!holding || !registry.Valid(entity))
 	{
 		return;
+	}
+	// Things that move (people, animals, rocks, logs, food) fly on with the hand's speed, or fall where
+	// they were let go; fixtures (features like the totem) are set down on the ground under the hand.
+	if (registry.AllOf<openblack::ecs::components::Mobile>(entity))
+	{
+		glm::vec3 velocity(0.0f);
+		if (g_handTrail.size() >= 2)
+		{
+			const auto& [t0, p0] = g_handTrail.front();
+			const auto& [t1, p1] = g_handTrail.back();
+			const float seconds = std::chrono::duration<float>(t1 - t0).count();
+			if (seconds > 0.0f)
+			{
+				velocity = (p1 - p0) / seconds;
+			}
+		}
+		constexpr float k_MaxThrowSpeed = 60.0f;
+		if (glm::length(velocity) > k_MaxThrowSpeed)
+		{
+			velocity = glm::normalize(velocity) * k_MaxThrowSpeed;
+		}
+		g_flying[static_cast<uint32_t>(entity)] = velocity;
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand let go of {} at {:.1f} m/s", static_cast<uint32_t>(entity),
+		                   glm::length(velocity));
+		return; // lands in UpdateScriptFrame
 	}
 	auto position = handPosition;
 	position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
@@ -2707,6 +2769,47 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		                   camera.GetFocus().x, camera.GetFocus().y, camera.GetFocus().z);
 		Game::Instance()->RequestScreenshot(g_pendingShots.front().first); // one per frame
 		g_pendingShots.erase(g_pendingShots.begin());
+	}
+
+	// Thrown and dropped things: ballistic until they reach the ground, then back into the physics world.
+	for (auto it = g_flying.begin(); it != g_flying.end();)
+	{
+		const auto entity = static_cast<entt::entity>(it->first);
+		auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+		if (transform == nullptr || it->first == g_heldObject)
+		{
+			it = g_flying.erase(it);
+			continue;
+		}
+		auto& velocity = it->second;
+		velocity.y -= k_Gravity * seconds;
+		auto position = transform->position + velocity * seconds;
+		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		const bool landed = position.y <= ground;
+		if (landed)
+		{
+			position.y = ground;
+		}
+		transform->position = position;
+		MoveBody(entity, position);
+		if (!landed)
+		{
+			++it;
+			continue;
+		}
+		if (auto* body = registry.TryGet<openblack::ecs::components::RigidBody>(entity))
+		{
+			Locator::dynamicsSystem::value().AddRigidBody(&body->handle);
+		}
+		if (auto* move = registry.TryGet<ScriptMove>(entity))
+		{
+			move->target = position;
+		}
+		if (auto* wallHug = registry.TryGet<WallHug>(entity))
+		{
+			wallHug->goal = glm::vec2(position.x, position.z);
+		}
+		it = g_flying.erase(it);
 	}
 
 	for (auto it = g_scriptMoves.begin(); it != g_scriptMoves.end();)
