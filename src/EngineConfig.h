@@ -23,6 +23,7 @@ enum class GraphicsBackend : uint8_t
 	Direct3D12,
 	Metal,
 	Vulkan,
+	OpenGL, // also what the Switch gets (bgfx falls back to its only renderer there, OpenGL ES)
 };
 
 static const std::map<std::string_view, GraphicsBackend> k_GraphicsBackendStringLookup {
@@ -30,6 +31,7 @@ static const std::map<std::string_view, GraphicsBackend> k_GraphicsBackendString
     std::pair {"Direct3D12", GraphicsBackend::Direct3D12},
     std::pair {"Metal", GraphicsBackend::Metal},
     std::pair {"Vulkan", GraphicsBackend::Vulkan},
+    std::pair {"OpenGL", GraphicsBackend::OpenGL},
 };
 
 struct EngineConfig

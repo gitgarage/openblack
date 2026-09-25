@@ -307,6 +307,9 @@ std::unique_ptr<RendererInterface> RendererInterface::Create(GraphicsBackend bac
 	case GraphicsBackend::Vulkan:
 		init.type = bgfx::RendererType::Vulkan;
 		break;
+	case GraphicsBackend::OpenGL:
+		init.type = bgfx::RendererType::OpenGL;
+		break;
 	default:
 		SPDLOG_LOGGER_CRITICAL(spdlog::get("graphics"), "Got impossible graphics backend.");
 		return nullptr;
@@ -347,6 +350,8 @@ std::unique_ptr<RendererInterface> RendererInterface::Create(GraphicsBackend bac
 	}
 
 	const bgfx::Caps* caps = bgfx::getCaps();
+	SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "bgfx renderer: {} (max uniforms {})", bgfx::getRendererName(bgfx::getRendererType()),
+	                   caps->limits.maxUniforms);
 	if ((caps->supported & BGFX_CAPS_TEXTURE_2D_ARRAY) == 0 || caps->limits.maxTextureLayers < 9)
 	{
 		SPDLOG_LOGGER_CRITICAL(spdlog::get("graphics"), "Graphics device must support texture layers.");
@@ -808,6 +813,28 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 					{
 						const auto posed = animations.Handle(animationId)->GetBoneMatrices(static_cast<uint32_t>(animated.time));
 						const auto& parents = mesh->GetBoneParents();
+						static bool s_logged = false;
+						const bool logThis = !s_logged && animated.animation == 385; // PStand: compare with the laptop
+						auto sum = [](const std::vector<glm::mat4>& m) {
+							double total = 0.0;
+							for (const auto& x : m)
+							{
+								for (int c = 0; c < 4; ++c)
+								{
+									for (int r = 0; r < 4; ++r)
+									{
+										total += static_cast<double>(x[c][r]) * (1 + c * 4 + r);
+									}
+								}
+							}
+							return total;
+						};
+						if (logThis)
+						{
+							const auto posed0 = animations.Handle(animationId)->GetBoneMatrices(0);
+							SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "skinning check: mesh bones {} sum {:.4f}, anim 385 t0 bones {} sum {:.4f}",
+							                   bones.size(), sum(bones), posed0.size(), sum(posed0));
+						}
 						if (posed.size() == bones.size())
 						{
 							for (size_t i = 0; i < posed.size(); ++i)
@@ -815,6 +842,16 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 								bones[i] = parents[i] != std::numeric_limits<uint32_t>::max() ? bones[parents[i]] * posed[i]
 								                                                               : posed[i];
 							}
+						}
+						if (logThis)
+						{
+							s_logged = true;
+							std::string parentList;
+							for (auto p : parents)
+							{
+								parentList += fmt::format("{} ", static_cast<int32_t>(p));
+							}
+							SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "skinning check: composed sum {:.4f}, parents {}", sum(bones), parentList);
 						}
 					}
 					submitDesc.modelMatrices = bones.data();
