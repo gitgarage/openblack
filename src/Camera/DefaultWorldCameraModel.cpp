@@ -646,7 +646,9 @@ void DefaultWorldCameraModel::HandleActions(std::chrono::microseconds dt)
 		// If ZOOM_ON is active, apply the movement as a zoom action.
 		if (actionSystem.Get(input::BindableActionMap::ZOOM_ON))
 		{
-			_rotateAroundDelta.z += distance;
+			// Held zoom (Ctrl + Up/Down, R/L on the Switch), slower than the other held controls.
+			constexpr float k_HeldZoomSpeed = 0.5f;
+			_rotateAroundDelta.z += distance * k_HeldZoomSpeed;
 		}
 		// If ROTATE_ON is active, apply the movement as a tilt action.
 		// TODO(#710): fight will always be rotating

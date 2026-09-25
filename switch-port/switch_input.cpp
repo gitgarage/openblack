@@ -10,7 +10,8 @@
 //   ZL                    -> right mouse button (action)
 //   Left stick            -> arrow keys (move the camera)
 //   Right stick           -> Z / U (rotate left/right), A / Q (tilt up/down)
-//   R / L                 -> mouse wheel (zoom in/out), repeating while held
+//   R / L                 -> zoom in / out, continuously while held (Ctrl + Up / Down: the keyboard zoom
+//                            starts at once, where mouse-wheel steps each waited on a camera flight)
 //   X / Y                 -> Space (zoom to temple) / C (zoom to creature)
 //   +                     -> P (pause/unpause - openblack starts paused, so nothing simulates until
 //                            this is pressed)
@@ -24,13 +25,11 @@
 namespace
 {
 constexpr s32 k_StickThreshold = JOYSTICK_MAX / 3; // a third of the travel before a key "presses"
-constexpr u64 k_WheelRepeatNs = 90'000'000ULL;
 
 PadState g_pad;
 bool g_initialized = false;
 bool g_keyDown[SDL_NUM_SCANCODES] = {};
 bool g_leftDown = false, g_zlDown = false;
-u64 g_nextWheel = 0;
 
 // Touch state (see the header comment). Times are armGetSystemTick nanoseconds, positions window pixels.
 constexpr u64 k_TouchHoldNs = 150'000'000ULL;
@@ -137,15 +136,6 @@ bool touchFrame(u64 now, bool forceGrab)
 	return g_touch == Touch::Grab;
 }
 
-void wheel(int y)
-{
-	SDL_Event e {};
-	e.type = SDL_MOUSEWHEEL;
-	e.wheel.y = y;
-	e.wheel.direction = SDL_MOUSEWHEEL_NORMAL;
-	e.wheel.windowID = SDL_GetWindowID(gameWindow());
-	SDL_PushEvent(&e);
-}
 } // namespace
 
 void switchInputFrame()
@@ -163,9 +153,13 @@ void switchInputFrame()
 	const HidAnalogStickState left = padGetStickPos(&g_pad, 0);
 	const HidAnalogStickState right = padGetStickPos(&g_pad, 1);
 
-	// Camera movement: left stick as the arrow keys (stick up = forwards).
-	setKey(SDL_SCANCODE_UP, left.y > k_StickThreshold);
-	setKey(SDL_SCANCODE_DOWN, left.y < -k_StickThreshold);
+	// Camera movement: left stick as the arrow keys (stick up = forwards). R / L zoom through the same keys
+	// with Ctrl held.
+	const bool zoomIn = (held & HidNpadButton_R) != 0;
+	const bool zoomOut = (held & HidNpadButton_L) != 0;
+	setKey(SDL_SCANCODE_LCTRL, zoomIn || zoomOut);
+	setKey(SDL_SCANCODE_UP, zoomIn || (!zoomOut && left.y > k_StickThreshold));
+	setKey(SDL_SCANCODE_DOWN, zoomOut || (!zoomIn && left.y < -k_StickThreshold));
 	setKey(SDL_SCANCODE_LEFT, left.x < -k_StickThreshold);
 	setKey(SDL_SCANCODE_RIGHT, left.x > k_StickThreshold);
 
@@ -194,15 +188,5 @@ void switchInputFrame()
 	setMouseButton(g_leftDown, SDL_BUTTON_LEFT, zr || touchLeft);
 	setMouseButton(g_zlDown, SDL_BUTTON_RIGHT, (held & HidNpadButton_ZL) != 0);
 
-	const bool zoomIn = (held & HidNpadButton_R) != 0;
-	const bool zoomOut = (held & HidNpadButton_L) != 0;
-	if ((zoomIn || zoomOut) && now >= g_nextWheel)
-	{
-		wheel(zoomIn ? 1 : -1);
-		g_nextWheel = now + k_WheelRepeatNs;
-	}
-	else if (!zoomIn && !zoomOut)
-	{
-		g_nextWheel = 0;
-	}
+
 }
