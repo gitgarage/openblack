@@ -668,6 +668,14 @@ void DefaultWorldCameraModel::HandleActions(std::chrono::microseconds dt)
 		}
 	}
 
+	if (g_heldZoomInput != 0.0f)
+	{
+		constexpr float k_HeldZoomRatePerSecond = 0.5f; // as below: the original's zoom tutorial demo
+		const auto seconds = std::chrono::duration_cast<std::chrono::duration<float>>(dt).count();
+		_rotateAroundDelta.z += g_heldZoomInput * k_HeldZoomRatePerSecond * _originFocusDistanceAtInteractionStart *
+		                        seconds / (0.0015f * 60.0f);
+	}
+
 	if (actionSystem.GetAny(input::BindableActionMap::MOVE_RIGHT, input::BindableActionMap::MOVE_LEFT))
 	{
 		const float distance = (actionSystem.Get(input::BindableActionMap::MOVE_RIGHT) ? -1.0f : 1.0f) * dp;

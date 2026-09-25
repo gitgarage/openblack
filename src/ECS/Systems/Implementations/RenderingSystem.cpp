@@ -19,6 +19,8 @@
 
 #include "3D/L3DAnim.h"
 #include "3D/L3DMesh.h"
+#include "ECS/Components/Construction.h"
+#include "Graphics/Renderer.h"
 #include "ECS/Components/Mesh.h"
 #include "ECS/Components/MorphWithTerrain.h"
 #include "ECS/Components/Stream.h"
@@ -52,7 +54,12 @@ void RenderingSystem::PrepareDrawDescs(bool drawBoundingBox)
 	};
 
 	registry.Each<const Mesh, const Transform>([&prep](const Mesh& mesh, const Transform& /*unused*/) { prep(mesh, false); },
-	                                           entt::exclude<MorphWithTerrain, TempleInteriorPart, Animated>);
+	                                           entt::exclude<MorphWithTerrain, TempleInteriorPart, Animated, Construction>);
+	uint32_t constructionCount = 0;
+	registry.Each<const Mesh, const Transform, const Construction>(
+	    [&constructionCount](const Mesh&, const Transform&, const Construction&) { constructionCount += 2; },
+	    entt::exclude<Animated>);
+	instanceCount += constructionCount;
 	uint32_t animatedCount = 0;
 	registry.Each<const Mesh, const Transform, const Animated>(
 	    [&animatedCount](const Mesh&, const Transform&, const Animated&) { ++animatedCount; },
@@ -163,7 +170,8 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 		    _renderContext.instanceUniforms[idx] = modelMatrix;
 		    offset.first->second++;
 	    },
-	    entt::exclude<TempleInteriorPart, Animated>);
+	    entt::exclude<TempleInteriorPart, Animated, Construction>);
+
 
 	// Animated entities: each posed from its animation's frame. The animation gives each bone relative to its
 	// parent; the mesh wants them composed down the hierarchy (as the mesh viewer does).
@@ -210,6 +218,28 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 		    _renderContext.animatedDrawDescs.push_back({mesh.id, idx, animated.animation, animated.time});
 	    },
 	    entt::exclude<TempleInteriorPart>);
+
+	// Buildings under construction: the building rises out of the ground as its scaffold comes down.
+	_renderContext.constructionDrawDescs.clear();
+	uint32_t constructionIndex = animatedIndex; // after the animated entities' uniforms
+	registry.Each<const Mesh, const Transform, const Construction>(
+	    [&](const Mesh& mesh, const Transform& transform, const Construction& construction) {
+		    const auto l3dMesh = meshes.Handle(mesh.id);
+		    graphics::SetScaffoldShown(*l3dMesh, 1.0f - construction.built);
+		    auto modelMatrix = glm::mat4(transform.rotation);
+		    modelMatrix = glm::translate(modelMatrix, transform.position * transform.rotation);
+		    modelMatrix = glm::scale(modelMatrix, transform.scale);
+		    const float sink = (1.0f - construction.built) * l3dMesh->GetBoundingBox().Size().y * transform.scale.y;
+		    auto buildingMatrix = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -sink, 0.0f)) * modelMatrix;
+		    modelMatrix[0][3] = static_cast<float>(defaultPoseRow(mesh.id));
+		    buildingMatrix[0][3] = modelMatrix[0][3];
+		    const uint32_t building = constructionIndex++;
+		    const uint32_t scaffold = constructionIndex++;
+		    _renderContext.instanceUniforms[building] = buildingMatrix;
+		    _renderContext.instanceUniforms[scaffold] = modelMatrix;
+		    _renderContext.constructionDrawDescs.push_back({mesh.id, building, scaffold});
+	    },
+	    entt::exclude<Animated>);
 
 	// Upload the rows used this frame, only as wide as the widest pose.
 	_renderContext.boneRowsUsed = nextRow;

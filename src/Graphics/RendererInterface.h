@@ -77,6 +77,14 @@ public:
 		bool isSky;
 		bool drawAll; ///< For use in the mesh viewer
 		bool morphWithTerrain;
+		/// A building under construction is drawn twice: without its scaffold (rising out of the ground as it is
+		/// built) and its scaffold alone (standing, less of it as it is built). Otherwise scaffolds are hidden.
+		enum class Scaffold : uint8_t
+		{
+			Hidden,
+			Without,
+			Only,
+		} scaffold = Scaffold::Hidden;
 	};
 
 	static std::unique_ptr<RendererInterface> Create(GraphicsBackend backend, bool vsync) noexcept;

@@ -45,6 +45,7 @@
 #include "Camera/Camera.h"
 #include "ECS/Archetypes/MobileStaticArchetype.h"
 #include "ECS/Archetypes/PotArchetype.h"
+#include "ECS/Components/Construction.h"
 #include "ECS/Components/Pot.h"
 #include "ECS/Archetypes/VillagerArchetype.h"
 #include "ECS/Components/Abode.h"
@@ -648,6 +649,7 @@ enum class Prop : int32_t
 	Scale = 8,
 	InHand = 9,
 	Age = 16, // one more entry than openblack's ObjectPropertyType before here: scripts set 16 to ages (3-33)
+	BuiltPercentage = 22, // CheckCitadel (Land 1) waits for the Citadel's to reach 1
 	XPos = 23,
 	YPos = 24,
 	ZPos = 25,
@@ -685,6 +687,12 @@ void GetProperty() // 021 GET_PROPERTY
 	{
 	case Prop::InHand:
 		value = object != 0 && object == g_heldObject ? 1.0f : 0.0f;
+		break;
+	case Prop::BuiltPercentage:
+		if (const auto* construction = valid ? registry.TryGet<openblack::ecs::components::Construction>(entity) : nullptr)
+		{
+			value = construction->built;
+		}
 		break;
 	case Prop::Health:
 		value = villager != nullptr ? static_cast<float>(villager->health) / 100.0f : value;
@@ -2890,10 +2898,32 @@ void HandDrop(const glm::vec3& handPosition)
 	{
 		return;
 	}
-	// Wood carried in the hand is put down as a pile of that much wood on the ground under the hand.
+	// Wood carried in the hand builds a building under construction it is let go over; anywhere else it is put
+	// down as a pile of that much wood on the ground under the hand.
 	if (IsHandWood(static_cast<uint32_t>(entity)))
 	{
 		const auto amount = registry.Get<openblack::ecs::components::Pot>(entity).amount;
+		constexpr float k_BuildingSiteReach = 20.0f;
+		entt::entity site = entt::null;
+		float nearest = k_BuildingSiteReach * k_BuildingSiteReach;
+		registry.Each<const openblack::ecs::components::Construction, const Transform>(
+		    [&](entt::entity building, const openblack::ecs::components::Construction& construction, const Transform& transform) {
+			    const auto offset = glm::vec2(transform.position.x - handPosition.x, transform.position.z - handPosition.z);
+			    if (construction.built < 1.0f && glm::dot(offset, offset) < nearest)
+			    {
+				    nearest = glm::dot(offset, offset);
+				    site = building;
+			    }
+		    });
+		if (site != entt::null)
+		{
+			auto& construction = registry.Get<openblack::ecs::components::Construction>(site);
+			construction.woodStock += static_cast<float>(amount);
+			registry.Destroy(entity);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand gave {} wood to building {} ({:.0f} in stock, {:.0f}% built)", amount,
+			                   static_cast<uint32_t>(site), construction.woodStock, construction.built * 100.0f);
+			return;
+		}
 		auto position = handPosition;
 		position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
 		registry.Destroy(entity);
@@ -2950,7 +2980,7 @@ void SetObjectUnderHand(uint32_t object)
 
 std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 {
-	// OPENBLACK_TEST_COLLECT: the same with the nearest wood pile (held 3 s to collect, then put down 10 m on).
+	// OPENBLACK_TEST_COLLECT: the same with the nearest wood pile (held 3 s to collect, then given away).
 	static const bool collect = std::getenv("OPENBLACK_TEST_COLLECT") != nullptr;
 	static const bool enabled = collect || std::getenv("OPENBLACK_TEST_PICKUP") != nullptr;
 	static auto start = std::chrono::steady_clock::now();
@@ -2981,6 +3011,21 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 	const float k = t - 15.0f;
 	if (collect)
 	{
+		// ...carried to the nearest building under construction (else 10 m on), watched from beside it.
+		static std::optional<glm::vec3> site;
+		if (!site)
+		{
+			Locator::entitiesRegistry::value().Each<const openblack::ecs::components::Construction, const Transform>(
+			    [](entt::entity, const openblack::ecs::components::Construction&, const Transform& transform) {
+				    site = transform.position;
+			    });
+			site = site.value_or(target + glm::vec3(10.0f, 0.0f, 0.0f));
+		}
+		{
+			auto& camera = Locator::camera::value();
+			camera.SetOrigin(*site + glm::vec3(70.0f, 45.0f, 70.0f));
+			camera.SetFocus(*site);
+		}
 		if (k < 0.3f || (k >= 3.3f && k < 3.6f))
 		{
 			return std::make_pair(target, false);
@@ -2989,9 +3034,9 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 		{
 			return std::make_pair(target, true); // hold over the pile
 		}
-		if (k < 4.5f)
+		if (k < 9.0f)
 		{
-			return std::make_pair(target + glm::vec3(10.0f, 0.0f, 0.0f), k >= 4.0f && k < 4.2f); // press, release
+			return std::make_pair(*site, k >= 4.0f && k < 4.2f); // press, release
 		}
 		return std::nullopt;
 	}
@@ -3043,6 +3088,26 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 {
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
 	auto& registry = Locator::entitiesRegistry::value();
+	// Buildings under construction spend their wood, a step each game turn while they have it.
+	registry.Each<openblack::ecs::components::Construction>(
+	    [seconds](entt::entity building, openblack::ecs::components::Construction& construction) {
+		    construction.turnTime += seconds;
+		    while (construction.turnTime >= 0.1f)
+		    {
+			    construction.turnTime -= 0.1f;
+			    if (construction.built >= 1.0f || construction.woodStock < construction.woodPerStep)
+			    {
+				    continue;
+			    }
+			    construction.woodStock -= construction.woodPerStep;
+			    construction.built = std::min(construction.built + 1.0f / construction.steps, 1.0f);
+			    if (construction.built >= 1.0f)
+			    {
+				    SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building {} built ({:.0f} wood left over)",
+				                       static_cast<uint32_t>(building), construction.woodStock);
+			    }
+		    }
+	    });
 	for (auto it = g_walks.begin(); it != g_walks.end();)
 	{
 		const auto entity = static_cast<entt::entity>(it->first);

@@ -13,8 +13,9 @@
 //   ZL                    -> right mouse button (action)
 //   Left stick            -> arrow keys (move the camera)
 //   Right stick           -> Z / U (rotate left/right), A / Q (tilt up/down)
-//   R / L                 -> zoom in / out, continuously while held (Ctrl + Up / Down: the keyboard zoom
-//                            starts at once, where mouse-wheel steps each waited on a camera flight)
+//   R / L                 -> zoom in / out, continuously while held (straight into the camera's held zoom:
+//                            not the wheel, whose steps each waited on a camera flight, nor Ctrl + Up / Down,
+//                            which took over the left stick's keys)
 //   X / Y                 -> Space (zoom to temple) / C (zoom to creature)
 //   +                     -> P (pause/unpause - openblack starts paused, so nothing simulates until
 //                            this is pressed)
@@ -26,6 +27,7 @@
 #include <switch.h>
 
 #include "CHLApi.h"
+#include "Camera/DefaultWorldCameraModel.h"
 
 namespace
 {
@@ -160,13 +162,13 @@ void switchInputFrame()
 	const HidAnalogStickState left = padGetStickPos(&g_pad, 0);
 	const HidAnalogStickState right = padGetStickPos(&g_pad, 1);
 
-	// Camera movement: left stick as the arrow keys (stick up = forwards). R / L zoom through the same keys
-	// with Ctrl held.
+	// Camera movement: left stick as the arrow keys (stick up = forwards). R / L zoom straight through the
+	// camera's held zoom, leaving the stick's keys alone.
 	const bool zoomIn = (held & HidNpadButton_R) != 0;
 	const bool zoomOut = (held & HidNpadButton_L) != 0;
-	setKey(SDL_SCANCODE_LCTRL, zoomIn || zoomOut);
-	setKey(SDL_SCANCODE_UP, zoomIn || (!zoomOut && left.y > k_StickThreshold));
-	setKey(SDL_SCANCODE_DOWN, zoomOut || (!zoomIn && left.y < -k_StickThreshold));
+	openblack::g_heldZoomInput = zoomIn == zoomOut ? 0.0f : (zoomIn ? -1.0f : 1.0f);
+	setKey(SDL_SCANCODE_UP, left.y > k_StickThreshold);
+	setKey(SDL_SCANCODE_DOWN, left.y < -k_StickThreshold);
 	setKey(SDL_SCANCODE_LEFT, left.x < -k_StickThreshold);
 	setKey(SDL_SCANCODE_RIGHT, left.x > k_StickThreshold);
 

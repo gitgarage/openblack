@@ -11,11 +11,15 @@
 
 #include <entt/fwd.hpp>
 
+#include "ECS/Components/Construction.h"
 #include "ECS/Components/Mesh.h"
 #include "ECS/Components/Temple.h"
 #include "ECS/Components/Transform.h"
 #include "ECS/Registry.h"
+#include "InfoConstants.h"
 #include "Locator.h"
+
+#include <algorithm>
 
 using namespace openblack;
 using namespace openblack::ecs::archetypes;
@@ -36,5 +40,10 @@ entt::entity CitadelArchetype::Create(const glm::vec3& position, PlayerNames pla
 entt::entity CitadelArchetype::CreatePlan(int32_t /*townId*/, const glm::vec3& position, PlayerNames playerOwner,
                                           const glm::mat4& rotation, const glm::vec3& size)
 {
-	return Create(position, playerOwner, rotation, size);
+	// A planned Citadel is built from the wood given to it, at the original Citadel heart's rate.
+	const auto entity = Create(position, playerOwner, rotation, size);
+	const auto& heart = Locator::infoConstants::value().citadelHeart;
+	Locator::entitiesRegistry::value().Assign<Construction>(entity, 0.0f, static_cast<float>(heart.woodRequiredPerBuild),
+	                                                        static_cast<float>(std::max(heart.timeToBuild, 1u)));
+	return entity;
 }

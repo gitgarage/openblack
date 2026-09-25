@@ -44,6 +44,10 @@ namespace graphics
 class L3DSubMesh;
 class Mesh;
 
+// How much of a mesh's scaffold (its status 1 submesh, the lattice round a building under construction) to draw:
+// 1 all of it, 0 none (the default, as for every building that is finished).
+void SetScaffoldShown(const L3DMesh& mesh, float fraction);
+
 class Renderer final: public RendererInterface
 {
 public:

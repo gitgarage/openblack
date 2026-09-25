@@ -59,6 +59,15 @@ struct RenderContext
 		float time;
 	};
 	std::vector<AnimatedDrawDesc> animatedDrawDescs;
+	/// Buildings under construction: the building's instance uniform (sunk into the ground by how much is left to
+	/// build) and its scaffold's (where the building stands).
+	struct ConstructionDrawDesc
+	{
+		entt::id_type meshId;
+		uint32_t buildingOffset;
+		uint32_t scaffoldOffset;
+	};
+	std::vector<ConstructionDrawDesc> constructionDrawDescs;
 	uint32_t animatedOffset = 0;
 
 	/// Bone matrices for skinned meshes, sampled by the instanced object shader instead of u_model (the

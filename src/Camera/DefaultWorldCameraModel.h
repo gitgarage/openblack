@@ -20,6 +20,10 @@ class TestDefaultCameraModel_single_line_Test;
 
 namespace openblack
 {
+// A held zoom from a control of its own (R / L on the Switch): -1 in, 1 out, 0 none. Kept apart from the
+// keyboard's Ctrl + Up / Down so it leaves the movement keys (the left stick) alone.
+inline float g_heldZoomInput = 0.0f;
+
 class DefaultWorldCameraModel final: public CameraModel
 {
 	enum class Mode : std::uint8_t

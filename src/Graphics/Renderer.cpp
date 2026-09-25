@@ -49,6 +49,8 @@
 #include "Locator.h"
 #include "Profiler.h"
 #include "Renderer.h"
+
+#include <unordered_map>
 #include "Resources/ResourceManager.h"
 #include "Resources/ResourcesInterface.h"
 #include "Windowing/WindowingInterface.h"
@@ -428,12 +430,36 @@ const Texture2D* GetTexture(uint32_t skinID, const std::unordered_map<SkinId, st
 	return texture;
 }
 
+namespace
+{
+std::unordered_map<const openblack::graphics::L3DMesh*, float> g_scaffoldShown;
+} // namespace
+
+void openblack::graphics::SetScaffoldShown(const L3DMesh& mesh, float fraction)
+{
+	g_scaffoldShown[&mesh] = glm::clamp(fraction, 0.0f, 1.0f);
+}
+
 void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSubMesh& subMesh, const L3DMeshSubmitDesc& desc,
                            bool preserveState) const
 {
 	assert(&subMesh.GetMesh());
 	// We don't draw physics meshes, we haven't implemented statuses (building and graves) and modern GPUs can handle high lod
-	if (!desc.drawAll && (subMesh.IsPhysics() || subMesh.GetFlags().status != 0 || (subMesh.GetFlags().lodMask & 1) != 1))
+	// Status 1 is a building's scaffold: drawn on its own for a building under construction, less of it the more
+	// it is built (see L3DMeshSubmitDesc::Scaffold).
+	using Scaffold = L3DMeshSubmitDesc::Scaffold;
+	float scaffoldShown = 1.0f;
+	const bool isScaffold = subMesh.GetFlags().status == 1 && !subMesh.IsPhysics();
+	if (!desc.drawAll && desc.scaffold == Scaffold::Only)
+	{
+		const auto it = g_scaffoldShown.find(&mesh);
+		scaffoldShown = it != g_scaffoldShown.end() ? it->second : 0.0f;
+		if (!isScaffold || scaffoldShown <= 0.0f)
+		{
+			return;
+		}
+	}
+	else if (!desc.drawAll && (subMesh.IsPhysics() || subMesh.GetFlags().status != 0 || (subMesh.GetFlags().lodMask & 1) != 1))
 	{
 		return;
 	}
@@ -507,7 +533,11 @@ void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSub
 			}
 			if (subMesh.GetMesh().IsIndexed() && (skip & Mesh::SkipState::SkipIndexBuffer) == 0)
 			{
-				subMesh.GetMesh().GetIndexBuffer().Bind(prim.indicesCount, prim.indicesOffset);
+				// A partly taken-down scaffold: the first triangles of it.
+				const auto count = scaffoldShown < 1.0f
+				                       ? static_cast<uint32_t>(static_cast<float>(prim.indicesCount / 3) * scaffoldShown) * 3
+				                       : prim.indicesCount;
+				subMesh.GetMesh().GetIndexBuffer().Bind(count, prim.indicesOffset);
 			}
 			if ((skip & Mesh::SkipState::SkipVertexBuffer) == 0)
 			{
@@ -819,6 +849,27 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 				submitDesc.morphWithTerrain = false;
 				submitDesc.program = objectShaderInstanced;
 				DrawMesh(*mesh, submitDesc, std::numeric_limits<uint8_t>::max());
+			}
+
+			// Buildings under construction: the building, then its scaffold, each with its own transform.
+			for (const auto& construction : renderCtx.constructionDrawDescs)
+			{
+				auto mesh = meshManager.Handle(construction.meshId);
+				const static auto identity = glm::mat4(1.0f);
+				submitDesc.modelMatrices = &identity;
+				submitDesc.matrixCount = 1;
+				submitDesc.isSky = false;
+				submitDesc.morphWithTerrain = false;
+				submitDesc.program = objectShaderInstanced;
+				for (const auto& [offset, part] : {std::pair {construction.buildingOffset, L3DMeshSubmitDesc::Scaffold::Without},
+				                                   std::pair {construction.scaffoldOffset, L3DMeshSubmitDesc::Scaffold::Only}})
+				{
+					submitDesc.instanceDesc =
+					    std::make_unique<graphics::InstanceDesc>(renderCtx.instanceUniformBuffer, offset, 1);
+					submitDesc.scaffold = part;
+					DrawMesh(*mesh, submitDesc, std::numeric_limits<uint8_t>::max());
+				}
+				submitDesc.scaffold = L3DMeshSubmitDesc::Scaffold::Hidden;
 			}
 
 			// Debug
