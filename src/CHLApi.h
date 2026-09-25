@@ -59,6 +59,17 @@ bool HandPickUp(uint32_t entity);
 bool HandHolding();
 // What the hand is over that it could pick up (0 for nothing, or while it holds something).
 uint32_t HandObjectUnder();
+// Wood: piles (the Village Store's, and wood put down) are collected from rather than picked up whole. While
+// the Action Button is held over one, the hand takes wood at the original's rates into a handful of wood, which
+// is put down as a pile of its own.
+uint32_t FindWoodNear(const glm::vec3& point, float radius);
+void SetWoodUnderHand(uint32_t pile);
+// The wood pile the hand could collect from (0 for none, or while it holds something other than wood).
+uint32_t HandWoodUnder();
+bool HandCollectBegin(uint32_t pile);
+void HandCollect(std::chrono::microseconds dt);
+void HandCollectEnd();
+bool HandCollecting();
 // The hand's pose while holding something (a name in Data/hndspec5.txt).
 constexpr const char* k_HandHoldPose = "hold_above";
 void HandCarry(const glm::vec3& handPosition);

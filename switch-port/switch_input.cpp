@@ -3,7 +3,10 @@
 // before openblack drains SDL's event queue.
 //
 //   Touchscreen           -> the hand follows the finger; what the touch does is decided by how it starts:
-//                              hold still ~150 ms, then drag  -> left button held (grab and move the land)
+//                              hold still ~150 ms, then drag  -> left button held (grab and move the land) -
+//                                                               or, over a wood pile, the right button held:
+//                                                               collect wood until the finger lifts (ZL then
+//                                                               puts it down where the hand is)
 //                              move straight away              -> no button (hover: drawing a gesture)
 //                              quick tap without moving        -> left click
 //   ZR (hold)             -> left mouse button at the cursor (also turns any touch into a grab at once)
@@ -22,6 +25,8 @@
 #include <SDL.h>
 #include <switch.h>
 
+#include "CHLApi.h"
+
 namespace
 {
 constexpr s32 k_StickThreshold = JOYSTICK_MAX / 3; // a third of the travel before a key "presses"
@@ -29,7 +34,7 @@ constexpr s32 k_StickThreshold = JOYSTICK_MAX / 3; // a third of the travel befo
 PadState g_pad;
 bool g_initialized = false;
 bool g_keyDown[SDL_NUM_SCANCODES] = {};
-bool g_leftDown = false, g_zlDown = false;
+bool g_leftDown = false, g_rightDown = false;
 
 // Touch state (see the header comment). Times are armGetSystemTick nanoseconds, positions window pixels.
 constexpr u64 k_TouchHoldNs = 150'000'000ULL;
@@ -39,6 +44,7 @@ enum class Touch
 	None,
 	Undecided, // down, still deciding between grab and hover
 	Grab,
+	Collect, // a long press over wood
 	Hover,
 };
 Touch g_touch = Touch::None;
@@ -87,7 +93,7 @@ void setMouseButton(bool& state, Uint8 button, bool down)
 	SDL_PushEvent(&e);
 }
 
-// Returns whether the touch wants the left button held this frame.
+// Returns whether the touch wants the left button held this frame (collecting is g_touch == Touch::Collect).
 bool touchFrame(u64 now, bool forceGrab)
 {
 	HidTouchScreenState touch {};
@@ -126,7 +132,8 @@ bool touchFrame(u64 now, bool forceGrab)
 		const bool moved = std::abs(x - g_touchStartX) > k_TouchSlopPx || std::abs(y - g_touchStartY) > k_TouchSlopPx;
 		if (forceGrab || (!moved && now - g_touchStart >= k_TouchHoldNs))
 		{
-			g_touch = Touch::Grab;
+			// Over wood (as of last frame's hand position, which is where the finger is): collect it.
+			g_touch = !forceGrab && openblack::chlapi::HandWoodUnder() != 0 ? Touch::Collect : Touch::Grab;
 		}
 		else if (moved)
 		{
@@ -186,7 +193,7 @@ void switchInputFrame()
 	}
 	const bool touchLeft = touchFrame(now, zr);
 	setMouseButton(g_leftDown, SDL_BUTTON_LEFT, zr || touchLeft);
-	setMouseButton(g_zlDown, SDL_BUTTON_RIGHT, (held & HidNpadButton_ZL) != 0);
+	setMouseButton(g_rightDown, SDL_BUTTON_RIGHT, (held & HidNpadButton_ZL) != 0 || g_touch == Touch::Collect);
 
 
 }

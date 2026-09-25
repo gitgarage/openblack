@@ -44,6 +44,8 @@
 #include "3D/TempleInteriorInterface.h"
 #include "Camera/Camera.h"
 #include "ECS/Archetypes/MobileStaticArchetype.h"
+#include "ECS/Archetypes/PotArchetype.h"
+#include "ECS/Components/Pot.h"
 #include "ECS/Archetypes/VillagerArchetype.h"
 #include "ECS/Components/Abode.h"
 #include "ECS/Components/Fixed.h"
@@ -323,6 +325,7 @@ uint32_t g_nextTimer = 1;
 // What the player's hand holds and is over (see HandPickUp), 0 for nothing.
 uint32_t g_heldObject = 0;
 uint32_t g_objectUnderHand = 0;
+uint32_t g_woodUnderHand = 0;
 // Objects scripts have made unpickupable / unmoveable (SET_ID_PICKUPABLE / SET_ID_MOVEABLE false).
 std::unordered_set<uint32_t> g_notPickupable;
 // Thrown or dropped objects in flight: velocity, until they reach the ground (see UpdateScriptFrame).
@@ -2655,7 +2658,171 @@ bool CanPickUp(uint32_t object)
 
 uint32_t HandObjectUnder()
 {
-	return g_heldObject == 0 && CanPickUp(g_objectUnderHand) ? g_objectUnderHand : 0;
+	if (g_heldObject != 0)
+	{
+		return 0;
+	}
+	return CanPickUp(g_objectUnderHand) ? g_objectUnderHand : g_woodUnderHand;
+}
+
+namespace
+{
+// Collecting from a wood pile while the Action Button is held (see HandCollect).
+uint32_t g_collectingFrom = 0;
+float g_collectSeconds = 0.0f;
+float g_collectTurnTime = 0.0f;
+
+const GPotInfo* PotInfoOf(entt::entity entity)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto* pot = registry.Valid(entity) ? registry.TryGet<openblack::ecs::components::Pot>(entity) : nullptr;
+	if (pot == nullptr || pot->type == PotInfo::_COUNT)
+	{
+		return nullptr;
+	}
+	return &Locator::infoConstants::value().pot.at(static_cast<size_t>(pot->type));
+}
+
+bool IsHandWood(uint32_t object)
+{
+	const auto* info = PotInfoOf(static_cast<entt::entity>(object));
+	return info != nullptr && &*info == &Locator::infoConstants::value().pot.at(static_cast<size_t>(PotInfo::HandWood));
+}
+} // namespace
+
+uint32_t FindWoodNear(const glm::vec3& point, float radius)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	uint32_t nearest = 0;
+	float nearestDistance = radius * radius;
+	registry.Each<const Pot, const Transform>([&](entt::entity entity, const Pot& pot, const Transform& transform) {
+		if (pot.amount == 0 || pot.type == PotInfo::_COUNT || pot.type == PotInfo::HandWood ||
+		    static_cast<uint32_t>(entity) == g_heldObject ||
+		    Locator::infoConstants::value().pot.at(static_cast<size_t>(pot.type)).resourceType != ResourceType::Wood)
+		{
+			return;
+		}
+		const auto offset = glm::vec2(transform.position.x - point.x, transform.position.z - point.z);
+		const float distance = glm::dot(offset, offset);
+		if (distance < nearestDistance)
+		{
+			nearestDistance = distance;
+			nearest = static_cast<uint32_t>(entity);
+		}
+	});
+	return nearest;
+}
+
+void SetWoodUnderHand(uint32_t pile)
+{
+	g_woodUnderHand = pile;
+}
+
+uint32_t HandWoodUnder()
+{
+	// Empty-handed, or already holding wood (which collecting adds to).
+	return g_heldObject == 0 || IsHandWood(g_heldObject) ? g_woodUnderHand : 0;
+}
+
+bool HandCollectBegin(uint32_t pile)
+{
+	if (pile == 0 || (g_heldObject != 0 && !IsHandWood(g_heldObject)))
+	{
+		return false;
+	}
+	g_collectingFrom = pile;
+	g_collectSeconds = 0.0f;
+	g_collectTurnTime = 0.0f;
+	HandCollect(std::chrono::microseconds(0));
+	return true;
+}
+
+void HandCollectEnd()
+{
+	if (g_collectingFrom != 0 && IsHandWood(g_heldObject))
+	{
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand holding {} wood after {:.1f} s",
+		                   Locator::entitiesRegistry::value()
+		                       .Get<openblack::ecs::components::Pot>(static_cast<entt::entity>(g_heldObject))
+		                       .amount,
+		                   g_collectSeconds);
+	}
+	g_collectingFrom = 0;
+}
+
+bool HandCollecting()
+{
+	return g_collectingFrom != 0;
+}
+
+void HandCollect(std::chrono::microseconds dt)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto pileEntity = static_cast<entt::entity>(g_collectingFrom);
+	if (PotInfoOf(pileEntity) == nullptr || g_woodUnderHand != g_collectingFrom)
+	{
+		return; // the hand has moved off the pile: holding on keeps what it has
+	}
+	auto& pile = registry.Get<Pot>(pileEntity);
+	// The original's numbers (info.dat, on the hand's wood - HandWood): an amount at once, then an amount each
+	// game turn that ramps from amountPickedUpPerTurn to amountPickedUpPerTurnEnd over multiPickUpRampTime
+	// seconds, up to maxAmountCanBePickedUp (25, 8 -> 70 over 6 s, 20000).
+	const auto& info = Locator::infoConstants::value().pot.at(static_cast<size_t>(PotInfo::HandWood));
+	const bool first = g_heldObject == 0;
+	uint32_t take = 0;
+	if (first)
+	{
+		take = info.amountPickedUpInitially;
+	}
+	else
+	{
+		const float seconds = std::chrono::duration<float>(dt).count();
+		g_collectSeconds += seconds;
+		g_collectTurnTime += seconds;
+		constexpr float k_Turn = 0.1f;
+		while (g_collectTurnTime >= k_Turn)
+		{
+			g_collectTurnTime -= k_Turn;
+			const float ramp =
+			    info.multiPickUpRampTime > 0.0f ? glm::clamp(g_collectSeconds / info.multiPickUpRampTime, 0.0f, 1.0f) : 1.0f;
+			take += static_cast<uint32_t>(glm::mix(static_cast<float>(info.amountPickedUpPerTurn),
+			                                       static_cast<float>(info.amountPickedUpPerTurnEnd), ramp));
+		}
+	}
+	uint32_t held = first ? 0 : registry.Get<Pot>(static_cast<entt::entity>(g_heldObject)).amount;
+	const uint32_t cap = std::min<uint32_t>(info.maxAmountCanBePickedUp, std::numeric_limits<uint16_t>::max());
+	take = std::min({take, static_cast<uint32_t>(pile.amount), cap > held ? cap - held : 0u});
+	if (take == 0)
+	{
+		return;
+	}
+	pile.amount = static_cast<uint16_t>(pile.amount - take);
+	if (first)
+	{
+		const auto position = registry.Get<Transform>(pileEntity).position;
+		const auto wood = openblack::ecs::archetypes::PotArchetype::Create(position, 0.0f, PotInfo::HandWood,
+		                                                                   static_cast<int32_t>(take));
+		if (wood == entt::null)
+		{
+			pile.amount = static_cast<uint16_t>(pile.amount + take);
+			return;
+		}
+		g_heldObject = static_cast<uint32_t>(wood);
+		g_handTrail.clear();
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand collecting wood from {}: {} at once ({} left in the pile)",
+		                   g_collectingFrom, take, pile.amount);
+	}
+	else
+	{
+		registry.Get<Pot>(static_cast<entt::entity>(g_heldObject)).amount = static_cast<uint16_t>(held + take);
+	}
+	if (pile.amount == 0)
+	{
+		registry.Remove<Mesh>(pileEntity); // taken to the last stick
+		g_collectingFrom = 0;
+	}
 }
 
 bool HandPickUp(uint32_t object)
@@ -2723,6 +2890,18 @@ void HandDrop(const glm::vec3& handPosition)
 	{
 		return;
 	}
+	// Wood carried in the hand is put down as a pile of that much wood on the ground under the hand.
+	if (IsHandWood(static_cast<uint32_t>(entity)))
+	{
+		const auto amount = registry.Get<openblack::ecs::components::Pot>(entity).amount;
+		auto position = handPosition;
+		position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		registry.Destroy(entity);
+		openblack::ecs::archetypes::PotArchetype::Create(position, 0.0f, PotInfo::WoodPot, amount);
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand put down {} wood at ({:.1f}, {:.1f}, {:.1f})", amount, position.x,
+		                   position.y, position.z);
+		return;
+	}
 	// Things that move (people, animals, rocks, logs, food) fly on with the hand's speed, or fall where
 	// they were let go; fixtures (features like the totem) are set down on the ground under the hand.
 	if (registry.AllOf<openblack::ecs::components::Mobile>(entity))
@@ -2771,7 +2950,9 @@ void SetObjectUnderHand(uint32_t object)
 
 std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 {
-	static const bool enabled = std::getenv("OPENBLACK_TEST_PICKUP") != nullptr;
+	// OPENBLACK_TEST_COLLECT: the same with the nearest wood pile (held 3 s to collect, then put down 10 m on).
+	static const bool collect = std::getenv("OPENBLACK_TEST_COLLECT") != nullptr;
+	static const bool enabled = collect || std::getenv("OPENBLACK_TEST_PICKUP") != nullptr;
 	static auto start = std::chrono::steady_clock::now();
 	static glm::vec3 target(0.0f);
 	static bool chosen = false;
@@ -2787,7 +2968,7 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 	if (!chosen)
 	{
 		const auto focus = Locator::camera::value().GetFocus();
-		const auto object = FindObjectNear(focus, 200.0f);
+		const auto object = collect ? FindWoodNear(focus, 2000.0f) : FindObjectNear(focus, 200.0f);
 		if (object == 0)
 		{
 			return std::nullopt;
@@ -2798,6 +2979,22 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 		                   target.y, target.z);
 	}
 	const float k = t - 15.0f;
+	if (collect)
+	{
+		if (k < 0.3f || (k >= 3.3f && k < 3.6f))
+		{
+			return std::make_pair(target, false);
+		}
+		if (k < 3.3f)
+		{
+			return std::make_pair(target, true); // hold over the pile
+		}
+		if (k < 4.5f)
+		{
+			return std::make_pair(target + glm::vec3(10.0f, 0.0f, 0.0f), k >= 4.0f && k < 4.2f); // press, release
+		}
+		return std::nullopt;
+	}
 	if (k < 0.3f)
 	{
 		return std::make_pair(target, false); // hand over it

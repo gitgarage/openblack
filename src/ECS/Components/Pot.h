@@ -11,6 +11,8 @@
 
 #include <cstdint>
 
+#include "Enums.h"
+
 namespace openblack::ecs::components
 {
 
@@ -18,6 +20,7 @@ struct Pot
 {
 	uint16_t amount;
 	uint16_t maxAmount;
+	PotInfo type = PotInfo::_COUNT;
 };
 
 } // namespace openblack::ecs::components

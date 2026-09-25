@@ -500,11 +500,18 @@ bool Game::Update() noexcept
 					objectUnderHand = chlapi::FindObjectNear(intersectionTransform.position, k_HandReach);
 				}
 				chlapi::SetObjectUnderHand(objectUnderHand);
+				chlapi::SetWoodUnderHand(chlapi::FindWoodNear(intersectionTransform.position, k_HandReach));
 				static bool s_rightWasDown = false;
 				static bool s_letGoOnRelease = false;
 				if (rightDown && !s_rightWasDown)
 				{
-					if (chlapi::HandHolding())
+					// Over a wood pile the press collects wood for as long as it is held (adding to wood
+					// already in the hand); otherwise a press while holding lets go on its release.
+					if (const auto pile = chlapi::HandWoodUnder(); pile != 0)
+					{
+						chlapi::HandCollectBegin(pile);
+					}
+					else if (chlapi::HandHolding())
 					{
 						s_letGoOnRelease = true;
 					}
@@ -512,6 +519,14 @@ bool Game::Update() noexcept
 					{
 						chlapi::HandPickUp(objectUnderHand);
 					}
+				}
+				if (rightDown && chlapi::HandCollecting())
+				{
+					chlapi::HandCollect(deltaTime);
+				}
+				if (!rightDown)
+				{
+					chlapi::HandCollectEnd();
 				}
 				if (chlapi::HandHolding())
 				{
