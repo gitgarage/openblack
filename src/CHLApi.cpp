@@ -29,6 +29,7 @@
 #include <unordered_set>
 
 #include <LHVM.h>
+#include <SDL.h>
 #include <LHVMTypes.h>
 #include <entt/entity/entity.hpp>
 #include <entt/entity/fwd.hpp>
@@ -298,6 +299,8 @@ namespace
 {
 // One conversation at a time, as in the original: START_DIALOGUE takes it, END_DIALOGUE gives it back.
 bool g_dialogueActive = false;
+// Whether a script holds the camera (START/END_CAMERA_CONTROL): what a hand demo gives the camera back to.
+bool g_scriptHasCamera = false;
 // The line RUN_TEXT last showed, and when. There is no text display yet, so a line counts as read
 // once it has been up long enough to read (TEXT_READ).
 int g_lastTextId = -1;
@@ -848,12 +851,14 @@ void StartCameraControl() // 030 START_CAMERA_CONTROL
 {
 	// Always granted: nothing else in openblack competes for the camera yet.
 	Locator::camera::value().SetScriptControl(true);
+	g_scriptHasCamera = true;
 	Pushb(true);
 }
 
 void EndCameraControl() // 031 END_CAMERA_CONTROL
 {
 	Locator::camera::value().SetScriptControl(false);
+	g_scriptHasCamera = false;
 }
 
 void SetWidescreen() // 032 SET_WIDESCREEN
@@ -2898,6 +2903,31 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	static const bool s_testFollow = std::getenv("OPENBLACK_TEST_FOLLOW") != nullptr;
 	static bool s_testFollowDone = false;
 	s_testFollowDone = s_testFollowDone || g_lastTextId == 6101; // "Let's move to the Temple": the chase is over
+	// ...at 'Now you have a go' for pitching (5114), hold the tilt key (A) for 3 s as a player would...
+	if (s_testFollow && s_testFollowDone)
+	{
+		static int s_tiltState = 0; // 0 waiting, 1 held, 2 done
+		static auto s_tiltStart = std::chrono::steady_clock::now();
+		auto sendKey = [](bool down) {
+			SDL_Event e {};
+			e.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+			e.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+			e.key.keysym.scancode = SDL_SCANCODE_A;
+			e.key.keysym.sym = SDL_GetKeyFromScancode(SDL_SCANCODE_A);
+			SDL_PushEvent(&e);
+		};
+		if (s_tiltState == 0 && g_lastTextId == 5114 && !Locator::camera::value().IsScriptControlled() && !HandDemoPlaying())
+		{
+			sendKey(true);
+			s_tiltState = 1;
+			s_tiltStart = std::chrono::steady_clock::now();
+		}
+		else if (s_tiltState == 1 && std::chrono::steady_clock::now() - s_tiltStart > std::chrono::seconds(3))
+		{
+			sendKey(false);
+			s_tiltState = 2;
+		}
+	}
 	// ...then, once asked to look around (5109), orbit the camera round its focus as a player would.
 	if (s_testFollow && s_testFollowDone && g_lastTextId == 5109 && !Locator::camera::value().IsScriptControlled())
 	{
@@ -3871,9 +3901,11 @@ std::vector<HandDemoFrame> LoadHandDemo(const std::string& name)
 
 void EndHandDemo()
 {
-	if (g_handDemo.playing && g_handDemo.drivesCamera)
+	if (g_handDemo.playing)
 	{
-		Locator::camera::value().SetScriptControl(g_handDemo.cameraWasScripted);
+		// Back to whoever held it: the script if it has asked for the camera, otherwise the player. (Only doing
+		// this when the demo drove the camera to the end left the player locked out after the pitch demo.)
+		Locator::camera::value().SetScriptControl(g_scriptHasCamera);
 	}
 	g_handDemo.playing = false;
 	g_handDemo.paused = false;

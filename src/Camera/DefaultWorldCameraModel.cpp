@@ -222,7 +222,7 @@ bool DefaultWorldCameraModel::ConstrainAltitude()
 		hasBeenAdjusted = true;
 	}
 
-	if (_mode != Mode::ArcBall && _rotateAroundDelta.x != 0.0f)
+	if (_mode != Mode::ArcBall && _rotateAroundDelta.x != 0.0f && !_tiltOrbits)
 	{
 		_targetFocus = _targetOrigin + glm::normalize(_targetFocus - _targetOrigin) * _focusDistance;
 	}
@@ -322,7 +322,7 @@ void DefaultWorldCameraModel::UpdateMode(const Camera& camera, glm::vec3 eulerAn
 		break;
 	}
 
-	if (_mode != Mode::ArcBall && _rotateAroundDelta.x != 0.0f)
+	if (_mode != Mode::ArcBall && _rotateAroundDelta.x != 0.0f && !_tiltOrbits)
 	{
 		const auto diff = _targetFocus - _targetOrigin;
 		_targetOrigin = _currentOrigin;
@@ -619,6 +619,7 @@ void DefaultWorldCameraModel::HandleActions(std::chrono::microseconds dt)
 {
 	_rotateAroundDelta = glm::vec3();
 	_keyBoardMoveDelta = glm::vec2();
+	_tiltOrbits = false;
 
 	// Compute delta position (dp) based on the elapsed time and speed.
 	const auto dp = k_InteractionSpeedMultiplier * std::chrono::duration_cast<std::chrono::duration<float>>(dt).count();
@@ -636,6 +637,7 @@ void DefaultWorldCameraModel::HandleActions(std::chrono::microseconds dt)
 	{
 		const float distance = (actionSystem.Get(input::BindableActionMap::TILT_DOWN) ? -1.0f : 1.0f) * dp;
 		_rotateAroundDelta.x += distance;
+		_tiltOrbits = true;
 	}
 
 	if (actionSystem.GetAny(input::BindableActionMap::MOVE_FORWARDS, input::BindableActionMap::MOVE_BACKWARDS))
