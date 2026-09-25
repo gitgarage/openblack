@@ -131,10 +131,27 @@ Game::~Game() noexcept
 	spdlog::shutdown();
 }
 
+// Mouse buttons as their events say. SDL_GetMouseState misses buttons sent as events (the Switch's ZR, ZL
+// and touch arrive that way), so GAME_THING_CLICKED and the hand read these.
+namespace
+{
+bool g_leftButtonDown = false;
+bool g_rightButtonDown = false;
+} // namespace
+
 bool Game::ProcessEvents(const SDL_Event& event) noexcept
 {
 	static bool leftMouseButton = false;
 	static bool middleMouseButton = false;
+
+	if ((event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) && event.button.button == SDL_BUTTON_LEFT)
+	{
+		g_leftButtonDown = event.type == SDL_MOUSEBUTTONDOWN;
+	}
+	if ((event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) && event.button.button == SDL_BUTTON_RIGHT)
+	{
+		g_rightButtonDown = event.type == SDL_MOUSEBUTTONDOWN;
+	}
 
 	if ((event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) && event.button.button == SDL_BUTTON_LEFT)
 	{
@@ -407,20 +424,24 @@ bool Game::Update() noexcept
 				camera.DeprojectScreenToWorld(handScreen, rayOrigin, rayDirection);
 				auto& dynamicsSystem = Locator::dynamicsSystem::value();
 
+				uint32_t objectUnderHand = 0;
 				if (!glm::any(glm::isnan(rayOrigin) || glm::isnan(rayDirection)))
 				{
 					if (auto hit = dynamicsSystem.RayCastClosestHit(rayOrigin, rayDirection, 1e10f))
 					{
 						intersectionTransform = hit->first;
+						if (hit->second.type == RigidBodyType::Entity && hit->second.id != 0)
+						{
+							objectUnderHand = static_cast<uint32_t>(hit->second.id);
+						}
 						// A left-button press on a game object is a click for the scripts
 						// (GAME_THING_CLICKED). ZR and touchscreen taps arrive as the left button.
 						static bool s_leftWasDown = false;
-						const bool leftDown = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) != 0;
-						if (leftDown && !s_leftWasDown && hit->second.type == RigidBodyType::Entity && hit->second.id != 0)
+						if (g_leftButtonDown && !s_leftWasDown && objectUnderHand != 0)
 						{
-							chlapi::NotifyGameThingClicked(static_cast<uint32_t>(hit->second.id));
+							chlapi::NotifyGameThingClicked(objectUnderHand);
 						}
-						s_leftWasDown = leftDown;
+						s_leftWasDown = g_leftButtonDown;
 					}
 					else // For the water
 					{
@@ -435,6 +456,23 @@ bool Game::Update() noexcept
 					}
 				}
 				intersectionTransform.scale = scale;
+
+				// The right button (ZL) picks up what the hand is over, carries it, and puts it down on release.
+				chlapi::SetObjectUnderHand(objectUnderHand);
+				static bool s_rightWasDown = false;
+				if (g_rightButtonDown && !s_rightWasDown && objectUnderHand != 0)
+				{
+					chlapi::HandPickUp(objectUnderHand);
+				}
+				if (g_rightButtonDown)
+				{
+					chlapi::HandCarry(intersectionTransform.position);
+				}
+				else if (s_rightWasDown)
+				{
+					chlapi::HandDrop(intersectionTransform.position);
+				}
+				s_rightWasDown = g_rightButtonDown;
 			}
 
 			if (!_handGripping)

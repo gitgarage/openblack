@@ -13,6 +13,7 @@
 #include <optional>
 
 #include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
 #include <vector>
 
 #include <LHVMTypes.h>
@@ -51,5 +52,13 @@ std::optional<glm::vec2> UpdateHandDemo();
 // Every frame the game isn't paused: moves livings walking a track (WALK_PATH) at their script speed,
 // and flock members after their leader, smoothly rather than a step per game turn.
 void UpdateScriptFrame(std::chrono::microseconds dt);
+
+// The player's hand holding a game object (right button, ZL on the Switch): picked up when pressed over an
+// object, carried with the hand, put down on the ground under the hand when released.
+bool HandPickUp(uint32_t entity);
+void HandCarry(const glm::vec3& handPosition);
+void HandDrop(const glm::vec3& handPosition);
+// What the hand is over this frame (0 for none), for GET_OBJECT_HAND_IS_OVER.
+void SetObjectUnderHand(uint32_t entity);
 
 } // namespace openblack::chlapi

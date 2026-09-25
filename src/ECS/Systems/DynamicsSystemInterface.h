@@ -48,6 +48,7 @@ public:
 	virtual void Reset() = 0;
 	virtual void Update(std::chrono::microseconds& dt) = 0;
 	virtual void AddRigidBody(btRigidBody* object) = 0;
+	virtual void RemoveRigidBody(btRigidBody* object) = 0;
 	virtual void RegisterRigidBodies() = 0;
 	virtual void RegisterIslandRigidBodies(LandIslandInterface& island) = 0;
 	virtual void UpdatePhysicsTransforms() = 0;

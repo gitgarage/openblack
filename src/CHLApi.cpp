@@ -41,6 +41,12 @@
 #include "ECS/Archetypes/MobileStaticArchetype.h"
 #include "ECS/Archetypes/VillagerArchetype.h"
 #include "ECS/Components/Abode.h"
+#include "ECS/Systems/DynamicsSystemInterface.h"
+#include "ECS/Components/Forest.h"
+#include "ECS/Components/Stream.h"
+#include "ECS/Components/Footpath.h"
+#include "ECS/Components/Hand.h"
+#include "ECS/Components/RigidBody.h"
 #include "ECS/Components/Creature.h"
 #include "ECS/Components/Feature.h"
 #include "ECS/Components/Field.h"
@@ -268,6 +274,9 @@ struct ScriptAnimation
 };
 std::unordered_map<uint32_t, ScriptAnimation> g_scriptAnimations;
 std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> g_pendingShots;
+// What the player's hand holds and is over (see HandPickUp), 0 for nothing.
+uint32_t g_heldObject = 0;
+uint32_t g_objectUnderHand = 0;
 // When the current SET_FADE / SET_FADE_IN finishes.
 std::chrono::steady_clock::time_point g_fadeEnd {};
 
@@ -582,6 +591,7 @@ enum class Prop : int32_t
 	Health = 1,
 	Angle = 2,
 	Scale = 8,
+	InHand = 9,
 	Age = 16, // one more entry than openblack's ObjectPropertyType before here: scripts set 16 to ages (3-33)
 	XPos = 23,
 	YPos = 24,
@@ -618,6 +628,9 @@ void GetProperty() // 021 GET_PROPERTY
 	}
 	switch (static_cast<Prop>(prop))
 	{
+	case Prop::InHand:
+		value = object != 0 && object == g_heldObject ? 1.0f : 0.0f;
+		break;
 	case Prop::Health:
 		value = villager != nullptr ? static_cast<float>(villager->health) / 100.0f : value;
 		break;
@@ -2127,9 +2140,7 @@ void ReleaseFromScript() // 159 RELEASE_FROM_SCRIPT
 
 void GetObjectHandIsOver() // 160 GET_OBJECT_HAND_IS_OVER
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	Pusho(g_objectUnderHand);
 }
 
 void IdPoisonedSize() // 161 ID_POISONED_SIZE
@@ -2533,6 +2544,98 @@ void UpdateAnimations(float seconds)
 	});
 }
 } // namespace
+
+namespace
+{
+constexpr float k_CarryHeight = 3.0f; // held things hang a little above the ground under the hand
+
+void MoveBody(entt::entity entity, const glm::vec3& position)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	if (auto* body = registry.TryGet<openblack::ecs::components::RigidBody>(entity))
+	{
+		btTransform transform = body->handle.getWorldTransform();
+		transform.setOrigin(btVector3(position.x, position.y, position.z));
+		body->handle.setWorldTransform(transform);
+		body->motionState->setWorldTransform(transform); // the physics sync copies this back onto the Transform
+	}
+}
+} // namespace
+
+bool HandPickUp(uint32_t object)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	if (g_heldObject != 0 || object == 0 || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
+	{
+		return false;
+	}
+	// Not the things that make up the land and the towns.
+	if (registry.AnyOf<Abode, Temple, Town, Field, Footpath, Stream, Forest, Hand>(entity))
+	{
+		return false;
+	}
+	g_walks.erase(object);
+	g_followers.erase(object);
+	g_scriptMoves.erase(object);
+	if (registry.AllOf<WallHug, LivingAction>(entity))
+	{
+		HoldForScript(entity, registry.Get<Transform>(entity).position); // no walking off while held
+	}
+	if (auto* body = registry.TryGet<RigidBody>(entity))
+	{
+		Locator::dynamicsSystem::value().RemoveRigidBody(&body->handle); // or the hand's ray would hit it
+	}
+	g_heldObject = object;
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand picked up {}", object);
+	return true;
+}
+
+void HandCarry(const glm::vec3& handPosition)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(g_heldObject);
+	if (g_heldObject == 0 || !registry.Valid(entity))
+	{
+		g_heldObject = 0;
+		return;
+	}
+	const auto position = handPosition + glm::vec3(0.0f, k_CarryHeight, 0.0f);
+	registry.Get<openblack::ecs::components::Transform>(entity).position = position;
+	MoveBody(entity, position);
+}
+
+void HandDrop(const glm::vec3& handPosition)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(g_heldObject);
+	const bool holding = g_heldObject != 0;
+	g_heldObject = 0;
+	if (!holding || !registry.Valid(entity))
+	{
+		return;
+	}
+	auto position = handPosition;
+	position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+	registry.Get<openblack::ecs::components::Transform>(entity).position = position;
+	MoveBody(entity, position);
+	if (auto* body = registry.TryGet<openblack::ecs::components::RigidBody>(entity))
+	{
+		Locator::dynamicsSystem::value().AddRigidBody(&body->handle);
+	}
+	if (auto* move = registry.TryGet<ScriptMove>(entity))
+	{
+		move->target = position;
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand dropped {} at ({:.1f}, {:.1f}, {:.1f})", static_cast<uint32_t>(entity),
+	                   position.x, position.y, position.z);
+}
+
+void SetObjectUnderHand(uint32_t object)
+{
+	g_objectUnderHand = object;
+}
 
 void UpdateScriptFrame(std::chrono::microseconds dt)
 {
