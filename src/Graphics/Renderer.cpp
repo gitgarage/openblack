@@ -8,6 +8,7 @@
  *******************************************************************************/
 
 #include <memory>
+#include <chrono>
 #include <cstdlib>
 #include <pthread.h>
 #include <mutex>
@@ -805,7 +806,35 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 				submitDesc.instanceDesc =
 				    std::make_unique<graphics::InstanceDesc>(renderCtx.instanceUniformBuffer, animated.offset, 1);
 				std::vector<glm::mat4> bones;
-				if (mesh->IsBoned())
+				// Skinning test (OPENBLACK_SKIN_CYCLE=1): every 10 s, offset 5 s from the screenshots, draw animated
+				// meshes posed (0), in their default pose (1) or with identity bones (2), logging the switch.
+				static const bool s_skinCycle = std::getenv("OPENBLACK_SKIN_CYCLE") != nullptr;
+				static const auto s_skinStart = std::chrono::steady_clock::now();
+				int skinMode = 0;
+				if (s_skinCycle)
+				{
+					const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - s_skinStart).count();
+					skinMode = static_cast<int>(((seconds + 5) / 10) % 3);
+					static int s_lastMode = -1;
+					if (skinMode != s_lastMode)
+					{
+						s_lastMode = skinMode;
+						SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "skin cycle: mode {} ({})", skinMode,
+						                   skinMode == 0 ? "posed" : skinMode == 1 ? "default pose" : "identity bones");
+					}
+				}
+				if (mesh->IsBoned() && skinMode == 2)
+				{
+					bones.assign(mesh->GetBoneMatrices().size(), glm::mat4(1.0f));
+					submitDesc.modelMatrices = bones.data();
+					submitDesc.matrixCount = static_cast<uint8_t>(bones.size());
+				}
+				else if (mesh->IsBoned() && skinMode == 1)
+				{
+					submitDesc.modelMatrices = mesh->GetBoneMatrices().data();
+					submitDesc.matrixCount = static_cast<uint8_t>(mesh->GetBoneMatrices().size());
+				}
+				else if (mesh->IsBoned())
 				{
 					bones = mesh->GetBoneMatrices();
 					const auto animationId = resources::HashIdentifier(animated.animation);
