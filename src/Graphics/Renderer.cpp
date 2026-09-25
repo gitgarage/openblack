@@ -8,6 +8,11 @@
  *******************************************************************************/
 
 #include <memory>
+#include <cstdlib>
+#include <thread>
+#include <mutex>
+#include <deque>
+#include <condition_variable>
 #define LOCATOR_IMPLEMENTATIONS
 
 #include <cstdint>
@@ -62,6 +67,83 @@ constexpr auto k_BgfxDefaultStateInvertedZ = 0 \
                                      | BGFX_STATE_DEPTH_TEST_GREATER \
                                      | BGFX_STATE_MSAA;
 // clang-format on
+
+// Writes screenshots on its own thread. Holds at most two waiting; more are dropped, not queued, so a slow
+// SD card never builds up memory or delays the game.
+struct ShotJob
+{
+	std::string path;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	bool yflip = false;
+	std::vector<uint32_t> pixels;
+};
+
+class ShotWriter
+{
+public:
+	static ShotWriter& Instance()
+	{
+		// Never destroyed: its thread waits on these members until the process ends, and destroying them
+		// under it at exit hung the program.
+		static auto* writer = new ShotWriter();
+		return *writer;
+	}
+
+	void Push(ShotJob job)
+	{
+		{
+			std::lock_guard lock(_mutex);
+			if (_jobs.size() >= 2)
+			{
+				SPDLOG_LOGGER_WARN(spdlog::get("graphics"), "Screenshot {} dropped: still writing earlier ones", job.path);
+				return;
+			}
+			_jobs.push_back(std::move(job));
+		}
+		_wake.notify_one();
+	}
+
+private:
+	ShotWriter()
+	    : _thread([this]() { Run(); })
+	{
+		_thread.detach();
+	}
+
+	void Run()
+	{
+		for (;;)
+		{
+			ShotJob job;
+			{
+				std::unique_lock lock(_mutex);
+				_wake.wait(lock, [this]() { return !_jobs.empty(); });
+				job = std::move(_jobs.front());
+				_jobs.pop_front();
+			}
+			bx::FileWriter writer;
+			bx::Error err;
+			if (bx::open(&writer, job.path.c_str(), false, &err))
+			{
+				bimg::imageWritePng(&writer, job.width, job.height, job.width * 4, job.pixels.data(),
+				                    bimg::TextureFormat::BGRA8, job.yflip, &err);
+				bx::close(&writer);
+				SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "Screenshot ({}x{}) saved at {}", job.width, job.height, job.path);
+			}
+			else
+			{
+				SPDLOG_LOGGER_ERROR(spdlog::get("graphics"), "Failed to save screenshot at {}: {}", job.path,
+				                    std::string(err.getMessage().getCPtr(), err.getMessage().getLength()));
+			}
+		}
+	}
+
+	std::mutex _mutex;
+	std::condition_variable _wake;
+	std::deque<ShotJob> _jobs;
+	std::thread _thread;
+};
 
 struct BgfxCallback: public bgfx::CallbackI
 {
@@ -139,46 +221,39 @@ struct BgfxCallback: public bgfx::CallbackI
 		return false;
 	}
 	void cacheWrite([[maybe_unused]] uint64_t id, [[maybe_unused]] const void* data, [[maybe_unused]] uint32_t size) override {}
-	// Saving a screenshot
+	// Saving a screenshot. Only the copy happens here, on the render thread: an opaque (and, with
+	// OPENBLACK_SHOT_SCALE=n, 1/n size) copy of the frame. Encoding the PNG and writing it happen on a
+	// background thread, so a screenshot doesn't stall the game (on the Switch that took most of a second).
 	void screenShot(const char* filePath, uint32_t width, uint32_t height, uint32_t pitch, const void* data,
 	                [[maybe_unused]] uint32_t size, bool yflip) override
 	{
-		SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "Taking a screenshot...");
-
 		const auto ext = std::filesystem::path(filePath).extension();
-		if (std::filesystem::path(filePath).extension() == ".png")
-		{
-			bx::FileWriter writer;
-			bx::Error err;
-			if (bx::open(&writer, filePath, false, &err))
-			{
-				// Strip out alpha for screenshot
-				std::vector<uint32_t> noAlpha;
-				noAlpha.resize(size / sizeof(noAlpha[0]), 0);
-				memcpy(noAlpha.data(), data, size);
-				for (uint32_t y = 0; y < height; ++y)
-				{
-					for (uint32_t x = 0; x < width; ++x)
-					{
-						noAlpha[x + pitch / sizeof(noAlpha[0]) * y] |= 0xFF000000;
-					}
-				}
-
-				bimg::imageWritePng(&writer, width, height, pitch, noAlpha.data(), bimg::TextureFormat::BGRA8, yflip, &err);
-				bx::close(&writer);
-				SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "Screenshot ({}x{}) saved at {}", width, height, filePath);
-			}
-			else
-			{
-				SPDLOG_LOGGER_ERROR(spdlog::get("graphics"), "Failed to save Screenshot ({}x{}) at {}: {}", width, height,
-				                    filePath, std::string(err.getMessage().getCPtr(), err.getMessage().getLength()));
-			}
-		}
-		else
+		if (ext != ".png")
 		{
 			SPDLOG_LOGGER_WARN(spdlog::get("graphics"), "Not Implemented: {} screenshot ({}x{}) requested at {}", ext.string(),
 			                   width, height, filePath);
+			return;
 		}
+		static const uint32_t scale = []() {
+			const char* value = std::getenv("OPENBLACK_SHOT_SCALE");
+			return value != nullptr ? std::max(1, std::atoi(value)) : 1;
+		}();
+		ShotJob job;
+		job.path = filePath;
+		job.width = width / scale;
+		job.height = height / scale;
+		job.yflip = yflip;
+		job.pixels.resize(static_cast<size_t>(job.width) * job.height);
+		const auto* source = static_cast<const uint8_t*>(data);
+		for (uint32_t y = 0; y < job.height; ++y)
+		{
+			const auto* row = reinterpret_cast<const uint32_t*>(source + static_cast<size_t>(y * scale) * pitch);
+			for (uint32_t x = 0; x < job.width; ++x)
+			{
+				job.pixels[static_cast<size_t>(y) * job.width + x] = row[x * scale] | 0xFF000000; // no alpha
+			}
+		}
+		ShotWriter::Instance().Push(std::move(job));
 	}
 	// Saving a video
 	void captureBegin(uint32_t width, uint32_t height, [[maybe_unused]] uint32_t pitch,

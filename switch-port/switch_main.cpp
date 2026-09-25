@@ -188,6 +188,7 @@ extern "C" int __wrap_main(int argc, char** argv)
 	// fetches, so a run can be looked at on the laptop afterwards.
 	setenv("OPENBLACK_SHOT_DIR", "sdmc:/switch/openblack/shots", 0);
 	setenv("OPENBLACK_SHOT_EVERY", "20", 0);
+	setenv("OPENBLACK_SHOT_SCALE", "2", 0); // 640x360: less to encode and write
 	// Every 5 s: the camera and each script's position (what scripts are waiting on), into the log.
 	setenv("OPENBLACK_TRACE_VM", "1", 0);
 
