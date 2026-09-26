@@ -212,10 +212,12 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		// A scroll floating over the land (the original's mini scroll), for the player to find and read.
 		auto& registry = Locator::entitiesRegistry::value();
 		const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
+		// Where the script says, height and all (Land 1's gold scroll hangs on the gate, at 32.3); only a position
+		// on or under the ground is lifted to just above it.
 		constexpr float k_HighlightHeight = 3.0f;
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
-		registry.Assign<Transform>(entity, glm::vec3(position.x, ground + k_HighlightHeight, position.z), glm::mat3(1.0f),
-		                           glm::vec3(1.0f));
+		const float height = position.y > ground ? position.y : ground + k_HighlightHeight;
+		registry.Assign<Transform>(entity, glm::vec3(position.x, height, position.z), glm::mat3(1.0f), glm::vec3(1.0f));
 		// The script's highlight types, by the lines announcing them: 1 a question ("Did you know") scroll,
 		// 2 a Silver Reward Scroll, 3 a Gold Story Scroll.
 		const auto mesh = subtype == 3 ? MeshId::I_MiniscrollGold
@@ -5054,8 +5056,8 @@ void CreateHighlight() // 272 CREATE_HIGHLIGHT
 	// Land 1's FollowUs waits (CALL_NEAR type HIGHLIGHT) for the "Did you know" scroll DidYouKnow makes here.
 	const auto entity = CreateScriptObject(ObjectType::Highlight, static_cast<uint32_t>(type), position, 0.0f, 0.0f, 0.0f,
 	                                       0.0f, 1.0f);
-	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Highlight {} (type {}) at ({:.1f}, {:.1f})", static_cast<uint32_t>(entity),
-	                   type, position.x, position.z);
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Highlight {} (type {}) at ({:.1f}, {:.1f}, {:.1f})",
+	                   static_cast<uint32_t>(entity), type, position.x, position.y, position.z);
 	Pusho(static_cast<uint32_t>(entity));
 }
 
