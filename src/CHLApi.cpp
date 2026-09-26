@@ -3520,6 +3520,20 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 
 	UpdateAnimations(seconds);
 
+	// Test hook: OPENBLACK_TEST_ENTER_TEMPLE=<seconds> goes into the Temple that long into the run.
+	{
+		static const float enterAfter = std::getenv("OPENBLACK_TEST_ENTER_TEMPLE") != nullptr
+		                                    ? static_cast<float>(std::atof(std::getenv("OPENBLACK_TEST_ENTER_TEMPLE")))
+		                                    : -1.0f;
+		static const auto start = std::chrono::steady_clock::now();
+		static bool entered = false;
+		if (!entered && enterAfter >= 0.0f &&
+		    std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count() > enterAfter)
+		{
+			entered = true;
+			EnterTemple();
+		}
+	}
 	// Test hooks for the save points: OPENBLACK_TEST_SAVE_AT_TEXT=<line> saves point 1 when that line shows,
 	// OPENBLACK_TEST_LOAD_AFTER=<seconds> loads point 1 that long into the run.
 	{
@@ -6951,6 +6965,7 @@ bool SaveTestPoint(int slot)
 
 bool LoadTestPoint(int slot)
 {
+	ExitTemple(); // a save point is always outside
 	using namespace openblack::ecs::components;
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto dir = TestPointDir(slot);

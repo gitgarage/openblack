@@ -106,6 +106,22 @@ void RenderingSystemTemple::PrepareDrawUploadUniforms(bool drawBoundingBox)
 {
 	auto& registry = Locator::entitiesRegistry::value();
 
+	// The instanced object shader reads each model's bones from the bone texture (see RenderContext::boneTexture):
+	// the Temple's rooms are unskinned, so they all use row 0, identity. Without the texture the draws read garbage
+	// (the Switch showed chaos; Vulkan lost the device).
+	if (!bgfx::isValid(toBgfx(_renderContext.boneTexture)))
+	{
+		constexpr auto k_BonesPerRow = RenderContext::k_BonesPerRow;
+		_renderContext.boneTexture = graphics::fromBgfx(
+		    bgfx::createTexture2D(k_BonesPerRow * 4, RenderContext::k_BoneRows, false, 1, bgfx::TextureFormat::RGBA32F,
+		                          BGFX_SAMPLER_POINT | BGFX_SAMPLER_UVW_CLAMP));
+		_renderContext.boneData.assign(k_BonesPerRow, glm::mat4(1.0f));
+		const auto rowBytes = static_cast<uint32_t>(k_BonesPerRow * sizeof(glm::mat4));
+		bgfx::updateTexture2D(toBgfx(_renderContext.boneTexture), 0, 0, 0, 0, static_cast<uint16_t>(k_BonesPerRow * 4), 1,
+		                      bgfx::copy(_renderContext.boneData.data(), rowBytes), static_cast<uint16_t>(rowBytes));
+		_renderContext.boneRowsUsed = 1;
+	}
+
 	// Store offsets of uniforms for descs
 	std::map<entt::id_type, uint32_t> uniformOffsets;
 
