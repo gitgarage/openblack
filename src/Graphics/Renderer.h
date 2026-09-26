@@ -44,11 +44,13 @@ namespace graphics
 class L3DSubMesh;
 class Mesh;
 
-// How much of a mesh's scaffold (its status 1 submesh, the lattice round a building under construction) to draw:
-// 1 all of it, 0 none (the default, as for every building that is finished).
+// Whether to draw a mesh's scaffold (its status 1 submesh, the lattice round a building under construction):
+// 1 yes, 0 no (the default, as for every building that is finished).
 void SetScaffoldShown(const L3DMesh& mesh, float fraction);
 // The world height a building under construction is built up to (drawn below it only).
 void SetBuiltHeight(const L3DMesh& mesh, float worldHeight);
+// The world height a building's scaffold stands up to.
+void SetScaffoldHeight(const L3DMesh& mesh, float worldHeight);
 
 class Renderer final: public RendererInterface
 {

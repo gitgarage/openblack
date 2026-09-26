@@ -3084,30 +3084,253 @@ uint32_t FindObjectNear(const glm::vec3& point, float radius)
 
 bool HandDemoPlaying(); // below, with the hand demo player
 
+namespace
+{
+// Villagers building (the original's villager states ArrivesAtStoragePitForMaterials, ArrivesAtBuildingSite,
+// Building, TakeWoodFromPotForBuilding, WaitForWood): the town's villagers take up a building site on their own,
+// once it has been given the town's totalWoodNeededToStartBuilding (600), fetch wood from the village store,
+// carry it to the site and build with it. Only builders turn the site's wood
+// into progress. The numbers are the original's, per villager type (info.dat): maxWoodCarried (250) a trip,
+// woodUsedPerBuildCycle (40-50) spent each jobSpeed (4200 ms) cycle; percentLazy (a quarter) don't join in.
+// A site is done after woodRequiredPerBuild x timeToBuild wood (the Citadel heart's 5 x 150).
+struct Builder
+{
+	enum class Stage
+	{
+		ToStore,
+		ToSite,
+		Building,
+		Waiting,
+	} stage = Stage::ToStore;
+	uint32_t site = 0;
+	uint32_t pile = 0;
+	float carrying = 0.0f;
+	float timer = 0.0f;
+};
+std::unordered_map<uint32_t, Builder> g_builders;
+float g_builderRecruitTimer = 0.0f;
+constexpr float k_BuilderRecruitRadius = 300.0f; // Land 1's village by its store is ~150 from the Temple
+constexpr float k_BuildingSiteRadius = 16.0f; // builders work round the site at about this distance
+constexpr float k_WoodSearchRadius = 400.0f;
+constexpr float k_BuilderWalk = 0.3f; // of full (fleeing) speed: a walk
+
+const GVillagerInfo& VillagerInfoOf(const openblack::ecs::components::Villager& villager)
+{
+	return Locator::infoConstants::value().villager.at(
+	    static_cast<size_t>(openblack::GVillagerInfo::Find(villager.tribe, villager.number)));
+}
+
+// Whether a villager is free to take up building: an adult no script, flock, walk or hand has hold of.
+bool FreeToBuild(entt::entity entity, const openblack::ecs::components::Villager& villager)
+{
+	const auto id = static_cast<uint32_t>(entity);
+	if (villager.lifeStage != openblack::ecs::components::Villager::LifeStage::Adult || id == g_heldObject ||
+	    g_scriptEntities.contains(id) || g_walks.contains(id) || g_followers.contains(id) || g_scriptMoves.contains(id) ||
+	    g_scriptAnimations.contains(id) || g_flying.contains(id))
+	{
+		return false;
+	}
+	// The lazy ones: a fixed share of the villagers, by who they are.
+	const auto hash = (id * 2654435761u) % 100u;
+	return static_cast<float>(hash) >= VillagerInfoOf(villager).percentLazy * 100.0f;
+}
+
+// Step a builder towards a point at a walk; true once there.
+bool WalkBuilder(entt::entity entity, Transform& transform, const glm::vec3& target, float seconds)
+{
+	const auto toTarget = glm::vec2(target.x - transform.position.x, target.z - transform.position.z);
+	const float distance = glm::length(toTarget);
+	const float step = FullSpeed(static_cast<uint32_t>(entity)) * k_BuilderWalk * seconds;
+	if (distance <= std::max(step, 0.5f))
+	{
+		return true;
+	}
+	PlaceMover(entity, transform, transform.position + glm::vec3(toTarget.x, 0.0f, toTarget.y) / distance * step, target);
+	return false;
+}
+
+void SetBuilderAnimation(uint32_t id, std::optional<AnimId> animation)
+{
+	if (!animation)
+	{
+		g_scriptAnimations.erase(id);
+		return;
+	}
+	auto& scripted = g_scriptAnimations[id];
+	if (scripted.animation != static_cast<uint32_t>(*animation))
+	{
+		scripted = {static_cast<uint32_t>(*animation), std::numeric_limits<float>::max()};
+	}
+	else
+	{
+		scripted.playsLeft = std::numeric_limits<float>::max();
+	}
+}
+
+void ReleaseBuilder(uint32_t id)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	g_scriptAnimations.erase(id);
+	const auto entity = static_cast<entt::entity>(id);
+	if (registry.Valid(entity))
+	{
+		registry.Remove<ScriptMove>(entity); // back to its own life
+	}
+}
+
+void UpdateBuilders(float seconds)
+{
+	using openblack::ecs::components::Construction;
+	using openblack::ecs::components::Pot;
+	using openblack::ecs::components::Villager;
+	auto& registry = Locator::entitiesRegistry::value();
+
+	// Take up sites: now and then, free villagers near a site that is still being built join in.
+	g_builderRecruitTimer -= seconds;
+	if (g_builderRecruitTimer <= 0.0f)
+	{
+		g_builderRecruitTimer = 1.0f;
+		registry.Each<Construction, const Transform>(
+		    [&](entt::entity site, Construction& construction, const Transform& siteTransform) {
+			    construction.started = construction.started ||
+			                           construction.woodStock >= Locator::infoConstants::value().town.totalWoodNeededToStartBuilding;
+			    if (construction.built >= 1.0f || !construction.started)
+			    {
+				    return;
+			    }
+			    registry.Each<const Villager, const Transform>(
+			        [&](entt::entity entity, const Villager& villager, const Transform& transform) {
+				        const auto id = static_cast<uint32_t>(entity);
+				        const auto offset = glm::vec2(transform.position.x - siteTransform.position.x,
+				                                      transform.position.z - siteTransform.position.z);
+				        if (g_builders.contains(id) || glm::dot(offset, offset) > k_BuilderRecruitRadius * k_BuilderRecruitRadius ||
+				            !FreeToBuild(entity, villager))
+				        {
+					        return;
+				        }
+				        HoldForScript(entity, transform.position);
+				        g_builders[id] = {Builder::Stage::ToStore, static_cast<uint32_t>(site)};
+				        SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} takes up building {}", id,
+				                           static_cast<uint32_t>(site));
+			        });
+		    });
+	}
+
+	for (auto it = g_builders.begin(); it != g_builders.end();)
+	{
+		const auto id = it->first;
+		auto& builder = it->second;
+		const auto entity = static_cast<entt::entity>(id);
+		const auto siteEntity = static_cast<entt::entity>(builder.site);
+		auto* construction = registry.Valid(siteEntity) ? registry.TryGet<Construction>(siteEntity) : nullptr;
+		auto* villager = registry.Valid(entity) ? registry.TryGet<Villager>(entity) : nullptr;
+		// Done (or taken away: picked up, or a script has it now): the builder goes back to its own life.
+		if (construction == nullptr || construction->built >= 1.0f || villager == nullptr || id == g_heldObject ||
+		    g_walks.contains(id) || g_followers.contains(id) || g_scriptMoves.contains(id) || g_flying.contains(id))
+		{
+			ReleaseBuilder(id);
+			it = g_builders.erase(it);
+			continue;
+		}
+		auto& transform = registry.Get<Transform>(entity);
+		const auto& site = registry.Get<Transform>(siteEntity).position;
+		const auto& info = VillagerInfoOf(*villager);
+		// Each builder has a spot of its own round the site.
+		const float angle = static_cast<float>((id * 2654435761u) % 360u) * glm::pi<float>() / 180.0f;
+		const auto spot = site + glm::vec3(std::cos(angle), 0.0f, std::sin(angle)) * k_BuildingSiteRadius;
+
+		switch (builder.stage)
+		{
+		case Builder::Stage::ToStore:
+		{
+			SetBuilderAnimation(id, std::nullopt);
+			auto* pile = registry.Valid(static_cast<entt::entity>(builder.pile))
+			                 ? registry.TryGet<Pot>(static_cast<entt::entity>(builder.pile))
+			                 : nullptr;
+			if (pile == nullptr || pile->amount == 0)
+			{
+				builder.pile = FindWoodNear(site, k_WoodSearchRadius);
+				if (builder.pile == 0)
+				{
+					builder.stage = Builder::Stage::Waiting; // WaitForWood
+					break;
+				}
+				pile = &registry.Get<Pot>(static_cast<entt::entity>(builder.pile));
+			}
+			if (WalkBuilder(entity, transform, registry.Get<Transform>(static_cast<entt::entity>(builder.pile)).position, seconds))
+			{
+				// TakeWoodFromPotForBuilding
+				const auto take = std::min<uint32_t>(info.maxWoodCarried, pile->amount);
+				pile->amount = static_cast<uint16_t>(pile->amount - take);
+				builder.carrying = static_cast<float>(take);
+				builder.stage = Builder::Stage::ToSite;
+			}
+			break;
+		}
+		case Builder::Stage::ToSite:
+			SetBuilderAnimation(id, builder.carrying > 0.0f ? std::optional(AnimId::PCarryingSticks) : std::nullopt);
+			if (WalkBuilder(entity, transform, spot, seconds))
+			{
+				construction->woodStock += builder.carrying; // ArrivesAtBuildingSite
+				builder.carrying = 0.0f;
+				builder.stage = Builder::Stage::Building;
+				builder.timer = 0.0f;
+			}
+			break;
+		case Builder::Stage::Building:
+			if (construction->woodStock < info.woodUsedPerBuildCycle)
+			{
+				builder.stage = Builder::Stage::ToStore; // out of wood: fetch more
+				break;
+			}
+			FaceTowards(transform, site);
+			{
+				// Hammering, sawing or the sledgehammer: each builder keeps to one.
+				constexpr std::array k_Work = {AnimId::PHammering, AnimId::PSawWood, AnimId::PSledgehammer};
+				SetBuilderAnimation(id, k_Work.at(id % k_Work.size()));
+			}
+			builder.timer += seconds;
+			if (builder.timer >= static_cast<float>(info.jobSpeed) / 1000.0f)
+			{
+				builder.timer = 0.0f;
+				construction->woodStock -= info.woodUsedPerBuildCycle;
+				const float before = construction->built;
+				construction->built = std::min(
+				    construction->built + info.woodUsedPerBuildCycle / (construction->woodPerStep * construction->steps), 1.0f);
+				if (std::floor(construction->built * 10.0f) > std::floor(before * 10.0f) && construction->built < 1.0f)
+				{
+					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building {} {:.0f}% built ({:.0f} wood in stock)", builder.site,
+					                   construction->built * 100.0f, construction->woodStock);
+				}
+				if (construction->built >= 1.0f)
+				{
+					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building {} built ({:.0f} wood left over)", builder.site,
+					                   construction->woodStock);
+				}
+			}
+			break;
+		case Builder::Stage::Waiting:
+			SetBuilderAnimation(id, std::nullopt);
+			WalkBuilder(entity, transform, spot, seconds);
+			builder.timer += seconds;
+			if (builder.timer >= 2.0f)
+			{
+				builder.timer = 0.0f;
+				builder.stage = construction->woodStock >= info.woodUsedPerBuildCycle ? Builder::Stage::Building
+				                                                                      : Builder::Stage::ToStore;
+			}
+			break;
+		}
+		++it;
+	}
+}
+} // namespace
+
 void UpdateScriptFrame(std::chrono::microseconds dt)
 {
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
 	auto& registry = Locator::entitiesRegistry::value();
-	// Buildings under construction spend their wood, a step each game turn while they have it.
-	registry.Each<openblack::ecs::components::Construction>(
-	    [seconds](entt::entity building, openblack::ecs::components::Construction& construction) {
-		    construction.turnTime += seconds;
-		    while (construction.turnTime >= 0.1f)
-		    {
-			    construction.turnTime -= 0.1f;
-			    if (construction.built >= 1.0f || construction.woodStock < construction.woodPerStep)
-			    {
-				    continue;
-			    }
-			    construction.woodStock -= construction.woodPerStep;
-			    construction.built = std::min(construction.built + 1.0f / construction.steps, 1.0f);
-			    if (construction.built >= 1.0f)
-			    {
-				    SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building {} built ({:.0f} wood left over)",
-				                       static_cast<uint32_t>(building), construction.woodStock);
-			    }
-		    }
-	    });
+	UpdateBuilders(seconds);
 	for (auto it = g_walks.begin(); it != g_walks.end();)
 	{
 		const auto entity = static_cast<entt::entity>(it->first);

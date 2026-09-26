@@ -13,15 +13,16 @@ namespace openblack::ecs::components
 {
 
 // A building still being built (a planned Citadel: CREATE_PLANNED_CITADEL). Wood given to it goes to its stock,
-// and each game turn it spends woodPerStep of that for one of its steps (the original's woodRequiredPerBuild and
-// timeToBuild). Its BuiltPercentage (GET_PROPERTY 22) is built, 1 when all the steps are done.
+// which its builders turn into progress (see UpdateBuilders in CHLApi.cpp); it is done after woodPerStep x steps
+// wood (the original's woodRequiredPerBuild and timeToBuild). Its BuiltPercentage (GET_PROPERTY 22) is built.
 struct Construction
 {
 	float woodStock;
 	float woodPerStep;
 	float steps;
 	float built = 0.0f;
-	float turnTime = 0.0f;
+	// Villagers take a site up once it has had the town's totalWoodNeededToStartBuilding (600) given to it.
+	bool started = false;
 };
 
 } // namespace openblack::ecs::components

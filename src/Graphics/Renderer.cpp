@@ -436,6 +436,12 @@ std::unordered_map<const openblack::graphics::L3DMesh*, float> g_scaffoldShown;
 } // namespace
 
 std::unordered_map<const openblack::graphics::L3DMesh*, float> g_builtHeight;
+std::unordered_map<const openblack::graphics::L3DMesh*, float> g_scaffoldHeight;
+
+void openblack::graphics::SetScaffoldHeight(const L3DMesh& mesh, float worldHeight)
+{
+	g_scaffoldHeight[&mesh] = worldHeight;
+}
 
 void openblack::graphics::SetScaffoldShown(const L3DMesh& mesh, float fraction)
 {
@@ -452,8 +458,8 @@ void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSub
 {
 	assert(&subMesh.GetMesh());
 	// We don't draw physics meshes, we haven't implemented statuses (building and graves) and modern GPUs can handle high lod
-	// Status 1 is a building's scaffold: drawn on its own for a building under construction, less of it the more
-	// it is built (see L3DMeshSubmitDesc::Scaffold).
+	// Status 1 is a building's scaffold: drawn on its own for a building under construction, up to the height
+	// it stands to (see L3DMeshSubmitDesc::Scaffold).
 	using Scaffold = L3DMeshSubmitDesc::Scaffold;
 	float scaffoldShown = 1.0f;
 	const bool isScaffold = subMesh.GetFlags().status == 1 && !subMesh.IsPhysics();
@@ -518,13 +524,13 @@ void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSub
 			if (!desc.isSky)
 			{
 				// z/w: a building under construction is drawn up to the height it is built to.
-				const auto built = desc.scaffold == L3DMeshSubmitDesc::Scaffold::Without ? g_builtHeight.find(&mesh)
-				                                                                          : g_builtHeight.end();
+				const auto& heights = desc.scaffold == L3DMeshSubmitDesc::Scaffold::Only ? g_scaffoldHeight : g_builtHeight;
+				const auto built = desc.scaffold != L3DMeshSubmitDesc::Scaffold::Hidden ? heights.find(&mesh) : heights.end();
 				const glm::vec4 u_skyAlphaThreshold = {
 				    Locator::skySystem::value().GetCurrentSkyType(),
 				    prim.thresholdAlpha ? prim.alphaCutoutThreshold : 0.0f,
-				    built != g_builtHeight.end() ? 1.0f : 0.0f,
-				    built != g_builtHeight.end() ? built->second : 0.0f,
+				    built != heights.end() ? 1.0f : 0.0f,
+				    built != heights.end() ? built->second : 0.0f,
 				};
 				desc.program->SetUniformValue("u_skyAlphaThreshold", &u_skyAlphaThreshold);
 			}
@@ -543,11 +549,7 @@ void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSub
 			}
 			if (subMesh.GetMesh().IsIndexed() && (skip & Mesh::SkipState::SkipIndexBuffer) == 0)
 			{
-				// A partly taken-down scaffold: the first triangles of it.
-				const auto count = scaffoldShown < 1.0f
-				                       ? static_cast<uint32_t>(static_cast<float>(prim.indicesCount / 3) * scaffoldShown) * 3
-				                       : prim.indicesCount;
-				subMesh.GetMesh().GetIndexBuffer().Bind(count, prim.indicesOffset);
+				subMesh.GetMesh().GetIndexBuffer().Bind(prim.indicesCount, prim.indicesOffset);
 			}
 			if ((skip & Mesh::SkipState::SkipVertexBuffer) == 0)
 			{

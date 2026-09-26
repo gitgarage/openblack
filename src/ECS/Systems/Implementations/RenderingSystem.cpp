@@ -225,14 +225,19 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 	registry.Each<const Mesh, const Transform, const Construction>(
 	    [&](const Mesh& mesh, const Transform& transform, const Construction& construction) {
 		    const auto l3dMesh = meshes.Handle(mesh.id);
-		    graphics::SetScaffoldShown(*l3dMesh, 1.0f - construction.built);
+		    // As the original's: for the first half the building and its scaffold go up together, layer by layer
+		    // from the bottom; for the second half the building is whole and the scaffold comes down from the top.
+		    const auto box = l3dMesh->GetBoundingBox();
+		    const float bottom = transform.position.y + box.minima.y * transform.scale.y;
+		    const float height = box.Size().y * transform.scale.y;
+		    const float firstHalf = std::min(construction.built * 2.0f, 1.0f);
+		    const float secondHalf = std::max(construction.built * 2.0f - 1.0f, 0.0f);
+		    graphics::SetScaffoldShown(*l3dMesh, construction.built < 1.0f ? 1.0f : 0.0f);
+		    graphics::SetBuiltHeight(*l3dMesh, bottom + firstHalf * height + (secondHalf > 0.0f ? 1.0f : 0.0f));
+		    graphics::SetScaffoldHeight(*l3dMesh, bottom + (secondHalf > 0.0f ? 1.0f - secondHalf : firstHalf) * height);
 		    auto modelMatrix = glm::mat4(transform.rotation);
 		    modelMatrix = glm::translate(modelMatrix, transform.position * transform.rotation);
 		    modelMatrix = glm::scale(modelMatrix, transform.scale);
-		    // The building appears layer by layer from the bottom up (as the original's does).
-		    const auto box = l3dMesh->GetBoundingBox();
-		    const float bottom = transform.position.y + box.minima.y * transform.scale.y;
-		    graphics::SetBuiltHeight(*l3dMesh, bottom + construction.built * box.Size().y * transform.scale.y);
 		    modelMatrix[0][3] = static_cast<float>(defaultPoseRow(mesh.id));
 		    const auto buildingMatrix = modelMatrix;
 		    const uint32_t building = constructionIndex++;
