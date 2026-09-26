@@ -77,6 +77,10 @@ bool HandAtTempleDoor();
 bool InTemple();
 void EnterTemple();
 void ExitTemple();
+// Inside the Temple: the camera stands in the room and only turns; a long press walks to a room through its
+// doorway, or on the main room's map leaves for that place on the land.
+void UpdateTemple(std::chrono::microseconds dt);
+void TempleLongPress(glm::vec2 screen);
 // The hand's pose while holding something (a name in Data/hndspec5.txt).
 constexpr const char* k_HandHoldPose = "hold_above";
 void HandCarry(const glm::vec3& handPosition);

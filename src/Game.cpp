@@ -413,6 +413,7 @@ bool Game::Update() noexcept
 	}
 
 	camera.Update(deltaTime);
+	chlapi::UpdateTemple(deltaTime); // inside the Temple the view only turns, in place
 	Locator::cameraBookmarkSystem::value().Update(deltaTime);
 	if (!_paused)
 	{

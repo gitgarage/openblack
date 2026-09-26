@@ -138,7 +138,14 @@ bool touchFrame(u64 now, bool forceGrab)
 		{
 			// At the Temple's door (as of last frame's hand position, which is where the finger is): go in.
 			// Over wood: collect it.
-			if (!forceGrab && openblack::chlapi::HandAtTempleDoor())
+			if (!forceGrab && openblack::chlapi::InTemple())
+			{
+				// Inside the Temple a long press walks to a room or leaves by the map: no grab.
+				openblack::chlapi::TempleLongPress(glm::vec2(static_cast<float>(x) / static_cast<float>(w),
+				                                             static_cast<float>(y) / static_cast<float>(h)));
+				g_touch = Touch::Hover;
+			}
+			else if (!forceGrab && openblack::chlapi::HandAtTempleDoor())
 			{
 				openblack::chlapi::EnterTemple();
 				g_touch = Touch::Hover;

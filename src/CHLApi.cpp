@@ -43,6 +43,7 @@
 #include "3D/LandIslandInterface.h"
 #include "3D/SkyInterface.h"
 #include "3D/TempleInteriorInterface.h"
+#include "Input/GameActionMapInterface.h"
 #include "Camera/Camera.h"
 #include "ECS/Archetypes/MobileStaticArchetype.h"
 #include "ECS/Archetypes/PotArchetype.h"
@@ -2786,12 +2787,113 @@ bool InTemple()
 	return Locator::temple::has_value() && Locator::temple::value().Active();
 }
 
+namespace
+{
+// Inside the Temple (the rooms are built round the world origin, in the Temple's own coordinates). Each room has a
+// camera path in Data/Citadel/engine/<room>.cam: u32 file size, u32 duration (ms), u32 frame count, then per frame
+// the camera position and focus. main.cam walks in from the entrance; each other room's walks from its doorway
+// in the main room to where the player stands in it.
+struct TempleRoomPath
+{
+	std::string name;
+	std::string file;
+	float seconds = 0.0f;
+	std::vector<std::pair<glm::vec3, glm::vec3>> frames; // position, focus
+};
+std::vector<TempleRoomPath> g_templeRooms; // [0] is the main room
+size_t g_templeRoom = 0;
+// A path being walked: which room's, forwards (into it) or back (out to the main room), and how far.
+std::optional<size_t> g_templeWalk;
+bool g_templeWalkBack = false;
+float g_templeWalkTime = 0.0f;
+float g_templeYaw = 0.0f;   // radians about the vertical, 0 looking along -Z
+float g_templePitch = 0.0f; // radians, up positive
+constexpr float k_TempleTurnSpeed = 1.5f; // radians a second, rotating or tilting
+constexpr float k_TempleDoorwayAngle = glm::radians(12.0f); // how near a long press must be to a doorway
+constexpr float k_TempleMapRadius = 15.0f; // the map in the middle of the main room's floor (its pool)
+
+void LoadTempleRooms()
+{
+	if (!g_templeRooms.empty())
+	{
+		return;
+	}
+	const std::array<std::pair<const char*, const char*>, 7> rooms = {{{"Main Room", "main.cam"},
+	                                                                   {"Challenge Room", "challenge.cam"},
+	                                                                   {"Creature Cave", "creature.cam"},
+	                                                                   {"Credits Room", "credits.cam"},
+	                                                                   {"Multiplayer Room", "multi.cam"},
+	                                                                   {"Options Room", "options.cam"},
+	                                                                   {"Save Game Room", "savegame.cam"}}};
+	auto& fileSystem = Locator::filesystem::value();
+	for (const auto& [name, file] : rooms)
+	{
+		TempleRoomPath room {name, file};
+		try
+		{
+			const auto data = fileSystem.ReadAll(fileSystem.GetPath<openblack::filesystem::Path::Citadel>() / "engine" / file);
+			uint32_t header[3] = {};
+			if (data.size() >= sizeof(header))
+			{
+				std::memcpy(header, data.data(), sizeof(header));
+				room.seconds = static_cast<float>(header[1]) / 1000.0f;
+				for (uint32_t i = 0; i < header[2] && 12 + (i + 1) * 24 <= data.size(); ++i)
+				{
+					float f[6];
+					std::memcpy(f, data.data() + 12 + i * 24, sizeof(f));
+					room.frames.emplace_back(glm::vec3(f[0], f[1], f[2]), glm::vec3(f[3], f[4], f[5]));
+				}
+			}
+		}
+		catch (const std::exception& e)
+		{
+			SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Temple room {}: {}", file, e.what());
+		}
+		g_templeRooms.push_back(std::move(room));
+	}
+}
+
+// Where the player stands in a room: the middle of the main room (at the height its path ends), elsewhere the end of
+// the room's path.
+glm::vec3 TempleRoomSpot(size_t room)
+{
+	if (room >= g_templeRooms.size() || g_templeRooms[room].frames.empty())
+	{
+		return glm::vec3(0.0f, 7.0f, 0.0f);
+	}
+	const auto end = g_templeRooms[room].frames.back().first;
+	return room == 0 ? glm::vec3(0.0f, end.y, 0.0f) : end;
+}
+
+void LookAlong(const glm::vec3& from, const glm::vec3& to)
+{
+	const auto d = to - from;
+	g_templeYaw = std::atan2(-d.x, -d.z);
+	g_templePitch = std::atan2(d.y, glm::length(glm::vec2(d.x, d.z)));
+}
+
+void StartTempleWalk(size_t room, bool back)
+{
+	if (room >= g_templeRooms.size() || g_templeRooms[room].frames.empty())
+	{
+		return;
+	}
+	g_templeWalk = room;
+	g_templeWalkBack = back;
+	g_templeWalkTime = 0.0f;
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Temple: {} the {}", back ? "back out of" : "into", g_templeRooms[room].name);
+}
+} // namespace
+
 void EnterTemple()
 {
 	if (Locator::temple::has_value() && !InTemple())
 	{
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Entering the Temple");
 		Locator::temple::value().Activate();
+		LoadTempleRooms();
+		g_templeRoom = 0;
+		StartTempleWalk(0, false); // in through the entrance to the middle of the main room
 	}
 }
 
@@ -2801,6 +2903,130 @@ void ExitTemple()
 	{
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Leaving the Temple");
 		Locator::temple::value().Deactivate();
+		g_templeWalk.reset();
+	}
+}
+
+// Inside the Temple the camera stays where the player stands: rotating and tilting turn the view in place, and
+// moving and zooming do nothing. Called every frame after the camera's own update, whose moves it overrides.
+void UpdateTemple(std::chrono::microseconds dt)
+{
+	if (!InTemple() || g_templeRooms.empty())
+	{
+		return;
+	}
+	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
+	auto& camera = Locator::camera::value();
+	if (g_templeWalk)
+	{
+		const auto& room = g_templeRooms[*g_templeWalk];
+		g_templeWalkTime += seconds;
+		const float t = room.seconds > 0.0f ? std::min(g_templeWalkTime / room.seconds, 1.0f) : 1.0f;
+		const float along = (g_templeWalkBack ? 1.0f - t : t) * static_cast<float>(room.frames.size() - 1);
+		const auto a = static_cast<size_t>(along);
+		const auto b = std::min(a + 1, room.frames.size() - 1);
+		const float f = along - static_cast<float>(a);
+		const auto origin = glm::mix(room.frames[a].first, room.frames[b].first, f);
+		const auto focus = glm::mix(room.frames[a].second, room.frames[b].second, f);
+		camera.SetOrigin(origin);
+		camera.SetFocus(focus);
+		if (t >= 1.0f)
+		{
+			// Arrived: stand in the room (back in the main room's middle after walking out of one), looking on.
+			g_templeRoom = g_templeWalkBack ? 0 : *g_templeWalk;
+			LookAlong(origin, focus);
+			if (g_templeWalkBack)
+			{
+				g_templeYaw += glm::pi<float>(); // facing back into the main room
+				g_templePitch = 0.0f;
+			}
+			g_templeWalk.reset();
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Temple: in the {}", g_templeRooms[g_templeRoom].name);
+		}
+		return;
+	}
+	const auto& actions = Locator::gameActionSystem::value();
+	using openblack::input::BindableActionMap;
+	if (actions.Get(BindableActionMap::ROTATE_LEFT))
+	{
+		g_templeYaw += k_TempleTurnSpeed * seconds;
+	}
+	if (actions.Get(BindableActionMap::ROTATE_RIGHT))
+	{
+		g_templeYaw -= k_TempleTurnSpeed * seconds;
+	}
+	if (actions.Get(BindableActionMap::TILT_UP))
+	{
+		g_templePitch += k_TempleTurnSpeed * seconds;
+	}
+	if (actions.Get(BindableActionMap::TILT_DOWN))
+	{
+		g_templePitch -= k_TempleTurnSpeed * seconds;
+	}
+	g_templePitch = glm::clamp(g_templePitch, glm::radians(-89.0f), glm::radians(89.0f));
+	const auto spot = TempleRoomSpot(g_templeRoom);
+	const auto look = glm::vec3(-std::sin(g_templeYaw) * std::cos(g_templePitch), std::sin(g_templePitch),
+	                            -std::cos(g_templeYaw) * std::cos(g_templePitch));
+	camera.SetOrigin(spot);
+	camera.SetFocus(spot + look * 10.0f);
+}
+
+// A long press inside the Temple, at a point on the screen (0..1 each way): in the main room, on a doorway walks into
+// that room and on the map in the floor leaves the Temple for that place on the land; in another room, on its
+// doorway walks back out to the main room.
+void TempleLongPress(glm::vec2 screen)
+{
+	if (!InTemple() || g_templeWalk || g_templeRooms.empty())
+	{
+		return;
+	}
+	auto& camera = Locator::camera::value();
+	glm::vec3 origin;
+	glm::vec3 direction;
+	camera.DeprojectScreenToWorld(screen, origin, direction);
+	direction = glm::normalize(direction);
+	auto nearDoorway = [&](size_t room) {
+		const auto& frames = g_templeRooms[room].frames;
+		if (frames.empty())
+		{
+			return false;
+		}
+		const auto toDoor = frames.front().first - origin;
+		return glm::length(toDoor) > 0.1f && glm::acos(glm::clamp(glm::dot(glm::normalize(toDoor), direction), -1.0f, 1.0f)) <
+		                                          k_TempleDoorwayAngle;
+	};
+	if (g_templeRoom != 0)
+	{
+		if (nearDoorway(g_templeRoom))
+		{
+			StartTempleWalk(g_templeRoom, true);
+		}
+		return;
+	}
+	for (size_t room = 1; room < g_templeRooms.size(); ++room)
+	{
+		if (nearDoorway(room))
+		{
+			StartTempleWalk(room, false);
+			return;
+		}
+	}
+	// The map: where the press meets the floor, within the pool in the middle, is that place on the land.
+	if (direction.y < -0.01f)
+	{
+		const auto floor = origin + direction * (-origin.y / direction.y);
+		if (glm::length(glm::vec2(floor.x, floor.z)) < k_TempleMapRadius)
+		{
+			const auto extent = Locator::terrainSystem::value().GetExtent();
+			const auto uv = (glm::vec2(floor.x, floor.z) + k_TempleMapRadius) / (2.0f * k_TempleMapRadius);
+			const auto land = glm::mix(extent.minimum, extent.maximum, uv);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Temple map: to ({:.0f}, {:.0f})", land.x, land.y);
+			ExitTemple();
+			const float ground = Locator::terrainSystem::value().GetHeightAt(land);
+			const auto target = glm::vec3(land.x, ground, land.y);
+			camera.SetOrigin(target + glm::vec3(0.0f, 60.0f, 60.0f));
+			camera.SetFocus(target);
+		}
 	}
 }
 
@@ -3527,11 +3753,29 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		                                    : -1.0f;
 		static const auto start = std::chrono::steady_clock::now();
 		static bool entered = false;
-		if (!entered && enterAfter >= 0.0f &&
-		    std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count() > enterAfter)
+		const float since = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
+		if (!entered && enterAfter >= 0.0f && since > enterAfter)
 		{
 			entered = true;
 			EnterTemple();
+		}
+		// ...and OPENBLACK_TEST_TEMPLE_ROOM=<n> long-presses room n's doorway on screen once it's in the main room.
+		static const int pressRoom =
+		    std::getenv("OPENBLACK_TEST_TEMPLE_ROOM") != nullptr ? std::atoi(std::getenv("OPENBLACK_TEST_TEMPLE_ROOM")) : -1;
+		static bool pressed = false;
+		if (entered && !pressed && pressRoom > 0 && since > enterAfter + 8.0f && static_cast<size_t>(pressRoom) < g_templeRooms.size())
+		{
+			pressed = true;
+			auto& camera = Locator::camera::value();
+			const auto door = g_templeRooms[static_cast<size_t>(pressRoom)].frames.front().first;
+			LookAlong(camera.GetOrigin(), door); // turn to face it first, as a player would
+			UpdateTemple(std::chrono::microseconds(0));
+			camera.Update(std::chrono::microseconds(0));
+			glm::vec3 onScreen;
+			camera.ProjectWorldToScreen(door, glm::vec4(0.0f, 0.0f, 1.0f, 1.0f), onScreen);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test: long press on the {} doorway at ({:.2f}, {:.2f})",
+			                   g_templeRooms[static_cast<size_t>(pressRoom)].name, onScreen.x, 1.0f - onScreen.y);
+			TempleLongPress(glm::vec2(onScreen.x, 1.0f - onScreen.y));
 		}
 	}
 	// Test hooks for the save points: OPENBLACK_TEST_SAVE_AT_TEXT=<line> saves point 1 when that line shows,
