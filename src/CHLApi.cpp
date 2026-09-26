@@ -49,6 +49,8 @@
 #include "ECS/Archetypes/PotArchetype.h"
 #include "ECS/Components/Construction.h"
 #include "ECS/Components/Pot.h"
+#include "ECS/Components/Sprite.h"
+#include "Graphics/Texture2D.h"
 #include "ECS/Archetypes/VillagerArchetype.h"
 #include "ECS/Components/Abode.h"
 #include "ECS/Components/Fixed.h"
@@ -176,6 +178,17 @@ struct ScriptEntityRecord
 std::map<uint32_t, ScriptEntityRecord> g_scriptEntities;
 // Highlights (CREATE_HIGHLIGHT: the "Did you know" and challenge scrolls on the land), by object: their type.
 std::unordered_map<uint32_t, int> g_highlights;
+// Sparkles: glitter falling through an object, from the original's particle sprite sheet (S_SpriteSheet3, frames 48-63,
+// as its ScriptHighlightGlints effects use) - on gold and silver scrolls, and what a script gives SPECIAL_EFFECT_OBJECT
+// 34 (Land 1's gate totems). By effect: the object it is on, its tint, and its falling sprites.
+struct Sparkler
+{
+	uint32_t target;
+	glm::vec4 tint;
+	std::vector<entt::entity> sprites;
+	std::vector<float> phases;
+};
+std::unordered_map<uint32_t, Sparkler> g_sparklers;
 // Gates, doors and caves (animated scenery that opens) a script has opened with SET_OPEN_CLOSE; the rest stay shut.
 std::unordered_set<uint32_t> g_openedStatics;
 } // namespace
@@ -244,6 +257,11 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		registry.Assign<ecs::components::Mesh>(entity, resources::HashIdentifier(mesh), static_cast<int8_t>(0),
 		                                       static_cast<int8_t>(0));
 		g_highlights[static_cast<uint32_t>(entity)] = static_cast<int>(subtype);
+		if (subtype == 2 || subtype == 3)
+		{
+			const auto tint = subtype == 3 ? glm::vec4(1.0f, 1.0f, 0.31f, 1.0f) : glm::vec4(1.0f); // the gold glints' colour
+			g_sparklers[static_cast<uint32_t>(entity)] = {static_cast<uint32_t>(entity), tint, {}, {}};
+		}
 		return entity;
 	}
 	case ObjectType::Marker:
@@ -1308,12 +1326,22 @@ void DetachMusic() // 047 DETACH_MUSIC
 	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
+void ForgetObject(uint32_t object); // below, with the hand
+
 void ObjectDelete() // 048 OBJECT_DELETE
 {
 	[[maybe_unused]] const auto withFade = Pop().intVal;
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto obj = Pop().uintVal;
+	// Land 1's ProtectGateKey scripts delete a gate totem and make it again at its start: with no delete, they
+	// piled up thousands of them.
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(obj);
+	if (obj == 0 || !registry.Valid(entity))
+	{
+		return;
+	}
+	ForgetObject(obj);
+	registry.Destroy(entity);
 }
 
 void FocusFollow() // 049 FOCUS_FOLLOW
@@ -1354,11 +1382,19 @@ void SpecialEffectPosition() // 052 SPECIAL_EFFECT_POSITION
 void SpecialEffectObject() // 053 SPECIAL_EFFECT_OBJECT
 {
 	[[maybe_unused]] const auto duration = Popf();
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	[[maybe_unused]] const auto effect = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto target = Pop().uintVal;
+	const auto effect = Pop().intVal;
+	// Only the glitter Land 1 puts on the gate totems (34) so far. The effect is an object of its own: scripts
+	// delete it to stop it, which must not delete what it is on.
+	auto& registry = Locator::entitiesRegistry::value();
+	if (effect != 34 || target == 0 || !registry.Valid(static_cast<entt::entity>(target)))
+	{
+		Pusho(0);
+		return;
+	}
+	const auto handle = static_cast<uint32_t>(registry.Create());
+	g_sparklers[handle] = {target, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f), {}, {}};
+	Pusho(handle);
 }
 
 void DanceCreate() // 054 DANCE_CREATE
@@ -1449,12 +1485,34 @@ void InfluencePosition() // 061 INFLUENCE_POSITION
 
 void GetInfluence() // 062 GET_INFLUENCE
 {
-	[[maybe_unused]] const auto position = PopVec();
+	const auto position = PopVec();
 	[[maybe_unused]] const auto raw = static_cast<bool>(Pop().intVal);
 	[[maybe_unused]] const auto player = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	// No influence system yet: inside the influence (1) within reach of the player's Temple or a village's houses,
+	// by the original's influence numbers; outside (0) beyond. Land 1's ProtectGateKey scripts return a gate totem
+	// to its start when it is outside (with this always 0 they did so without end).
+	const auto& info = Locator::infoConstants::value();
+	static bool s_reported = false;
+	if (!s_reported)
+	{
+		s_reported = true;
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Influence: citadel heart {} virtual max {}, town {}, abode {}",
+		                   info.citadelHeart.influence, info.citadel.virtualInfluenceMaxDistance, info.town.influence,
+		                   info.abode.at(0).influence);
+	}
+	const float temple = std::max({info.citadel.virtualInfluenceMaxDistance, info.citadelHeart.influence, 150.0f});
+	const float house = std::max(info.town.influence, 60.0f);
+	auto& registry = Locator::entitiesRegistry::value();
+	bool inside = false;
+	registry.Each<const openblack::ecs::components::Temple, const Transform>(
+	    [&](const openblack::ecs::components::Temple&, const Transform& transform) {
+		    inside = inside || glm::distance(glm::vec2(transform.position.x, transform.position.z), glm::vec2(position.x, position.z)) < temple;
+	    });
+	registry.Each<const openblack::ecs::components::Abode, const Transform>(
+	    [&](const openblack::ecs::components::Abode&, const Transform& transform) {
+		    inside = inside || glm::distance(glm::vec2(transform.position.x, transform.position.z), glm::vec2(position.x, position.z)) < house;
+	    });
+	Pushf(inside ? 1.0f : 0.0f);
 }
 
 void SetInterfaceInteraction() // 063 SET_INTERFACE_INTERACTION
@@ -3393,6 +3451,27 @@ bool HandPickUp(uint32_t object)
 	return true;
 }
 
+// A deleted object: nothing of ours keeps it (scroll, pedestal stone, flight, walk, hand...).
+void ForgetObject(uint32_t object)
+{
+	g_highlights.erase(object);
+	TakeOffPedestal(object);
+	g_flying.erase(object);
+	g_walks.erase(object);
+	g_followers.erase(object);
+	g_scriptMoves.erase(object);
+	g_scriptAnimations.erase(object);
+	g_scriptEntities.erase(object);
+	if (g_heldObject == object)
+	{
+		g_heldObject = 0;
+	}
+	if (g_clickedThing == object)
+	{
+		g_clickedThing = 0;
+	}
+}
+
 bool HandHolding()
 {
 	return g_heldObject != 0;
@@ -3915,6 +3994,78 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
 	auto& registry = Locator::entitiesRegistry::value();
 	UpdateBuilders(seconds);
+	// Sparkles: each keeps a few glitter sprites falling through what it is on, looping back to the top.
+	{
+		constexpr int k_SparklesEach = 14;
+		constexpr float k_ColumnTop = 9.0f;    // above the object
+		constexpr float k_ColumnBottom = -1.0f; // below it
+		constexpr float k_FallSpeed = 2.5f;
+		constexpr float k_ColumnRadius = 0.9f;
+		constexpr float k_SparkleFramesPerSecond = 16.0f;
+		static float s_clock = 0.0f;
+		s_clock += seconds;
+		const auto* sheet = Locator::resources::value().GetTextures().Contains(entt::hashed_string("raw/S_SpriteSheet3a").value())
+		                        ? &*Locator::resources::value().GetTextures().Handle(entt::hashed_string("raw/S_SpriteSheet3a"))
+		                        : nullptr;
+		for (auto it = g_sparklers.begin(); it != g_sparklers.end();)
+		{
+			auto& sparkler = it->second;
+			const auto target = static_cast<entt::entity>(sparkler.target);
+			const bool alive = registry.Valid(static_cast<entt::entity>(it->first)) && registry.Valid(target) &&
+			                   registry.AllOf<Transform>(target) && sheet != nullptr;
+			if (!alive)
+			{
+				for (const auto sprite : sparkler.sprites)
+				{
+					if (registry.Valid(sprite))
+					{
+						registry.Destroy(sprite);
+					}
+				}
+				if (it->first != sparkler.target && registry.Valid(static_cast<entt::entity>(it->first)))
+				{
+					registry.Destroy(static_cast<entt::entity>(it->first)); // the effect's own object
+				}
+				it = g_sparklers.erase(it);
+				continue;
+			}
+			const auto centre = registry.Get<Transform>(target).position;
+			while (sparkler.sprites.size() < k_SparklesEach)
+			{
+				const auto i = sparkler.sprites.size();
+				const auto sprite = registry.Create();
+				registry.Assign<openblack::ecs::components::Sprite>(sprite, sheet->GetNativeHandle(), glm::vec2(0.0f),
+				                                                   glm::vec2(1.0f / 8.0f), sparkler.tint);
+				registry.Assign<Transform>(sprite, centre, glm::mat3(1.0f), glm::vec3(0.45f));
+				sparkler.sprites.push_back(sprite);
+				// Spread through the column, each on its own frame of the glitter's animation.
+				sparkler.phases.push_back(static_cast<float>((i * 7919u + it->first * 104729u) % 1000u) / 1000.0f);
+			}
+			const float column = k_ColumnTop - k_ColumnBottom;
+			for (size_t i = 0; i < sparkler.sprites.size(); ++i)
+			{
+				const float phase = sparkler.phases[i];
+				const float fallen = std::fmod(phase * column + s_clock * k_FallSpeed, column);
+				const float angle = phase * 97.0f; // somewhere round the column, fixed per sprite
+				const float radius = k_ColumnRadius * std::sqrt(std::fmod(phase * 13.0f, 1.0f));
+				auto& transform = registry.Get<Transform>(sparkler.sprites[i]);
+				transform.position = centre + glm::vec3(std::cos(angle) * radius, k_ColumnTop - fallen, std::sin(angle) * radius);
+				const int frame = 48 + static_cast<int>(phase * 16.0f + s_clock * k_SparkleFramesPerSecond) % 16;
+				auto& sprite = registry.Get<openblack::ecs::components::Sprite>(sparkler.sprites[i]);
+				sprite.uvMin = glm::vec2(static_cast<float>(frame % 8) / 8.0f, static_cast<float>(frame / 8) / 8.0f);
+				// Fading in at the top and out at the bottom.
+				const float along = fallen / column;
+				sprite.tint = sparkler.tint * glm::vec4(glm::vec3(1.0f), std::min({1.0f, along * 5.0f, (1.0f - along) * 5.0f}));
+			}
+			++it;
+		}
+		static bool s_reported = false;
+		if (!s_reported && !g_sparklers.empty())
+		{
+			s_reported = true;
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Sparkles: {} objects, sheet {}", g_sparklers.size(), sheet != nullptr);
+		}
+	}
 	// Scrolls turn slowly about the vertical, as the original's do; signposts stay as they were put.
 	{
 		constexpr float k_ScrollSpin = 0.6f; // radians a second

@@ -234,7 +234,11 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 		    const float secondHalf = std::max(construction.built * 2.0f - 1.0f, 0.0f);
 		    graphics::SetScaffoldShown(*l3dMesh, construction.built < 1.0f ? 1.0f : 0.0f);
 		    graphics::SetBuiltHeight(*l3dMesh, bottom + firstHalf * height + (secondHalf > 0.0f ? 1.0f : 0.0f));
-		    graphics::SetScaffoldHeight(*l3dMesh, bottom + (secondHalf > 0.0f ? 1.0f - secondHalf : firstHalf) * height);
+		    // The scaffold on an inverse bell: up fast to keep ahead of the building, easing to a stop at the top as
+		    // the building is finished; then down slowly at first, as fast as it went up by the end.
+		    const float scaffoldShare = secondHalf > 0.0f ? std::cos(secondHalf * glm::half_pi<float>())
+		                                             : std::sin(firstHalf * glm::half_pi<float>());
+		    graphics::SetScaffoldHeight(*l3dMesh, bottom + scaffoldShare * height);
 		    auto modelMatrix = glm::mat4(transform.rotation);
 		    modelMatrix = glm::translate(modelMatrix, transform.position * transform.rotation);
 		    modelMatrix = glm::scale(modelMatrix, transform.scale);
