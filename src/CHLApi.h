@@ -44,6 +44,7 @@ private:
 // The player clicked a game object (the entity id under the cursor at a left-button press).
 // GAME_THING_CLICKED reports it once to the script that asks about that object.
 void NotifyGameThingClicked(uint32_t entity);
+uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction);
 
 // Advances a playing hand demo (PLAY_HAND_DEMO) by real time; call once per frame. While one plays it
 // drives the camera and returns where the hand is on screen (0..1), which replaces the mouse.

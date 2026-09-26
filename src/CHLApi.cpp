@@ -216,8 +216,14 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
 		registry.Assign<Transform>(entity, glm::vec3(position.x, ground + k_HighlightHeight, position.z), glm::mat3(1.0f),
 		                           glm::vec3(1.0f));
-		registry.Assign<ecs::components::Mesh>(entity, resources::HashIdentifier(MeshId::I_Miniscroll),
-		                                       static_cast<int8_t>(0), static_cast<int8_t>(0));
+		// The script's highlight types, by the lines announcing them: 1 a question ("Did you know") scroll,
+		// 2 a Silver Reward Scroll, 3 a Gold Story Scroll.
+		const auto mesh = subtype == 3 ? MeshId::I_MiniscrollGold
+		                  : subtype == 2 ? MeshId::I_MiniscrollSilver
+		                  : subtype == 1 ? MeshId::I_Miniscroll
+		                                 : MeshId::I_MiniscrollBronze;
+		registry.Assign<ecs::components::Mesh>(entity, resources::HashIdentifier(mesh), static_cast<int8_t>(0),
+		                                       static_cast<int8_t>(0));
 		g_highlights[static_cast<uint32_t>(entity)] = static_cast<int>(subtype);
 		return entity;
 	}
@@ -365,6 +371,40 @@ uint32_t g_clickedThing = 0;
 void NotifyGameThingClicked(uint32_t entity)
 {
 	g_clickedThing = entity;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Clicked {}", entity);
+}
+
+// The scroll (highlight) the hand is pointing at: the nearest within reach of the pointer's ray. Scrolls float and
+// have no physics body for the ray to hit.
+uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
+{
+	constexpr float k_ScrollReach = 5.0f;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto along = glm::normalize(direction);
+	uint32_t best = 0;
+	float bestDistance = k_ScrollReach;
+	for (const auto& [id, type] : g_highlights)
+	{
+		const auto entity = static_cast<entt::entity>(id);
+		const auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+		if (transform == nullptr)
+		{
+			continue;
+		}
+		const auto toScroll = transform->position - origin;
+		const float ahead = glm::dot(toScroll, along);
+		if (ahead <= 0.0f)
+		{
+			continue;
+		}
+		const float off = glm::length(toScroll - along * ahead);
+		if (off < bestDistance)
+		{
+			bestDistance = off;
+			best = id;
+		}
+	}
+	return best;
 }
 
 
@@ -2220,8 +2260,7 @@ void StopScript() // 155 STOP_SCRIPT
 
 void ClearClickedObject() // 156 CLEAR_CLICKED_OBJECT
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	g_clickedThing = 0;
 }
 
 void ClearClickedPosition() // 157 CLEAR_CLICKED_POSITION
@@ -2820,11 +2859,11 @@ void LoadTempleRooms()
 	}
 	const std::array<std::pair<const char*, const char*>, 7> rooms = {{{"Main Room", "main.cam"},
 	                                                                   {"Challenge Room", "challenge.cam"},
-	                                                                   {"Creature Cave", "creature.cam"},
-	                                                                   {"Credits Room", "credits.cam"},
-	                                                                   {"Multiplayer Room", "multi.cam"},
+	                                                                   {"Creature Lair", "creature.cam"},
+	                                                                   {"Library", "credits.cam"},
+	                                                                   {"Future Room", "multi.cam"},
 	                                                                   {"Options Room", "options.cam"},
-	                                                                   {"Save Game Room", "savegame.cam"}}};
+	                                                                   {"Save/Load Game Room", "savegame.cam"}}};
 	auto& fileSystem = Locator::filesystem::value();
 	for (const auto& [name, file] : rooms)
 	{
@@ -3746,6 +3785,24 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 
 	UpdateAnimations(seconds);
 
+	// Test hook: OPENBLACK_TEST_SCROLLS=1 puts a question, a silver and a gold scroll in front of the camera.
+	{
+		static bool made = false;
+		static const auto scrollsStart = std::chrono::steady_clock::now();
+		if (!made && std::getenv("OPENBLACK_TEST_SCROLLS") != nullptr &&
+		    std::chrono::steady_clock::now() - scrollsStart > std::chrono::seconds(8))
+		{
+			made = true;
+			auto& camera = Locator::camera::value();
+			const auto ahead = camera.GetOrigin() + camera.GetForward() * 25.0f;
+			const auto right = glm::normalize(glm::cross(camera.GetForward(), glm::vec3(0.0f, 1.0f, 0.0f)));
+			for (int type = 1; type <= 3; ++type)
+			{
+				CreateScriptObject(ObjectType::Highlight, static_cast<uint32_t>(type),
+				                   ahead + right * (static_cast<float>(type - 2) * 8.0f), 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+			}
+		}
+	}
 	// Test hook: OPENBLACK_TEST_ENTER_TEMPLE=<seconds> goes into the Temple that long into the run.
 	{
 		static const float enterAfter = std::getenv("OPENBLACK_TEST_ENTER_TEMPLE") != nullptr
@@ -6256,9 +6313,7 @@ void SetFightExit() // 420 SET_FIGHT_EXIT
 
 void GetObjectClicked() // 421 GET_OBJECT_CLICKED
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	Pusho(g_clickedThing);
 }
 
 void GetMana() // 422 GET_MANA
