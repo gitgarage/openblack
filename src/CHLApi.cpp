@@ -214,16 +214,15 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
 		// Where the script says, height and all (Land 1's gold scroll hangs on the gate, at 32.3); only a position
 		// on or under the ground is lifted to just above it.
+		// A signpost (type 1) stands on the ground; a scroll given no height floats a little over it.
 		constexpr float k_HighlightHeight = 3.0f;
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
-		const float height = position.y > ground ? position.y : ground + k_HighlightHeight;
+		const float height = position.y > ground ? position.y : ground + (subtype == 1 ? 0.0f : k_HighlightHeight);
 		registry.Assign<Transform>(entity, glm::vec3(position.x, height, position.z), glm::mat3(1.0f), glm::vec3(1.0f));
-		// The script's highlight types, by the lines announcing them: 1 a question ("Did you know") scroll,
-		// 2 a Silver Reward Scroll, 3 a Gold Story Scroll.
-		const auto mesh = subtype == 3 ? MeshId::I_MiniscrollGold
-		                  : subtype == 2 ? MeshId::I_MiniscrollSilver
-		                  : subtype == 1 ? MeshId::I_Miniscroll
-		                                 : MeshId::I_MiniscrollBronze;
+		// The script's highlight types index the original's highlight info for their mesh: 1 an info signpost
+		// (the "Did you know"s), 2 a Silver Reward Scroll, 3 a Gold Story Scroll.
+		const auto& highlights = Locator::infoConstants::value().scriptHighlight;
+		const auto mesh = subtype < highlights.size() ? highlights.at(subtype).normal : MeshId::I_Miniscroll;
 		registry.Assign<ecs::components::Mesh>(entity, resources::HashIdentifier(mesh), static_cast<int8_t>(0),
 		                                       static_cast<int8_t>(0));
 		g_highlights[static_cast<uint32_t>(entity)] = static_cast<int>(subtype);
@@ -3749,6 +3748,21 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
 	auto& registry = Locator::entitiesRegistry::value();
 	UpdateBuilders(seconds);
+	// Scrolls turn slowly about the vertical, as the original's do; signposts stay as they were put.
+	{
+		constexpr float k_ScrollSpin = 0.6f; // radians a second
+		static float s_spin = 0.0f;
+		s_spin = std::fmod(s_spin + k_ScrollSpin * seconds, glm::two_pi<float>());
+		for (const auto& [id, type] : g_highlights)
+		{
+			const auto entity = static_cast<entt::entity>(id);
+			auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+			if (transform != nullptr && type != 1)
+			{
+				transform->rotation = glm::mat3(glm::eulerAngleY(s_spin));
+			}
+		}
+	}
 	for (auto it = g_walks.begin(); it != g_walks.end();)
 	{
 		const auto entity = static_cast<entt::entity>(it->first);
