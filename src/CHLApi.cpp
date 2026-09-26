@@ -8,6 +8,7 @@
  *******************************************************************************/
 
 #include "CHLApi.h"
+#include "Camera/DefaultWorldCameraModel.h"
 
 #include <algorithm>
 #include <array>
@@ -172,6 +173,8 @@ struct ScriptEntityRecord
 	uint32_t age;
 };
 std::map<uint32_t, ScriptEntityRecord> g_scriptEntities;
+// Highlights (CREATE_HIGHLIGHT: the "Did you know" and challenge scrolls on the land), by object: their type.
+std::unordered_map<uint32_t, int> g_highlights;
 } // namespace
 
 entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint32_t subtype, const glm::vec3& position,
@@ -203,6 +206,20 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 	case ObjectType::Rock: // TODO(Daniels118): add a Rock archetype
 		return MobileStaticArchetype::Create(position, static_cast<MobileStaticInfo>(subtype), altitude, xAngleRadians,
 		                                     yAngleRadians, zAngleRadians, scale);
+	case ObjectType::Highlight:
+	{
+		// A scroll floating over the land (the original's mini scroll), for the player to find and read.
+		auto& registry = Locator::entitiesRegistry::value();
+		const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
+		constexpr float k_HighlightHeight = 3.0f;
+		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		registry.Assign<Transform>(entity, glm::vec3(position.x, ground + k_HighlightHeight, position.z), glm::mat3(1.0f),
+		                           glm::vec3(1.0f));
+		registry.Assign<ecs::components::Mesh>(entity, resources::HashIdentifier(MeshId::I_Miniscroll),
+		                                       static_cast<int8_t>(0), static_cast<int8_t>(0));
+		g_highlights[static_cast<uint32_t>(entity)] = static_cast<int>(subtype);
+		return entity;
+	}
 	case ObjectType::Marker:
 	{
 		// A named point for the script: nothing to draw, just somewhere to measure from and move to.
@@ -418,6 +435,26 @@ entt::entity FindNearestScriptObject(int type, int subtype, const glm::vec3& pos
 	case ObjectType::Citadel:
 		NearestOf<ecs::components::Temple>(subtype, position, bestDistance2, best, [](const ecs::components::Temple&) { return 0; });
 		break;
+	case ObjectType::Highlight:
+	{
+		auto& registry = Locator::entitiesRegistry::value();
+		for (const auto& [id, highlightType] : g_highlights)
+		{
+			const auto entity = static_cast<entt::entity>(id);
+			const auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+			if (transform == nullptr || highlightType != subtype)
+			{
+				continue;
+			}
+			const auto offset = glm::vec2(transform->position.x - position.x, transform->position.z - position.z);
+			if (glm::dot(offset, offset) < bestDistance2)
+			{
+				bestDistance2 = glm::dot(offset, offset);
+				best = entity;
+			}
+		}
+		break;
+	}
 	default:
 	{
 		static std::set<int> s_reported;
@@ -736,6 +773,13 @@ void SetProperty() // 022 SET_PROPERTY
 	auto* villager = registry.TryGet<openblack::ecs::components::Villager>(entity);
 	switch (static_cast<Prop>(prop))
 	{
+	case Prop::BuiltPercentage:
+		// Land 1's PreventCitadelCompletion holds the Temple at 0.9 until the give-wood demo has played.
+		if (auto* construction = registry.TryGet<openblack::ecs::components::Construction>(entity))
+		{
+			construction->built = std::clamp(value, 0.0f, 1.0f);
+		}
+		break;
 	case Prop::Health:
 		if (villager != nullptr)
 		{
@@ -3485,6 +3529,27 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			s_tiltState = 2;
 		}
 	}
+	// ...zoom out and back in when asked to try zooming (5695)...
+	if (s_testFollow && s_testFollowDone)
+	{
+		static int s_zoomState = 0; // 0 waiting, 1 out, 2 in, 3 done
+		static auto s_zoomStart = std::chrono::steady_clock::now();
+		const auto zoomFor = std::chrono::steady_clock::now() - s_zoomStart;
+		if (s_zoomState == 0 && g_lastTextId == 5695 && !Locator::camera::value().IsScriptControlled() && !HandDemoPlaying())
+		{
+			s_zoomState = 1;
+			s_zoomStart = std::chrono::steady_clock::now();
+		}
+		else if (s_zoomState == 1 && zoomFor > std::chrono::seconds(2))
+		{
+			s_zoomState = 2;
+		}
+		else if (s_zoomState == 2 && zoomFor > std::chrono::seconds(4))
+		{
+			s_zoomState = 3;
+		}
+		openblack::g_heldZoomInput = s_zoomState == 1 ? 1.0f : s_zoomState == 2 ? -1.0f : 0.0f;
+	}
 	// ...then, once asked to look around (5109), orbit the camera round its focus as a player would.
 	if (s_testFollow && s_testFollowDone && g_lastTextId == 5109 && !Locator::camera::value().IsScriptControlled())
 	{
@@ -4607,11 +4672,14 @@ void IsCreatureAvailable() // 271 IS_CREATURE_AVAILABLE
 void CreateHighlight() // 272 CREATE_HIGHLIGHT
 {
 	[[maybe_unused]] const auto challengeID = Pop().intVal;
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto type = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto position = PopVec();
+	const auto type = Pop().intVal;
+	// Land 1's FollowUs waits (CALL_NEAR type HIGHLIGHT) for the "Did you know" scroll DidYouKnow makes here.
+	const auto entity = CreateScriptObject(ObjectType::Highlight, static_cast<uint32_t>(type), position, 0.0f, 0.0f, 0.0f,
+	                                       0.0f, 1.0f);
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Highlight {} (type {}) at ({:.1f}, {:.1f})", static_cast<uint32_t>(entity),
+	                   type, position.x, position.z);
+	Pusho(static_cast<uint32_t>(entity));
 }
 
 void GetObjectHeld273() // 273 GET_OBJECT_HELD
