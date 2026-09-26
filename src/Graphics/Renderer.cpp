@@ -618,7 +618,17 @@ void Renderer::DrawFootprintPass(const DrawSceneDesc& drawDesc) const
 		const auto& meshManager = Locator::resources::value().GetMeshes();
 		const auto& renderCtx = Locator::rendereringSystem::value().GetContext();
 		const auto* footprintShaderInstanced = _shaderManager->GetShader("FootprintInstanced");
+		// Buildings under construction have their ground marked too: the footprint shows where to bring wood.
+		std::vector<std::tuple<entt::id_type, uint32_t, uint32_t>> footprinted;
 		for (const auto& [meshId, placers] : renderCtx.instancedDrawDescs)
+		{
+			footprinted.emplace_back(meshId, placers.offset, placers.count);
+		}
+		for (const auto& construction : renderCtx.constructionDrawDescs)
+		{
+			footprinted.emplace_back(construction.meshId, construction.scaffoldOffset, 1u);
+		}
+		for (const auto& [meshId, offset, count] : footprinted)
 		{
 			auto mesh = meshManager.Handle(meshId);
 			if (!mesh->ContainsLandscapeFeature() || mesh->GetFootprints().empty())
@@ -628,7 +638,7 @@ void Renderer::DrawFootprintPass(const DrawSceneDesc& drawDesc) const
 			const auto& footprint = mesh->GetFootprints()[0];
 			footprintShaderInstanced->SetTextureSampler("s_footprint", 0, *footprint.texture);
 			footprint.mesh->GetVertexBuffer().Bind();
-			bgfx::setInstanceDataBuffer(toBgfx(renderCtx.instanceUniformBuffer), placers.offset, placers.count);
+			bgfx::setInstanceDataBuffer(toBgfx(renderCtx.instanceUniformBuffer), offset, count);
 			const uint64_t state = 0u                       //
 			                       | BGFX_STATE_WRITE_RGB   //
 			                       | BGFX_STATE_WRITE_A     //

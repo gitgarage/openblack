@@ -3120,19 +3120,34 @@ const GVillagerInfo& VillagerInfoOf(const openblack::ecs::components::Villager& 
 	    static_cast<size_t>(openblack::GVillagerInfo::Find(villager.tribe, villager.number)));
 }
 
-// Whether a villager is free to take up building: an adult no script, flock, walk or hand has hold of.
-bool FreeToBuild(entt::entity entity, const openblack::ecs::components::Villager& villager)
+// Why a villager can't take up building (nullptr: it can): only adults no script, flock, walk or hand has hold
+// of, and not the lazy ones.
+const char* NotFreeToBuild(entt::entity entity, const openblack::ecs::components::Villager& villager)
 {
 	const auto id = static_cast<uint32_t>(entity);
-	if (villager.lifeStage != openblack::ecs::components::Villager::LifeStage::Adult || id == g_heldObject ||
-	    g_scriptEntities.contains(id) || g_walks.contains(id) || g_followers.contains(id) || g_scriptMoves.contains(id) ||
-	    g_scriptAnimations.contains(id) || g_flying.contains(id))
+	if (villager.lifeStage != openblack::ecs::components::Villager::LifeStage::Adult)
 	{
-		return false;
+		return "child";
+	}
+	if (id == g_heldObject || g_flying.contains(id))
+	{
+		return "in the hand";
+	}
+	if (g_scriptEntities.contains(id))
+	{
+		return "the script's";
+	}
+	if (g_walks.contains(id) || g_followers.contains(id) || g_scriptMoves.contains(id))
+	{
+		return "moved by a script";
+	}
+	if (g_scriptAnimations.contains(id))
+	{
+		return "animated by a script";
 	}
 	// The lazy ones: a fixed share of the villagers, by who they are.
 	const auto hash = (id * 2654435761u) % 100u;
-	return static_cast<float>(hash) >= VillagerInfoOf(villager).percentLazy * 100.0f;
+	return static_cast<float>(hash) < VillagerInfoOf(villager).percentLazy * 100.0f ? "lazy" : nullptr;
 }
 
 // Step a builder towards a point at a walk; true once there.
@@ -3187,9 +3202,13 @@ void UpdateBuilders(float seconds)
 
 	// Take up sites: now and then, free villagers near a site that is still being built join in.
 	g_builderRecruitTimer -= seconds;
+	static float s_reportTimer = 0.0f;
+	s_reportTimer -= seconds;
 	if (g_builderRecruitTimer <= 0.0f)
 	{
 		g_builderRecruitTimer = 1.0f;
+		std::map<std::string, int> passedOver;
+		int sitesWithoutBuilders = 0;
 		registry.Each<Construction, const Transform>(
 		    [&](entt::entity site, Construction& construction, const Transform& siteTransform) {
 			    construction.started = construction.started ||
@@ -3198,14 +3217,28 @@ void UpdateBuilders(float seconds)
 			    {
 				    return;
 			    }
+			    sitesWithoutBuilders += std::none_of(g_builders.begin(), g_builders.end(), [site](const auto& builder) {
+				                            return builder.second.site == static_cast<uint32_t>(site);
+			                            })
+			                                ? 1
+			                                : 0;
 			    registry.Each<const Villager, const Transform>(
 			        [&](entt::entity entity, const Villager& villager, const Transform& transform) {
 				        const auto id = static_cast<uint32_t>(entity);
 				        const auto offset = glm::vec2(transform.position.x - siteTransform.position.x,
 				                                      transform.position.z - siteTransform.position.z);
-				        if (g_builders.contains(id) || glm::dot(offset, offset) > k_BuilderRecruitRadius * k_BuilderRecruitRadius ||
-				            !FreeToBuild(entity, villager))
+				        if (g_builders.contains(id))
 				        {
+					        return;
+				        }
+				        if (glm::dot(offset, offset) > k_BuilderRecruitRadius * k_BuilderRecruitRadius)
+				        {
+					        ++passedOver["too far"];
+					        return;
+				        }
+				        if (const auto* why = NotFreeToBuild(entity, villager))
+				        {
+					        ++passedOver[why];
 					        return;
 				        }
 				        HoldForScript(entity, transform.position);
@@ -3214,6 +3247,18 @@ void UpdateBuilders(float seconds)
 				                           static_cast<uint32_t>(site));
 			        });
 		    });
+		// A started site nobody has taken up: say why, now and then.
+		if (sitesWithoutBuilders > 0 && s_reportTimer <= 0.0f)
+		{
+			s_reportTimer = 30.0f;
+			std::string why;
+			for (const auto& [reason, count] : passedOver)
+			{
+				why += fmt::format("{}{} {}", why.empty() ? "" : ", ", count, reason);
+			}
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building site without builders: villagers passed over: {}",
+			                   why.empty() ? "none at all" : why);
+		}
 	}
 
 	for (auto it = g_builders.begin(); it != g_builders.end();)

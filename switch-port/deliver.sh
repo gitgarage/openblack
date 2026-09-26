@@ -19,6 +19,8 @@ for try in $(seq 1200); do
       rm -rf "$LOGS/shots-prev"; mkdir -p "$LOGS/shots-prev"
       $R mcopy -o -n 's:/switch/openblack/shots/*.png' "$LOGS/shots-prev/" 2>/dev/null
       echo "fetched $(ls "$LOGS/shots-prev" | wc -l) screenshots into $LOGS/shots-prev"
+      rm -rf "$LOGS/savepoints-prev"; mkdir -p "$LOGS/savepoints-prev"
+      $R mcopy -s -o -n s:/switch/openblack/savepoints "$LOGS/savepoints-prev/" 2>/dev/null && echo "fetched the test save points into $LOGS/savepoints-prev"
       if [ "${FETCH_ONLY:-0}" = 1 ]; then
         $R down >/dev/null
         echo "=== done (fetch only), relay released"
