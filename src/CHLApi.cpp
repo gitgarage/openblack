@@ -790,6 +790,10 @@ void GetProperty() // 021 GET_PROPERTY
 		break;
 	case Prop::YPos:
 		value = transform != nullptr ? transform->position.y : value;
+		if (transform != nullptr && g_highlights.contains(object)) // height above the ground, as SET_PROPERTY
+		{
+			value -= Locator::terrainSystem::value().GetHeightAt(glm::vec2(transform->position.x, transform->position.z));
+		}
 		break;
 	case Prop::ZPos:
 		value = transform != nullptr ? transform->position.z : value;
@@ -855,6 +859,15 @@ void SetProperty() // 022 SET_PROPERTY
 		break;
 	case Prop::XPos:
 	case Prop::YPos:
+		// A scroll or signpost's Y is its height above the ground: DidYouKnow sets 0 (a signpost on the ground),
+		// Land 1's gold scroll 14 (up on the gate), SwapCreatures the creature's height + 1.
+		if (transform != nullptr && g_highlights.contains(object))
+		{
+			transform->position.y =
+			    Locator::terrainSystem::value().GetHeightAt(glm::vec2(transform->position.x, transform->position.z)) + value;
+			break;
+		}
+		[[fallthrough]];
 	case Prop::ZPos:
 		if (transform != nullptr)
 		{
