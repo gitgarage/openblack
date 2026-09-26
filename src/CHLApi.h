@@ -45,6 +45,8 @@ private:
 // GAME_THING_CLICKED reports it once to the script that asks about that object.
 void NotifyGameThingClicked(uint32_t entity);
 uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction);
+// A long press on a scroll (screen position 0..1 each way) clicks it; false if there is none there.
+bool ClickScrollAt(glm::vec2 screen);
 
 // Advances a playing hand demo (PLAY_HAND_DEMO) by real time; call once per frame. While one plays it
 // drives the camera and returns where the hand is on screen (0..1), which replaces the mouse.

@@ -7,7 +7,8 @@
 //                                                               or, over a wood pile, the right button held:
 //                                                               collect wood until the finger lifts (ZL then
 //                                                               puts it down where the hand is), or at a
-//                                                               finished Temple's door: go in
+//                                                               finished Temple's door: go in, or on a
+//                                                               scroll: click it
 //                              move straight away              -> no button (hover: drawing a gesture)
 //                              quick tap without moving        -> left click
 //   ZR (hold)             -> left mouse button at the cursor (also turns any touch into a grab at once)
@@ -138,11 +139,15 @@ bool touchFrame(u64 now, bool forceGrab)
 		{
 			// At the Temple's door (as of last frame's hand position, which is where the finger is): go in.
 			// Over wood: collect it.
-			if (!forceGrab && openblack::chlapi::InTemple())
+			const glm::vec2 screen(static_cast<float>(x) / static_cast<float>(w), static_cast<float>(y) / static_cast<float>(h));
+			if (!forceGrab && !openblack::chlapi::InTemple() && openblack::chlapi::ClickScrollAt(screen))
+			{
+				g_touch = Touch::Hover; // a long press on a scroll clicks it (starts its challenge)
+			}
+			else if (!forceGrab && openblack::chlapi::InTemple())
 			{
 				// Inside the Temple a long press walks to a room or leaves by the map: no grab.
-				openblack::chlapi::TempleLongPress(glm::vec2(static_cast<float>(x) / static_cast<float>(w),
-				                                             static_cast<float>(y) / static_cast<float>(h)));
+				openblack::chlapi::TempleLongPress(screen);
 				g_touch = Touch::Hover;
 			}
 			else if (!forceGrab && openblack::chlapi::HandAtTempleDoor())

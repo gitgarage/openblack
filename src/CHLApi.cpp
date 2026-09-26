@@ -176,6 +176,8 @@ struct ScriptEntityRecord
 std::map<uint32_t, ScriptEntityRecord> g_scriptEntities;
 // Highlights (CREATE_HIGHLIGHT: the "Did you know" and challenge scrolls on the land), by object: their type.
 std::unordered_map<uint32_t, int> g_highlights;
+// Gates, doors and caves (animated scenery that opens) a script has opened with SET_OPEN_CLOSE; the rest stay shut.
+std::unordered_set<uint32_t> g_openedStatics;
 } // namespace
 
 entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint32_t subtype, const glm::vec3& position,
@@ -211,6 +213,22 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 	{
 		// A scroll floating over the land (the original's mini scroll), for the player to find and read.
 		auto& registry = Locator::entitiesRegistry::value();
+		// A script making one where the same kind already stands replaces it (Land 1's CitadelGuideCinema makes
+		// the gold scroll twice; clicks on the first were never seen by the script, which waits on the second).
+		for (auto it = g_highlights.begin(); it != g_highlights.end();)
+		{
+			const auto old = static_cast<entt::entity>(it->first);
+			const auto* oldTransform = registry.Valid(old) ? registry.TryGet<Transform>(old) : nullptr;
+			if (it->second == static_cast<int>(subtype) && oldTransform != nullptr &&
+			    glm::distance(glm::vec2(oldTransform->position.x, oldTransform->position.z), glm::vec2(position.x, position.z)) < 1.0f)
+			{
+				registry.Destroy(old);
+				g_scriptEntities.erase(it->first);
+				it = g_highlights.erase(it);
+				continue;
+			}
+			++it;
+		}
 		const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
 		// Where the script says, height and all (Land 1's gold scroll hangs on the gate, at 32.3); only a position
 		// on or under the ground is lifted to just above it.
@@ -377,6 +395,21 @@ void NotifyGameThingClicked(uint32_t entity)
 
 // The scroll (highlight) the hand is pointing at: the nearest within reach of the pointer's ray. Scrolls float and
 // have no physics body for the ray to hit.
+uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction);
+
+bool ClickScrollAt(glm::vec2 screen)
+{
+	glm::vec3 origin;
+	glm::vec3 direction;
+	Locator::camera::value().DeprojectScreenToWorld(screen, origin, direction);
+	const auto scroll = HighlightOnRay(origin, direction);
+	if (scroll != 0)
+	{
+		NotifyGameThingClicked(scroll);
+	}
+	return scroll != 0;
+}
+
 uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
 {
 	constexpr float k_ScrollReach = 5.0f;
@@ -2711,7 +2744,9 @@ void UpdateAnimations(float seconds)
 		++it;
 	}
 
-	// Animated scenery (windmills, flags...) loops its default animation.
+	// Animated scenery loops its default animation (chess pieces), except what opens - the Norse gate, the gate
+	// plinth, the Piper cave, the phone box - whose animation is its opening: shut until SET_OPEN_CLOSE opens it,
+	// then played through once and held open (and back again when closed).
 	registry.Each<const AnimatedStatic, const Mesh>([&registry, seconds](entt::entity entity, const AnimatedStatic& info,
 	                                                                     const Mesh&) {
 		const auto animation =
@@ -2722,7 +2757,16 @@ void UpdateAnimations(float seconds)
 			animated = &registry.AssignOrReplace<Animated>(entity, animation, 0.0f);
 		}
 		const auto [rate, duration] = AnimationRate(animation);
-		animated->time = duration > 0.0f ? std::fmod(animated->time + rate * seconds, duration) : 0.0f;
+		const bool opens = info.type == AnimatedStaticInfo::NorseGate || info.type == AnimatedStaticInfo::GateStonePlinth ||
+		                   info.type == AnimatedStaticInfo::PiperCaveEntrance || info.type == AnimatedStaticInfo::PhoneBox;
+		if (!opens)
+		{
+			animated->time = duration > 0.0f ? std::fmod(animated->time + rate * seconds, duration) : 0.0f;
+			return;
+		}
+		const bool open = g_openedStatics.contains(static_cast<uint32_t>(entity));
+		const float end = std::max(duration - 1.0f, 0.0f); // the last keyframe, not wrapped round to the first
+		animated->time = std::clamp(animated->time + (open ? rate : -rate) * seconds, 0.0f, end);
 	});
 }
 } // namespace
@@ -5366,10 +5410,17 @@ void SetDrawHighlight() // 306 SET_DRAW_HIGHLIGHT
 
 void SetOpenClose() // 307 SET_OPEN_CLOSE
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	[[maybe_unused]] const auto open = static_cast<bool>(Pop().intVal);
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto object = Pop().uintVal;
+	const auto open = static_cast<bool>(Pop().intVal);
+	if (open)
+	{
+		g_openedStatics.insert(object);
+	}
+	else
+	{
+		g_openedStatics.erase(object);
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SET_OPEN_CLOSE {} {}", object, open ? "open" : "shut");
 }
 
 void SetIntroBuilding() // 308 SET_INTRO_BUILDING
