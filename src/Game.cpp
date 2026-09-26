@@ -500,6 +500,7 @@ bool Game::Update() noexcept
 					objectUnderHand = chlapi::FindObjectNear(intersectionTransform.position, k_HandReach);
 				}
 				chlapi::SetObjectUnderHand(objectUnderHand);
+				chlapi::SetHandGround(intersectionTransform.position);
 				chlapi::SetWoodUnderHand(chlapi::FindWoodNear(intersectionTransform.position, k_HandReach));
 				static bool s_rightWasDown = false;
 				static bool s_letGoOnRelease = false;

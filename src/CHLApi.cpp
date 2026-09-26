@@ -2742,6 +2742,68 @@ bool IsHandWood(uint32_t object)
 }
 } // namespace
 
+namespace
+{
+glm::vec3 g_handGround(0.0f);
+bool g_citadelInterface = true; // SET_INTERFACE_CITADEL
+// The Temple's door, in the model's own space: Land 1's CitadelGuideCinema has it at (1902.97, 2516.50) for a
+// Temple at (1915.05, 2508.89) turned by the feature script's rotation 36000.
+constexpr glm::vec3 k_TempleDoorLocal(-6.0f, 0.0f, -12.95f);
+constexpr float k_TempleDoorReach = 10.0f;
+} // namespace
+
+std::optional<glm::vec3> TempleDoor()
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	std::optional<glm::vec3> door;
+	registry.Each<const Temple, const Transform>([&](entt::entity entity, const Temple&, const Transform& transform) {
+		const auto* construction = registry.TryGet<Construction>(entity);
+		if (!door && (construction == nullptr || construction->built >= 1.0f))
+		{
+			auto at = transform.position + transform.rotation * (k_TempleDoorLocal * transform.scale);
+			at.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(at.x, at.z));
+			door = at;
+		}
+	});
+	return door;
+}
+
+void SetHandGround(const glm::vec3& position)
+{
+	g_handGround = position;
+}
+
+bool HandAtTempleDoor()
+{
+	const auto door = TempleDoor();
+	return g_citadelInterface && door && !InTemple() &&
+	       glm::distance(glm::vec2(door->x, door->z), glm::vec2(g_handGround.x, g_handGround.z)) < k_TempleDoorReach;
+}
+
+bool InTemple()
+{
+	return Locator::temple::has_value() && Locator::temple::value().Active();
+}
+
+void EnterTemple()
+{
+	if (Locator::temple::has_value() && !InTemple())
+	{
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Entering the Temple");
+		Locator::temple::value().Activate();
+	}
+}
+
+void ExitTemple()
+{
+	if (InTemple())
+	{
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Leaving the Temple");
+		Locator::temple::value().Deactivate();
+	}
+}
+
 uint32_t FindWoodNear(const glm::vec3& point, float radius)
 {
 	using namespace openblack::ecs::components;
@@ -5824,9 +5886,7 @@ void KillStormsInArea() // 404 KILL_STORMS_IN_AREA
 
 void InsideTemple() // 405 INSIDE_TEMPLE
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	Pushb(InTemple()); // Land 1's CitadelGuideCinema waits for the player to click the door and go in
 }
 
 void RestartObject() // 406 RESTART_OBJECT
@@ -5887,9 +5947,7 @@ void GetHandState() // 413 GET_HAND_STATE
 
 void SetInterfaceCitadel() // 414 SET_INTERFACE_CITADEL
 {
-	[[maybe_unused]] const auto enable = static_cast<bool>(Pop().intVal);
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	g_citadelInterface = static_cast<bool>(Pop().intVal); // whether the Temple's door takes the player in
 }
 
 void MapScriptFunction() // 415 MAP_SCRIPT_FUNCTION
@@ -6242,14 +6300,13 @@ void GetNextInContainer() // 456 GET_NEXT_IN_CONTAINER
 
 void GetTempleEntrancePosition() // 457 GET_TEMPLE_ENTRANCE_POSITION
 {
-	[[maybe_unused]] const auto height = Popf();
+	const auto height = Popf();
 	[[maybe_unused]] const auto radius = Popf();
 	[[maybe_unused]] const auto player = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushv(0.0f); // x
-	Pushv(0.0f); // y
-	Pushv(0.0f); // z
+	const auto door = TempleDoor().value_or(glm::vec3(0.0f));
+	Pushv(door.x);
+	Pushv(door.y + height);
+	Pushv(door.z);
 }
 
 void SaySoundEffectPlaying() // 458 SAY_SOUND_EFFECT_PLAYING

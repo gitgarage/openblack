@@ -6,7 +6,8 @@
 //                              hold still ~150 ms, then drag  -> left button held (grab and move the land) -
 //                                                               or, over a wood pile, the right button held:
 //                                                               collect wood until the finger lifts (ZL then
-//                                                               puts it down where the hand is)
+//                                                               puts it down where the hand is), or at a
+//                                                               finished Temple's door: go in
 //                              move straight away              -> no button (hover: drawing a gesture)
 //                              quick tap without moving        -> left click
 //   ZR (hold)             -> left mouse button at the cursor (also turns any touch into a grab at once)
@@ -21,6 +22,7 @@
 //                            this is pressed)
 //   D-pad up / left       -> save test point 1 / 2 (keypad 1 / 2)
 //   D-pad down / right    -> load test point 1 / 2 (keypad 3 / 4)
+//   B                     -> leave the Temple
 #include <cstdlib>
 
 #include <SDL.h>
@@ -134,8 +136,17 @@ bool touchFrame(u64 now, bool forceGrab)
 		const bool moved = std::abs(x - g_touchStartX) > k_TouchSlopPx || std::abs(y - g_touchStartY) > k_TouchSlopPx;
 		if (forceGrab || (!moved && now - g_touchStart >= k_TouchHoldNs))
 		{
-			// Over wood (as of last frame's hand position, which is where the finger is): collect it.
-			g_touch = !forceGrab && openblack::chlapi::HandWoodUnder() != 0 ? Touch::Collect : Touch::Grab;
+			// At the Temple's door (as of last frame's hand position, which is where the finger is): go in.
+			// Over wood: collect it.
+			if (!forceGrab && openblack::chlapi::HandAtTempleDoor())
+			{
+				openblack::chlapi::EnterTemple();
+				g_touch = Touch::Hover;
+			}
+			else
+			{
+				g_touch = !forceGrab && openblack::chlapi::HandWoodUnder() != 0 ? Touch::Collect : Touch::Grab;
+			}
 		}
 		else if (moved)
 		{
@@ -185,6 +196,13 @@ void switchInputFrame()
 	setKey(SDL_SCANCODE_KP_2, (held & HidNpadButton_Left) != 0);
 	setKey(SDL_SCANCODE_KP_3, (held & HidNpadButton_Down) != 0);
 	setKey(SDL_SCANCODE_KP_4, (held & HidNpadButton_Right) != 0);
+	static bool s_bWasDown = false;
+	const bool bDown = (held & HidNpadButton_B) != 0;
+	if (bDown && !s_bWasDown)
+	{
+		openblack::chlapi::ExitTemple();
+	}
+	s_bWasDown = bDown;
 
 	const u64 now = armTicksToNs(armGetSystemTick());
 	const bool zr = (held & HidNpadButton_ZR) != 0;

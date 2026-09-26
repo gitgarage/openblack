@@ -70,6 +70,13 @@ bool HandCollectBegin(uint32_t pile);
 void HandCollect(std::chrono::microseconds dt);
 void HandCollectEnd();
 bool HandCollecting();
+// The Temple: a finished Temple's door takes the player in (a long press there on the Switch).
+std::optional<glm::vec3> TempleDoor();
+void SetHandGround(const glm::vec3& position);
+bool HandAtTempleDoor();
+bool InTemple();
+void EnterTemple();
+void ExitTemple();
 // The hand's pose while holding something (a name in Data/hndspec5.txt).
 constexpr const char* k_HandHoldPose = "hold_above";
 void HandCarry(const glm::vec3& handPosition);
