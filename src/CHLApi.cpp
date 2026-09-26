@@ -5654,9 +5654,18 @@ void ObjectInfoBits() // 320 OBJECT_INFO_BITS
 	const auto object = Pop().uintVal;
 	int bits = 0;
 	auto& registry = Locator::entitiesRegistry::value();
-	if (const auto it = g_pedestalStones.find(object); it != g_pedestalStones.end())
+	// Only ChooseYourCreature asks, and only about the pedestal: a handle to something else (a save point from
+	// before CALL found the pedestal holds 0) means the pedestal still - there is one in the land.
+	const bool isPedestal =
+	    registry.Valid(static_cast<entt::entity>(object)) &&
+	    registry.AllOf<openblack::ecs::components::AnimatedStatic>(static_cast<entt::entity>(object));
+	for (const auto& [pedestal, stones] : g_pedestalStones)
 	{
-		for (const auto stone : it->second)
+		if (isPedestal && pedestal != object)
+		{
+			continue;
+		}
+		for (const auto stone : stones)
 		{
 			const auto* mobile = registry.Valid(static_cast<entt::entity>(stone))
 			                         ? registry.TryGet<openblack::ecs::components::MobileStatic>(static_cast<entt::entity>(stone))
