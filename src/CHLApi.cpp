@@ -780,6 +780,7 @@ enum class Prop : int32_t
 	Health = 1,
 	Angle = 2,
 	Scale = 8,
+	Flying = 5,
 	InHand = 9,
 	Age = 16, // one more entry than openblack's ObjectPropertyType before here: scripts set 16 to ages (3-33)
 	BuiltPercentage = 22, // CheckCitadel (Land 1) waits for the Citadel's to reach 1
@@ -828,7 +829,19 @@ void GetProperty() // 021 GET_PROPERTY
 		}
 		break;
 	case Prop::Health:
-		value = villager != nullptr ? static_cast<float>(villager->health) / 100.0f : value;
+		// Villagers have theirs; anything else is whole unless a script said otherwise (Land 1's LostBrother takes a
+		// house under 0.75 for broken into).
+		if (villager != nullptr)
+		{
+			value = static_cast<float>(villager->health) / 100.0f;
+		}
+		else if (g_objectProperties.find(PropertyKey(object, prop)) == g_objectProperties.end())
+		{
+			value = 1.0f;
+		}
+		break;
+	case Prop::Flying:
+		value = g_flying.contains(object) ? 1.0f : 0.0f;
 		break;
 	case Prop::Angle:
 		value = transform != nullptr ? YawDegrees(transform->rotation) : value;
@@ -954,7 +967,9 @@ void SetPosition() // 024 SET_POSITION
 	auto position = PopVec();
 	const auto objId = Pop().uintVal;
 
-	if (objId != 0)
+	// Not what the player holds: scripts that keep someone in place every turn (Land 1's family, the lost brother)
+	// pulled them back out of the hand.
+	if (objId != 0 && objId != g_heldObject)
 	{
 		const auto& island = Locator::terrainSystem::value();
 		position.y = island.GetHeightAt(glm::vec2(position.x, position.z));
@@ -1110,6 +1125,10 @@ void HoldForScript(entt::entity entity, const glm::vec3& at)
 // Walk (or place) a game thing at a position. Returns false if the move was refused.
 bool MoveThingTo(uint32_t objId, const glm::vec3& position)
 {
+	if (objId == g_heldObject && objId != 0)
+	{
+		return false; // in the hand: it goes where the hand takes it
+	}
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto entity = static_cast<entt::entity>(objId);
 	if (objId == 0 || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
@@ -3495,6 +3514,16 @@ void HandCarry(const glm::vec3& handPosition)
 	}
 	registry.Get<openblack::ecs::components::Transform>(entity).position = position;
 	MoveBody(entity, position);
+	// A carried villager's walking goal goes with the hand: the pathfinder otherwise pulls it back each turn to
+	// where it was picked up, and it is let go of there (Land 1's lost brother vanished back to the woods).
+	if (auto* wallHug = registry.TryGet<WallHug>(entity))
+	{
+		wallHug->goal = glm::vec2(position.x, position.z);
+	}
+	if (auto* move = registry.TryGet<ScriptMove>(entity))
+	{
+		move->target = position;
+	}
 	g_handTrail.emplace_back(std::chrono::steady_clock::now(), position);
 	while (g_handTrail.size() > 2 && g_handTrail.front().first < std::chrono::steady_clock::now() - k_ThrowWindow)
 	{
@@ -3596,6 +3625,15 @@ void SetObjectUnderHand(uint32_t object)
 	g_objectUnderHand = object;
 }
 
+namespace
+{
+uint32_t& chosenObject()
+{
+	static uint32_t s_object = 0;
+	return s_object;
+}
+} // namespace
+
 std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 {
 	// OPENBLACK_TEST_COLLECT: the same with the nearest wood pile (held 3 s to collect, then given away).
@@ -3623,6 +3661,7 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 		}
 		target = Locator::entitiesRegistry::value().Get<Transform>(static_cast<entt::entity>(object)).position;
 		chosen = true;
+		chosenObject() = object;
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test pickup: aiming at {} at ({:.1f}, {:.1f}, {:.1f})", object, target.x,
 		                   target.y, target.z);
 	}
@@ -3670,13 +3709,38 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 	{
 		return std::make_pair(target, false); // release: still held
 	}
+	static const bool gentle = std::string_view(std::getenv("OPENBLACK_TEST_PICKUP") != nullptr ? std::getenv("OPENBLACK_TEST_PICKUP") : "") == "drop";
+	if (gentle && k > 1.5f && k < 1.6f)
+	{
+		const auto held = static_cast<entt::entity>(chosenObject());
+		if (Locator::entitiesRegistry::value().Valid(held))
+		{
+			const auto at = Locator::entitiesRegistry::value().Get<Transform>(held).position;
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test carry: {} at ({:.1f}, {:.1f}, {:.1f}), holding {}", chosenObject(), at.x, at.y,
+			                   at.z, g_heldObject);
+		}
+	}
 	if (k < 2.0f)
 	{
-		return std::make_pair(target + glm::vec3(10.0f * (k - 1.0f), 0.0f, 0.0f), true); // press, swing at 10 m/s
+		// press, swing at 10 m/s (or, for OPENBLACK_TEST_PICKUP=drop, held still to be let go of gently)
+		return std::make_pair(target + glm::vec3(gentle ? 3.0f : 10.0f * (k - 1.0f), 0.0f, 0.0f), true);
 	}
 	if (k < 2.2f)
 	{
-		return std::make_pair(target + glm::vec3(10.0f, 0.0f, 0.0f), false); // release: thrown
+		return std::make_pair(target + glm::vec3(gentle ? 3.0f : 10.0f, 0.0f, 0.0f), false); // release: thrown or dropped
+	}
+	if (gentle && k < 8.0f)
+	{
+		static int s_lastSecond = -1;
+		const auto held = static_cast<entt::entity>(chosenObject());
+		if (static_cast<int>(k) != s_lastSecond && Locator::entitiesRegistry::value().Valid(held))
+		{
+			s_lastSecond = static_cast<int>(k);
+			const auto at = Locator::entitiesRegistry::value().Get<Transform>(held).position;
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test drop: {} at ({:.1f}, {:.1f}, {:.1f})", static_cast<uint32_t>(held), at.x,
+			                   at.y, at.z);
+		}
+		return std::nullopt;
 	}
 	return std::nullopt;
 }
@@ -4000,7 +4064,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		constexpr float k_ColumnTop = 9.0f;    // above the object
 		constexpr float k_ColumnBottom = -1.0f; // below it
 		constexpr float k_FallSpeed = 2.5f;
-		constexpr float k_ColumnRadius = 0.9f;
+		constexpr float k_ColumnRadius = 1.8f;
 		constexpr float k_SparkleFramesPerSecond = 16.0f;
 		static float s_clock = 0.0f;
 		s_clock += seconds;
@@ -4083,6 +4147,11 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	}
 	for (auto it = g_walks.begin(); it != g_walks.end();)
 	{
+		if (it->first == g_heldObject)
+		{
+			++it; // in the hand: the script's move waits till it is let go of
+			continue;
+		}
 		const auto entity = static_cast<entt::entity>(it->first);
 		auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
 		if (transform == nullptr)
@@ -4346,11 +4415,18 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		{
 			wallHug->goal = glm::vec2(position.x, position.z);
 		}
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Landed {} at ({:.1f}, {:.1f}, {:.1f})", it->first, position.x, position.y,
+		                   position.z);
 		it = g_flying.erase(it);
 	}
 
 	for (auto it = g_scriptMoves.begin(); it != g_scriptMoves.end();)
 	{
+		if (it->first == g_heldObject)
+		{
+			++it; // in the hand: the script's move waits till it is let go of
+			continue;
+		}
 		const auto entity = static_cast<entt::entity>(it->first);
 		auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
 		if (transform == nullptr)
@@ -4376,6 +4452,11 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 
 	for (auto it = g_followers.begin(); it != g_followers.end();)
 	{
+		if (it->first == g_heldObject)
+		{
+			++it; // in the hand: the script's move waits till it is let go of
+			continue;
+		}
 		const auto entity = static_cast<entt::entity>(it->first);
 		auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
 		if (transform == nullptr)
