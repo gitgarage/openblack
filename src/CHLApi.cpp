@@ -495,6 +495,9 @@ entt::entity FindNearestScriptObject(int type, int subtype, const glm::vec3& pos
 	case ObjectType::Feature:
 		NearestOf<ecs::components::Feature>(subtype, position, bestDistance2, best,
 		                                    [](const ecs::components::Feature& f) { return static_cast<int>(f.type); });
+		// Animated scenery is a feature to the scripts too (Land 1 finds the gate stone pedestal as one).
+		NearestOf<ecs::components::AnimatedStatic>(subtype, position, bestDistance2, best,
+		                                           [](const ecs::components::AnimatedStatic& a) { return static_cast<int>(a.type); });
 		break;
 	case ObjectType::Tree:
 		NearestOf<ecs::components::Tree>(subtype, position, bestDistance2, best,
@@ -3127,6 +3130,102 @@ void TempleLongPress(glm::vec2 screen)
 	}
 }
 
+namespace
+{
+// The gate stone pedestal (Land 1's "Gate Stone Plinth"): the gate totems go on its top, one on another, and
+// OBJECT_INFO_BITS on it says which are there (ChooseYourCreature waits for 7: all three).
+std::unordered_map<uint32_t, std::vector<uint32_t>> g_pedestalStones;
+constexpr float k_PedestalReach = 3.0f; // how far out from the pedestal's edge a stone let go still goes on it
+
+struct Pedestal
+{
+	entt::entity entity;
+	glm::vec3 center;
+	float top;    // the top of the pedestal, or of the stones on it
+	float radius; // its footprint
+};
+
+float MeshHeight(entt::entity entity)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(entity);
+	const auto* transform = registry.TryGet<Transform>(entity);
+	if (mesh == nullptr || transform == nullptr)
+	{
+		return 0.0f;
+	}
+	return Locator::resources::value().GetMeshes().Handle(mesh->id)->GetBoundingBox().Size().y * transform->scale.y;
+}
+
+// The pedestal whose top a point is over (within reach of its footprint), if any.
+std::optional<Pedestal> PedestalUnder(const glm::vec3& point)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	std::optional<Pedestal> found;
+	registry.Each<const AnimatedStatic, const Transform, const Mesh>(
+	    [&](entt::entity entity, const AnimatedStatic& info, const Transform& transform, const Mesh& mesh) {
+		    if (found || info.type != AnimatedStaticInfo::GateStonePlinth)
+		    {
+			    return;
+		    }
+		    const auto box = Locator::resources::value().GetMeshes().Handle(mesh.id)->GetBoundingBox();
+		    const float radius = std::max(box.Size().x, box.Size().z) * 0.5f * std::max(transform.scale.x, transform.scale.z);
+		    if (glm::distance(glm::vec2(point.x, point.z), glm::vec2(transform.position.x, transform.position.z)) >
+		        radius + k_PedestalReach)
+		    {
+			    return;
+		    }
+		    float top = transform.position.y + box.maxima.y * transform.scale.y;
+		    for (const auto stone : g_pedestalStones[static_cast<uint32_t>(entity)])
+		    {
+			    top += MeshHeight(static_cast<entt::entity>(stone));
+		    }
+		    found = Pedestal {entity, transform.position, top, radius};
+	    });
+	return found;
+}
+
+bool IsGateTotem(entt::entity entity)
+{
+	const auto* mobile = Locator::entitiesRegistry::value().TryGet<openblack::ecs::components::MobileStatic>(entity);
+	return mobile != nullptr && (mobile->type == MobileStaticInfo::GateTotemApe || mobile->type == MobileStaticInfo::GateTotemCow ||
+	                             mobile->type == MobileStaticInfo::GateTotemTiger || mobile->type == MobileStaticInfo::GateTotemBlank);
+}
+
+// A gate totem let go (or landing) over the pedestal goes on the centre of its top, on any stones already there.
+bool SetOnPedestal(entt::entity entity, const glm::vec3& at)
+{
+	if (!IsGateTotem(entity))
+	{
+		return false;
+	}
+	const auto pedestal = PedestalUnder(at);
+	if (!pedestal)
+	{
+		return false;
+	}
+	auto& registry = Locator::entitiesRegistry::value();
+	auto& transform = registry.Get<Transform>(entity);
+	transform.position = glm::vec3(pedestal->center.x, pedestal->top, pedestal->center.z);
+	transform.rotation = registry.Get<Transform>(pedestal->entity).rotation;
+	MoveBody(entity, transform.position);
+	g_flying.erase(static_cast<uint32_t>(entity));
+	g_pedestalStones[static_cast<uint32_t>(pedestal->entity)].push_back(static_cast<uint32_t>(entity));
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Gate totem {} set on the pedestal ({} there)", static_cast<uint32_t>(entity),
+	                   g_pedestalStones[static_cast<uint32_t>(pedestal->entity)].size());
+	return true;
+}
+
+void TakeOffPedestal(uint32_t object)
+{
+	for (auto& [pedestal, stones] : g_pedestalStones)
+	{
+		stones.erase(std::remove(stones.begin(), stones.end(), object), stones.end());
+	}
+}
+} // namespace
+
 uint32_t FindWoodNear(const glm::vec3& point, float radius)
 {
 	using namespace openblack::ecs::components;
@@ -3272,6 +3371,7 @@ bool HandPickUp(uint32_t object)
 		return false;
 	}
 	g_flying.erase(object);
+	TakeOffPedestal(object);
 	g_walks.erase(object);
 	g_followers.erase(object);
 	g_scriptMoves.erase(object);
@@ -3307,7 +3407,13 @@ void HandCarry(const glm::vec3& handPosition)
 		g_heldObject = 0;
 		return;
 	}
-	const auto position = handPosition + glm::vec3(0.0f, k_CarryHeight, 0.0f);
+	auto position = handPosition + glm::vec3(0.0f, k_CarryHeight, 0.0f);
+	// Over the gate stone pedestal a totem is held at its top, as the original keeps a held thing at the height
+	// of what the hand is over.
+	if (const auto pedestal = IsGateTotem(entity) ? PedestalUnder(handPosition) : std::nullopt)
+	{
+		position.y = std::max(position.y, pedestal->top + k_CarryHeight);
+	}
 	registry.Get<openblack::ecs::components::Transform>(entity).position = position;
 	MoveBody(entity, position);
 	g_handTrail.emplace_back(std::chrono::steady_clock::now(), position);
@@ -3363,6 +3469,10 @@ void HandDrop(const glm::vec3& handPosition)
 	}
 	// Things that move (people, animals, rocks, logs, food) fly on with the hand's speed, or fall where
 	// they were let go; fixtures (features like the totem) are set down on the ground under the hand.
+	if (SetOnPedestal(entity, registry.Get<Transform>(entity).position))
+	{
+		return;
+	}
 	if (registry.AllOf<openblack::ecs::components::Mobile>(entity))
 	{
 		glm::vec3 velocity(0.0f);
@@ -4054,6 +4164,13 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		velocity.y -= k_Gravity * seconds;
 		auto position = transform->position + velocity * seconds;
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		const auto pedestal = IsGateTotem(entity) ? PedestalUnder(position) : std::nullopt;
+		if (pedestal && position.y <= pedestal->top && transform->position.y >= pedestal->top - 1.0f &&
+		    SetOnPedestal(entity, position))
+		{
+			it = g_flying.erase(it); // thrown or dropped onto the pedestal
+			continue;
+		}
 		const bool landed = position.y <= ground;
 		if (landed)
 		{
@@ -5532,10 +5649,29 @@ void SetSunDraw() // 319 SET_SUN_DRAW
 
 void ObjectInfoBits() // 320 OBJECT_INFO_BITS
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	// On the gate stone pedestal: which gate totems are on it, a bit each - the Ape (Land 1's GateKey1) 1, the Tiger
+	// (GateKey2) 2, the Cow (GateKey3) 4. ChooseYourCreature waits for 7.
+	const auto object = Pop().uintVal;
+	int bits = 0;
+	auto& registry = Locator::entitiesRegistry::value();
+	if (const auto it = g_pedestalStones.find(object); it != g_pedestalStones.end())
+	{
+		for (const auto stone : it->second)
+		{
+			const auto* mobile = registry.Valid(static_cast<entt::entity>(stone))
+			                         ? registry.TryGet<openblack::ecs::components::MobileStatic>(static_cast<entt::entity>(stone))
+			                         : nullptr;
+			if (mobile == nullptr)
+			{
+				continue;
+			}
+			bits |= mobile->type == MobileStaticInfo::GateTotemApe     ? 1
+			        : mobile->type == MobileStaticInfo::GateTotemTiger ? 2
+			        : mobile->type == MobileStaticInfo::GateTotemCow   ? 4
+			                                                           : 0;
+		}
+	}
+	Pushf(static_cast<float>(bits));
 }
 
 void SetHurtByFire() // 321 SET_HURT_BY_FIRE
