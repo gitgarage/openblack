@@ -434,7 +434,7 @@ uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto along = glm::normalize(direction);
 	uint32_t best = 0;
-	float bestDistance = k_ScrollReach;
+	float bestDistance = std::numeric_limits<float>::max();
 	for (const auto& [id, type] : g_highlights)
 	{
 		const auto entity = static_cast<entt::entity>(id);
@@ -443,14 +443,23 @@ uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
 		{
 			continue;
 		}
-		const auto toScroll = transform->position - origin;
+		// Its middle and size by its shape (a model's origin need not be its middle).
+		glm::vec3 middle = transform->position;
+		float reach = k_ScrollReach;
+		if (const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(entity))
+		{
+			const auto box = Locator::resources::value().GetMeshes().Handle(mesh->id)->GetBoundingBox();
+			middle = transform->position + transform->rotation * (box.Center() * transform->scale);
+			reach = std::max(reach, glm::length(box.Size() * transform->scale) * 0.5f);
+		}
+		const auto toScroll = middle - origin;
 		const float ahead = glm::dot(toScroll, along);
 		if (ahead <= 0.0f)
 		{
 			continue;
 		}
 		const float off = glm::length(toScroll - along * ahead);
-		if (off < bestDistance)
+		if (off < reach && off < bestDistance)
 		{
 			bestDistance = off;
 			best = id;
@@ -3296,7 +3305,9 @@ std::optional<Pedestal> PedestalUnder(const glm::vec3& point)
 		    {
 			    top += registry.Valid(stone) ? MeshHeight(stone) : 0.0f;
 		    }
-		    found = Pedestal {entity, transform.position, top, radius};
+		    // The middle of its top, by its shape: a model's origin need not be its middle.
+		    const auto middle = transform.position + transform.rotation * (box.Center() * transform.scale);
+		    found = Pedestal {entity, glm::vec3(middle.x, transform.position.y, middle.z), top, radius};
 	    });
 	return found;
 }
@@ -3322,8 +3333,16 @@ bool SetOnPedestal(entt::entity entity, const glm::vec3& at)
 	}
 	auto& registry = Locator::entitiesRegistry::value();
 	auto& transform = registry.Get<Transform>(entity);
-	transform.position = glm::vec3(pedestal->center.x, pedestal->top, pedestal->center.z);
 	transform.rotation = registry.Get<Transform>(pedestal->entity).rotation;
+	// The stone's own middle over the pedestal's, its bottom on the top (the Ape's origin is off to one side).
+	glm::vec3 base(0.0f);
+	if (const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(entity))
+	{
+		const auto box = Locator::resources::value().GetMeshes().Handle(mesh->id)->GetBoundingBox();
+		base = glm::vec3(box.Center().x, box.minima.y, box.Center().z);
+	}
+	transform.position = glm::vec3(pedestal->center.x, pedestal->top, pedestal->center.z) -
+	                     transform.rotation * (base * transform.scale);
 	MoveBody(entity, transform.position);
 	g_flying.erase(static_cast<uint32_t>(entity));
 	g_pedestalStones[static_cast<uint32_t>(pedestal->entity)].push_back(static_cast<uint32_t>(entity));
