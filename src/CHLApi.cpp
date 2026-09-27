@@ -1530,36 +1530,14 @@ void InfluencePosition() // 061 INFLUENCE_POSITION
 
 void GetInfluence() // 062 GET_INFLUENCE
 {
-	const auto position = PopVec();
+	[[maybe_unused]] const auto position = PopVec();
 	[[maybe_unused]] const auto raw = static_cast<bool>(Pop().intVal);
 	[[maybe_unused]] const auto player = Popf();
-	// No influence system yet: inside the influence (1) within reach of the player's Temple or a village's houses,
-	// by the original's influence numbers; outside (0) beyond. Land 1's ProtectGateKey scripts return a gate totem
-	// to its start when it is outside (with this always 0 they did so without end).
-	const auto& info = Locator::infoConstants::value();
-	static bool s_reported = false;
-	if (!s_reported)
-	{
-		s_reported = true;
-		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Influence: citadel heart {} virtual max {}, town {}, abode {}",
-		                   info.citadelHeart.influence, info.citadel.virtualInfluenceMaxDistance, info.town.influence,
-		                   info.abode.at(0).influence);
-	}
-	const float temple = std::max({info.citadel.virtualInfluenceMaxDistance, info.citadelHeart.influence, 150.0f});
-	// info.dat's town and abode influence (25, 5) are strengths, not reach: a village reaches about as far as the
-	// Temple (the original lets the hand reach Land 1's gate stone pedestal, ~170 from the village by the store).
-	const float house = std::max(info.town.influence, 200.0f);
-	auto& registry = Locator::entitiesRegistry::value();
-	bool inside = false;
-	registry.Each<const openblack::ecs::components::Temple, const Transform>(
-	    [&](const openblack::ecs::components::Temple&, const Transform& transform) {
-		    inside = inside || glm::distance(glm::vec2(transform.position.x, transform.position.z), glm::vec2(position.x, position.z)) < temple;
-	    });
-	registry.Each<const openblack::ecs::components::Abode, const Transform>(
-	    [&](const openblack::ecs::components::Abode&, const Transform& transform) {
-		    inside = inside || glm::distance(glm::vec2(transform.position.x, transform.position.z), glm::vec2(position.x, position.z)) < house;
-	    });
-	Pushf(inside ? 1.0f : 0.0f);
+	// No influence system yet, and the hand reaches everywhere: everywhere is inside the player's influence (1).
+	// Land 1's ProtectGateKey and ProtectQuarryRock scripts delete a gate totem or the quarry rock set down outside
+	// it and make it again at its start: the original's hand reaches the quarry, the sculptor and the pedestal, and
+	// any radius short of that sent the stones back from them.
+	Pushf(1.0f);
 }
 
 void SetInterfaceInteraction() // 063 SET_INTERFACE_INTERACTION
