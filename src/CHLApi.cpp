@@ -863,7 +863,7 @@ void GetProperty() // 021 GET_PROPERTY
 		break;
 	case Prop::YPos:
 		value = transform != nullptr ? transform->position.y : value;
-		if (transform != nullptr && g_highlights.contains(object)) // height above the ground, as SET_PROPERTY
+		if (transform != nullptr) // height above the ground, as SET_PROPERTY
 		{
 			value -= Locator::terrainSystem::value().GetHeightAt(glm::vec2(transform->position.x, transform->position.z));
 		}
@@ -930,23 +930,35 @@ void SetProperty() // 022 SET_PROPERTY
 			}
 		}
 		break;
-	case Prop::XPos:
 	case Prop::YPos:
-		// A scroll or signpost's Y is its height above the ground: DidYouKnow sets 0 (a signpost on the ground),
-		// Land 1's gold scroll 14 (up on the gate), SwapCreatures the creature's height + 1.
-		if (transform != nullptr && g_highlights.contains(object))
+		// Y is a height above the ground: DidYouKnow sets a signpost's 0 (on the ground), Land 1's gold scroll 14 (up
+		// on the gate), SwapCreatures the creature's height + 1, TheSculptor his rock's 0 (set down to be carved -
+		// taken as a world height, it sank underground and he walked off).
+		if (transform != nullptr)
 		{
 			transform->position.y =
 			    Locator::terrainSystem::value().GetHeightAt(glm::vec2(transform->position.x, transform->position.z)) + value;
-			break;
 		}
-		[[fallthrough]];
+		break;
+	case Prop::XPos:
 	case Prop::ZPos:
 		if (transform != nullptr)
 		{
 			transform->position[prop - static_cast<int32_t>(Prop::XPos)] = value;
 		}
 		break;
+	}
+	// A thing with a physics body is where its body is: move the body too, or the next physics step puts it back.
+	if (transform != nullptr && (prop == static_cast<int32_t>(Prop::XPos) || prop == static_cast<int32_t>(Prop::YPos) ||
+	                             prop == static_cast<int32_t>(Prop::ZPos)))
+	{
+		if (auto* body = registry.TryGet<openblack::ecs::components::RigidBody>(entity))
+		{
+			btTransform bodyTransform = body->handle.getWorldTransform();
+			bodyTransform.setOrigin(btVector3(transform->position.x, transform->position.y, transform->position.z));
+			body->handle.setWorldTransform(bodyTransform);
+			body->motionState->setWorldTransform(bodyTransform);
+		}
 	}
 }
 
