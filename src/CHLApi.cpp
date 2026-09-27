@@ -1546,7 +1546,9 @@ void GetInfluence() // 062 GET_INFLUENCE
 		                   info.abode.at(0).influence);
 	}
 	const float temple = std::max({info.citadel.virtualInfluenceMaxDistance, info.citadelHeart.influence, 150.0f});
-	const float house = std::max(info.town.influence, 60.0f);
+	// info.dat's town and abode influence (25, 5) are strengths, not reach: a village reaches about as far as the
+	// Temple (the original lets the hand reach Land 1's gate stone pedestal, ~170 from the village by the store).
+	const float house = std::max(info.town.influence, 200.0f);
 	auto& registry = Locator::entitiesRegistry::value();
 	bool inside = false;
 	registry.Each<const openblack::ecs::components::Temple, const Transform>(
