@@ -1384,6 +1384,10 @@ void DetachMusic() // 047 DETACH_MUSIC
 }
 
 void ForgetObject(uint32_t object); // below, with the hand
+namespace
+{
+bool SetIntoPedestal(uint32_t object); // below, with the pedestal
+} // namespace
 
 void ObjectDelete() // 048 OBJECT_DELETE
 {
@@ -1397,6 +1401,7 @@ void ObjectDelete() // 048 OBJECT_DELETE
 	{
 		return;
 	}
+	SetIntoPedestal(obj); // a gate totem in place is kept on the pedestal
 	ForgetObject(obj);
 	registry.Destroy(entity);
 }
@@ -3230,6 +3235,10 @@ namespace
 // The gate stone pedestal (Land 1's "Gate Stone Plinth"): the gate totems go on its top, one on another, and
 // OBJECT_INFO_BITS on it says which are there (ChooseYourCreature waits for 7: all three).
 std::unordered_map<uint32_t, std::vector<uint32_t>> g_pedestalStones;
+// Gate totems a script deleted once they were on the pedestal (ProtectGateKey deletes its key when it is in place):
+// set into it for good - a copy that cannot be taken stays there, still counted - by pedestal: bits and copies.
+std::unordered_map<uint32_t, int> g_pedestalSetBits;
+std::unordered_map<uint32_t, std::vector<entt::entity>> g_pedestalSetStones;
 constexpr float k_PedestalReach = 3.0f; // how far out from the pedestal's edge a stone let go still goes on it
 
 struct Pedestal
@@ -3276,6 +3285,10 @@ std::optional<Pedestal> PedestalUnder(const glm::vec3& point)
 		    {
 			    top += MeshHeight(static_cast<entt::entity>(stone));
 		    }
+		    for (const auto stone : g_pedestalSetStones[static_cast<uint32_t>(entity)])
+		    {
+			    top += registry.Valid(stone) ? MeshHeight(stone) : 0.0f;
+		    }
 		    found = Pedestal {entity, transform.position, top, radius};
 	    });
 	return found;
@@ -3310,6 +3323,42 @@ bool SetOnPedestal(entt::entity entity, const glm::vec3& at)
 	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Gate totem {} set on the pedestal ({} there)", static_cast<uint32_t>(entity),
 	                   g_pedestalStones[static_cast<uint32_t>(pedestal->entity)].size());
 	return true;
+}
+
+int GateTotemBit(entt::entity entity)
+{
+	const auto* mobile = Locator::entitiesRegistry::value().TryGet<openblack::ecs::components::MobileStatic>(entity);
+	if (mobile == nullptr)
+	{
+		return 0;
+	}
+	return mobile->type == MobileStaticInfo::GateTotemApe     ? 1
+	       : mobile->type == MobileStaticInfo::GateTotemTiger ? 2
+	       : mobile->type == MobileStaticInfo::GateTotemCow   ? 4
+	                                                          : 0;
+}
+
+// A gate totem on the pedestal a script deletes stays set into it: a copy of it (mesh and place only, so the hand
+// cannot take it) and its bit. Returns whether it was on a pedestal.
+bool SetIntoPedestal(uint32_t object)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	for (auto& [pedestal, stones] : g_pedestalStones)
+	{
+		if (std::find(stones.begin(), stones.end(), object) == stones.end())
+		{
+			continue;
+		}
+		const auto entity = static_cast<entt::entity>(object);
+		const auto copy = registry.Create();
+		registry.Assign<Transform>(copy, registry.Get<Transform>(entity));
+		registry.Assign<openblack::ecs::components::Mesh>(copy, registry.Get<openblack::ecs::components::Mesh>(entity));
+		g_pedestalSetBits[pedestal] |= GateTotemBit(entity);
+		g_pedestalSetStones[pedestal].push_back(copy);
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Gate totem {} set into the pedestal", object);
+		return true;
+	}
+	return false;
 }
 
 void TakeOffPedestal(uint32_t object)
@@ -5957,6 +6006,13 @@ void ObjectInfoBits() // 320 OBJECT_INFO_BITS
 	const bool isPedestal =
 	    registry.Valid(static_cast<entt::entity>(object)) &&
 	    registry.AllOf<openblack::ecs::components::AnimatedStatic>(static_cast<entt::entity>(object));
+	for (const auto& [pedestal, set] : g_pedestalSetBits)
+	{
+		if (!isPedestal || pedestal == object)
+		{
+			bits |= set;
+		}
+	}
 	for (const auto& [pedestal, stones] : g_pedestalStones)
 	{
 		if (isPedestal && pedestal != object)
