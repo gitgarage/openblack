@@ -221,7 +221,7 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 	case ObjectType::MobileStatic:
 	case ObjectType::Rock: // TODO(Daniels118): add a Rock archetype
 		return MobileStaticArchetype::Create(position, static_cast<MobileStaticInfo>(subtype), altitude, xAngleRadians,
-		                                     yAngleRadians, zAngleRadians, scale);
+		                                     yAngleRadians, zAngleRadians, scale, hint);
 	case ObjectType::Highlight:
 	{
 		// A scroll floating over the land (the original's mini scroll), for the player to find and read.
@@ -530,6 +530,13 @@ entt::entity FindNearestScriptObject(int type, int subtype, const glm::vec3& pos
 		break;
 	case ObjectType::Citadel:
 		NearestOf<ecs::components::Temple>(subtype, position, bestDistance2, best, [](const ecs::components::Temple&) { return 0; });
+		break;
+	case ObjectType::MobileStatic:
+	case ObjectType::Rock:
+		// Land 1's ProtectGateKeys finds the gate totems and the quarry rock the land put down (the Ape in the lost
+		// brother's house, the Tiger by the crowd): unfound, each guard made another and there were two.
+		NearestOf<ecs::components::MobileStatic>(subtype, position, bestDistance2, best,
+		                                         [](const ecs::components::MobileStatic& m) { return static_cast<int>(m.type); });
 		break;
 	case ObjectType::Highlight:
 	{
@@ -7865,6 +7872,22 @@ bool LoadTestPoint(int slot)
 	g_timers.clear();
 	g_totalEvents.clear();
 	g_notPickupable.clear();
+	// Not in a save point: what is on the gate stone pedestal (the stones on it are the script's, remade from the
+	// save), and which gates scripts have opened. Kept, a stone set in later in the session counted before its time.
+	for (auto& [pedestal, copies] : g_pedestalSetStones)
+	{
+		for (const auto copy : copies)
+		{
+			if (registry.Valid(copy))
+			{
+				registry.Destroy(copy);
+			}
+		}
+	}
+	g_pedestalSetStones.clear();
+	g_pedestalSetBits.clear();
+	g_pedestalStones.clear();
+	g_openedStatics.clear();
 	g_gameTimeMove.reset();
 	const auto now = std::chrono::steady_clock::now();
 	auto seconds = [](float value) {
@@ -7924,6 +7947,12 @@ bool LoadTestPoint(int slot)
 				                                       0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
 				if (made != entity)
 				{
+					// Not on its old handle: don't leave the stray (it doubled Land 1's gate totems, the script making
+					// its own again for the handle it lost).
+					if (made != entt::null && registry.Valid(made))
+					{
+						registry.Destroy(made);
+					}
 					SPDLOG_LOGGER_WARN(spdlog::get("game"), "Test save point {}: couldn't remake object {} (type {})", slot, id,
 					                   record.type);
 					continue;

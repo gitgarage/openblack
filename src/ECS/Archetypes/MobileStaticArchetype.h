@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <entt/entity/entity.hpp>
 #include <entt/fwd.hpp>
 #include <glm/fwd.hpp>
 
@@ -25,7 +26,7 @@ class MobileStaticArchetype
 {
 public:
 	static entt::entity Create(const glm::vec3& position, MobileStaticInfo type, float altitude, float xAngleRadians,
-	                           float yAngleRadians, float zAngleRadians, float scale);
+	                           float yAngleRadians, float zAngleRadians, float scale, entt::entity hint = entt::null);
 	MobileStaticArchetype() = delete;
 };
 } // namespace openblack::ecs::archetypes

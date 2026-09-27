@@ -25,10 +25,12 @@ using namespace openblack::ecs::archetypes;
 using namespace openblack::ecs::components;
 
 entt::entity MobileStaticArchetype::Create(const glm::vec3& position, MobileStaticInfo type, float altitude,
-                                           float xAngleRadians, float yAngleRadians, float zAngleRadians, float scale)
+                                           float xAngleRadians, float yAngleRadians, float zAngleRadians, float scale,
+                                           entt::entity hint)
 {
 	auto& registry = Locator::entitiesRegistry::value();
-	const auto entity = registry.Create();
+	// On the given identifier when there is one (a test save point remaking a script's object keeps its handle).
+	const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
 
 	const auto& info = Locator::infoConstants::value().mobileStatic.at(static_cast<size_t>(type));
 
