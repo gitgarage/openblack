@@ -709,12 +709,16 @@ void GameThingClicked() // 016 GAME_THING_CLICKED
 	Pushb(clicked);
 }
 
+namespace
+{
+void HoldInScriptState(uint32_t object, int32_t state); // below, with HoldForScript
+} // namespace
+
 void SetScriptState() // 017 SET_SCRIPT_STATE
 {
-	[[maybe_unused]] const auto state = Pop().intVal;
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto state = Pop().intVal;
+	const auto object = Pop().uintVal;
+	HoldInScriptState(object, state);
 }
 
 void SetScriptStatePos() // 018 SET_SCRIPT_STATE_POS
@@ -738,8 +742,10 @@ void SetScriptUlong() // 020 SET_SCRIPT_ULONG
 	const auto loop = Pop().intVal;
 	const auto animation = Pop().intVal;
 	const auto object = Pop().uintVal;
-	// Plays `animation` (an AnimId) `loop` times; PLAYED reports when it has finished.
-	g_scriptAnimations[object] = {static_cast<uint32_t>(animation), static_cast<float>(std::max(loop, 1))};
+	// Plays `animation` (an AnimId) `loop` times, a negative count for ever (the lost brother's PDying, -1);
+	// PLAYED reports when it has finished.
+	g_scriptAnimations[object] = {static_cast<uint32_t>(animation),
+	                              loop < 0 ? std::numeric_limits<float>::max() : static_cast<float>(std::max(loop, 1))};
 	// Test hook: OPENBLACK_SHOT_ON_ANIM=<AnimId>:<ms>[,<ms>...]:<png path with %d> screenshots at those
 	// times into the animation (the %d becomes the ms).
 	for (const char* shot : {std::getenv("OPENBLACK_SHOT_ON_ANIM"), std::getenv("OPENBLACK_SHOT_ON_ANIM2")})
@@ -1120,6 +1126,26 @@ void HoldForScript(entt::entity entity, const glm::vec3& at)
 	}
 	registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
 	                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
+}
+
+// A script state takes a villager out of its own life: it stays where it is, playing what the script gave it
+// (Land 1's lost brother: SCRIPT_PLAY_ANIM, 200, lying sick with PDying looped) until RELEASE_FROM_SCRIPT.
+void HoldInScriptState(uint32_t object, int32_t state)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	if (object == 0 || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
+	{
+		return;
+	}
+	g_walks.erase(object);
+	g_scriptMoves.erase(object);
+	g_followers.erase(object);
+	if (registry.AllOf<WallHug, LivingAction>(entity))
+	{
+		HoldForScript(entity, registry.Get<Transform>(entity).position);
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SET_SCRIPT_STATE {} {}", object, state);
 }
 
 // Walk (or place) a game thing at a position. Returns false if the move was refused.
@@ -3514,11 +3540,14 @@ void HandCarry(const glm::vec3& handPosition)
 	}
 	registry.Get<openblack::ecs::components::Transform>(entity).position = position;
 	MoveBody(entity, position);
-	// A carried villager's walking goal goes with the hand: the pathfinder otherwise pulls it back each turn to
-	// where it was picked up, and it is let go of there (Land 1's lost brother vanished back to the woods).
+	// A carried villager's walking goal goes with the hand, and it has no step in hand for the pathfinder to put it
+	// back on: otherwise it is pulled back each turn to where it was picked up, and let go of there (Land 1's lost
+	// brother vanished back to the woods).
 	if (auto* wallHug = registry.TryGet<WallHug>(entity))
 	{
 		wallHug->goal = glm::vec2(position.x, position.z);
+		registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
+		                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
 	}
 	if (auto* move = registry.TryGet<ScriptMove>(entity))
 	{
@@ -3654,7 +3683,36 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 	if (!chosen)
 	{
 		const auto focus = Locator::camera::value().GetFocus();
-		const auto object = collect ? FindWoodNear(focus, 2000.0f) : FindObjectNear(focus, 200.0f);
+		auto object = collect ? FindWoodNear(focus, 2000.0f) : FindObjectNear(focus, 200.0f);
+		// OPENBLACK_TEST_PICKUP=sick: a villager no script or flock has, put in a script state lying sick as Land 1's
+		// lost brother is, then set down 3 away.
+		static const bool sick = std::string_view(std::getenv("OPENBLACK_TEST_PICKUP") != nullptr ? std::getenv("OPENBLACK_TEST_PICKUP") : "") == "sick";
+		if (sick)
+		{
+			object = 0;
+			float best = 1e12f;
+			Locator::entitiesRegistry::value().Each<const openblack::ecs::components::Villager, const Transform>(
+			    [&](entt::entity entity, const openblack::ecs::components::Villager& villager, const Transform& transform) {
+				    const auto id = static_cast<uint32_t>(entity);
+				    bool inFlock = false;
+				    for (const auto& [flockId, flock] : g_flocks)
+				    {
+					    inFlock = inFlock || flock.leader == id ||
+					              std::find(flock.members.begin(), flock.members.end(), id) != flock.members.end();
+				    }
+				    const float d = glm::distance(transform.position, focus);
+				    if (!inFlock && !g_scriptEntities.contains(id) && villager.lifeStage == openblack::ecs::components::Villager::LifeStage::Adult && d < best)
+				    {
+					    best = d;
+					    object = id;
+				    }
+			    });
+			if (object != 0)
+			{
+				g_scriptAnimations[object] = {static_cast<uint32_t>(AnimId::PDying), std::numeric_limits<float>::max()};
+				HoldInScriptState(object, 200);
+			}
+		}
 		if (object == 0)
 		{
 			return std::nullopt;
@@ -3709,7 +3767,8 @@ std::optional<std::pair<glm::vec3, bool>> TestPickupStep()
 	{
 		return std::make_pair(target, false); // release: still held
 	}
-	static const bool gentle = std::string_view(std::getenv("OPENBLACK_TEST_PICKUP") != nullptr ? std::getenv("OPENBLACK_TEST_PICKUP") : "") == "drop";
+	static const bool gentle = std::string_view(std::getenv("OPENBLACK_TEST_PICKUP") != nullptr ? std::getenv("OPENBLACK_TEST_PICKUP") : "") == "drop" ||
+	                           std::string_view(std::getenv("OPENBLACK_TEST_PICKUP") != nullptr ? std::getenv("OPENBLACK_TEST_PICKUP") : "") == "sick";
 	if (gentle && k > 1.5f && k < 1.6f)
 	{
 		const auto held = static_cast<entt::entity>(chosenObject());
@@ -4414,6 +4473,8 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		if (auto* wallHug = registry.TryGet<WallHug>(entity))
 		{
 			wallHug->goal = glm::vec2(position.x, position.z);
+			registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
+			                MoveStateFinalStepTag, MoveStateArrivedTag, WallHugObjectReference>(entity);
 		}
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Landed {} at ({:.1f}, {:.1f}, {:.1f})", it->first, position.x, position.y,
 		                   position.z);
