@@ -481,6 +481,44 @@ namespace
 // comes with every type), and a negative one is taken the same way.
 constexpr int k_AnySubtype = 5000;
 
+// Objects a search excluding scripted ones skips (set around the search, see ScriptedObjects).
+const std::unordered_set<uint32_t>* g_searchExcludes = nullptr;
+
+// The objects scripts hold: ids in a running task's variables or the globals. A script taking an object as an
+// argument keeps it (Land 1's SetupSculptor runs KeepRockScripted on each rock by the sculptor, then asks CALL_NEAR,
+// excluding scripted ones, for the next - with this ignored it found the same rock for ever).
+std::unordered_set<uint32_t> ScriptedObjects()
+{
+	std::unordered_set<uint32_t> held;
+	auto add = [&held](const openblack::lhvm::VMVar& var) {
+		if (var.type == openblack::lhvm::DataType::Float)
+		{
+			if (var.value.floatVal >= 1.0f && var.value.floatVal < 4294967296.0f &&
+			    var.value.floatVal == std::floor(var.value.floatVal))
+			{
+				held.insert(static_cast<uint32_t>(var.value.floatVal));
+			}
+		}
+		else if (var.type == openblack::lhvm::DataType::Object || var.type == openblack::lhvm::DataType::Int)
+		{
+			held.insert(var.value.uintVal);
+		}
+	};
+	const auto& vm = Locator::vm::value();
+	for (const auto& var : vm.GetVariables())
+	{
+		add(var);
+	}
+	for (const auto& [id, task] : vm.GetTasks())
+	{
+		for (const auto& var : task.localVars)
+		{
+			add(var);
+		}
+	}
+	return held;
+}
+
 bool SubtypeMatches(int wanted, int actual)
 {
 	return wanted == k_AnySubtype || wanted < 0 || wanted == actual;
@@ -491,7 +529,8 @@ void NearestOf(int subtype, const glm::vec3& position, float& bestDistance2, ent
 {
 	Locator::entitiesRegistry::value().Each<const Component, const Transform>(
 	    [&](entt::entity entity, const Component& component, const Transform& transform) {
-		    if (!SubtypeMatches(subtype, subtypeOf(component)))
+		    if (!SubtypeMatches(subtype, subtypeOf(component)) ||
+		        (g_searchExcludes != nullptr && g_searchExcludes->contains(static_cast<uint32_t>(entity))))
 		    {
 			    return;
 		    }
@@ -1030,12 +1069,15 @@ void GetDistance() // 025 GET_DISTANCE
 
 void Call() // 026 CALL
 {
-	[[maybe_unused]] const auto excludingScripted = static_cast<bool>(Pop().intVal);
+	const auto excludingScripted = static_cast<bool>(Pop().intVal);
 	const auto position = PopVec();
 	const auto subtype = Pop().intVal;
 	const auto type = Pop().intVal;
 	// "call <type> at <position>": the object at that spot - nearest within a small radius.
+	const auto scripted = excludingScripted ? ScriptedObjects() : std::unordered_set<uint32_t> {};
+	g_searchExcludes = excludingScripted ? &scripted : nullptr;
 	const auto object = FindNearestScriptObject(type, subtype, position, 20.0f);
+	g_searchExcludes = nullptr;
 	Pusho(object == entt::null ? 0 : static_cast<uint32_t>(object));
 }
 
@@ -1442,12 +1484,15 @@ void PositionFollow() // 050 POSITION_FOLLOW
 
 void CallNear() // 051 CALL_NEAR
 {
-	[[maybe_unused]] const auto excludingScripted = static_cast<bool>(Pop().intVal);
+	const auto excludingScripted = static_cast<bool>(Pop().intVal);
 	const auto radius = Popf();
 	const auto position = PopVec();
 	const auto subtype = Pop().intVal;
 	const auto type = Pop().intVal;
+	const auto scripted = excludingScripted ? ScriptedObjects() : std::unordered_set<uint32_t> {};
+	g_searchExcludes = excludingScripted ? &scripted : nullptr;
 	const auto object = FindNearestScriptObject(type, subtype, position, radius);
+	g_searchExcludes = nullptr;
 	Pusho(object == entt::null ? 0 : static_cast<uint32_t>(object));
 }
 
@@ -4190,7 +4235,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	UpdateBuilders(seconds);
 	// Sparkles: each keeps a few glitter sprites falling through what it is on, looping back to the top.
 	{
-		constexpr int k_SparklesEach = 14;
+		constexpr int k_SparklesEach = 4; // just a few, for now
 		constexpr float k_ColumnTop = 9.0f;    // above the object
 		constexpr float k_ColumnBottom = -1.0f; // below it
 		constexpr float k_FallSpeed = 2.5f;
