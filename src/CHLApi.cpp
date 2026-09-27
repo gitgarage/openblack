@@ -4120,7 +4120,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			{
 				for (const auto sprite : sparkler.sprites)
 				{
-					if (registry.Valid(sprite))
+					if (registry.Valid(sprite) && registry.AllOf<openblack::ecs::components::Sprite>(sprite))
 					{
 						registry.Destroy(sprite);
 					}
@@ -4133,6 +4133,19 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 				continue;
 			}
 			const auto centre = registry.Get<Transform>(target).position;
+			// A sprite something else destroyed (or whose id went to something else) is made again: reading it crashed
+			// the Switch.
+			for (size_t i = 0; i < sparkler.sprites.size();)
+			{
+				const auto sprite = sparkler.sprites[i];
+				if (registry.Valid(sprite) && registry.AllOf<openblack::ecs::components::Sprite, Transform>(sprite))
+				{
+					++i;
+					continue;
+				}
+				sparkler.sprites.erase(sparkler.sprites.begin() + static_cast<std::ptrdiff_t>(i));
+				sparkler.phases.erase(sparkler.phases.begin() + static_cast<std::ptrdiff_t>(i));
+			}
 			while (sparkler.sprites.size() < k_SparklesEach)
 			{
 				const auto i = sparkler.sprites.size();
