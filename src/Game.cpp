@@ -322,6 +322,7 @@ bool Game::GameLogicLoop() noexcept
 
 	auto& lhvm = Locator::vm::value();
 	lhvm.LookIn(lhvm::ScriptType::All);
+	chlapi::EndScriptTurn();
 	if (std::getenv("OPENBLACK_TRACE_VM") != nullptr && _turnCount % 50 == 0) // temporary diagnostic
 	{
 		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "VM turn {}: {} task(s), camera origin ({:.0f}, {:.0f}, {:.0f}){}",

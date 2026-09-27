@@ -405,6 +405,11 @@ constexpr auto k_TextReadTime = std::chrono::seconds(2);
 uint32_t g_clickedThing = 0;
 } // namespace
 
+void EndScriptTurn()
+{
+	g_clickedThing = 0; // a click lasts one script turn
+}
+
 void NotifyGameThingClicked(uint32_t entity)
 {
 	g_clickedThing = entity;
@@ -717,11 +722,10 @@ void TextRead() // 015 TEXT_READ
 void GameThingClicked() // 016 GAME_THING_CLICKED
 {
 	const auto object = Pop().uintVal;
+	// Every script asking during the turn after the click sees it (EndScriptTurn clears it): each scroll is asked
+	// about by its ChallengeHighlightNotify and by its challenge, and taking the click away at the first question
+	// left the challenge never seeing it.
 	const bool clicked = object != 0 && object == g_clickedThing;
-	if (clicked)
-	{
-		g_clickedThing = 0;
-	}
 	Pushb(clicked);
 }
 

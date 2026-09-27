@@ -44,6 +44,8 @@ private:
 // The player clicked a game object (the entity id under the cursor at a left-button press).
 // GAME_THING_CLICKED reports it once to the script that asks about that object.
 void NotifyGameThingClicked(uint32_t entity);
+// After the scripts' turn: what was clicked before it has been seen by all of them.
+void EndScriptTurn();
 uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction);
 // A long press on a scroll (screen position 0..1 each way) clicks it; false if there is none there.
 bool ClickScrollAt(glm::vec2 screen);
