@@ -486,24 +486,26 @@ const std::unordered_set<uint32_t>* g_searchExcludes = nullptr;
 
 // The objects scripts hold: ids in a running task's variables or the globals. A script taking an object as an
 // argument keeps it (Land 1's SetupSculptor runs KeepRockScripted on each rock by the sculptor, then asks CALL_NEAR,
-// excluding scripted ones, for the next - with this ignored it found the same rock for ever).
+// excluding scripted ones, for the next - with this ignored it found the same rock for ever). A task just started
+// by RUN still has its arguments on its stack, not yet in its variables, so those count too: without them
+// SetupSculptor's loop, which never yields, found the rock handed to the newest KeepRockScripted again and again.
 std::unordered_set<uint32_t> ScriptedObjects()
 {
 	std::unordered_set<uint32_t> held;
-	auto add = [&held](const openblack::lhvm::VMVar& var) {
-		if (var.type == openblack::lhvm::DataType::Float)
+	auto addValue = [&held](openblack::lhvm::DataType type, const openblack::lhvm::VMValue& value) {
+		if (type == openblack::lhvm::DataType::Float)
 		{
-			if (var.value.floatVal >= 1.0f && var.value.floatVal < 4294967296.0f &&
-			    var.value.floatVal == std::floor(var.value.floatVal))
+			if (value.floatVal >= 1.0f && value.floatVal < 4294967296.0f && value.floatVal == std::floor(value.floatVal))
 			{
-				held.insert(static_cast<uint32_t>(var.value.floatVal));
+				held.insert(static_cast<uint32_t>(value.floatVal));
 			}
 		}
-		else if (var.type == openblack::lhvm::DataType::Object || var.type == openblack::lhvm::DataType::Int)
+		else if (type == openblack::lhvm::DataType::Object || type == openblack::lhvm::DataType::Int)
 		{
-			held.insert(var.value.uintVal);
+			held.insert(value.uintVal);
 		}
 	};
+	auto add = [&addValue](const openblack::lhvm::VMVar& var) { addValue(var.type, var.value); };
 	const auto& vm = Locator::vm::value();
 	for (const auto& var : vm.GetVariables())
 	{
@@ -514,6 +516,10 @@ std::unordered_set<uint32_t> ScriptedObjects()
 		for (const auto& var : task.localVars)
 		{
 			add(var);
+		}
+		for (uint32_t i = 0; i < task.stack.count; i++)
+		{
+			addValue(task.stack.types.at(i), task.stack.values.at(i));
 		}
 	}
 	return held;
