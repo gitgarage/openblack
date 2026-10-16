@@ -287,6 +287,14 @@ bool Game::ProcessEvents(const SDL_Event& event) noexcept
 	return true;
 }
 
+void Game::ChangePlaySpeed(float factor)
+{
+	constexpr float k_Slowest = 0.125f;
+	constexpr float k_Fastest = 8.0f;
+	_playSpeed = std::clamp(_playSpeed * factor, k_Slowest, k_Fastest);
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Play speed x{}", _playSpeed);
+}
+
 bool Game::GameLogicLoop() noexcept
 {
 	using namespace ecs::components;
@@ -299,7 +307,7 @@ bool Game::GameLogicLoop() noexcept
 
 	const auto currentTime = std::chrono::steady_clock::now();
 	const auto delta = currentTime - _lastGameLoopTime;
-	const auto turnDuration = k_TurnDuration * _gameSpeedMultiplier;
+	const auto turnDuration = std::chrono::duration_cast<std::chrono::steady_clock::duration>(k_TurnDuration * _gameSpeedMultiplier / _playSpeed);
 	// NOLINTNEXTLINE(modernize-use-nullptr): clang-tidy bug
 	if (delta < turnDuration)
 	{
@@ -367,7 +375,7 @@ bool Game::Update() noexcept
 	{
 		current = previous;
 	}
-	auto deltaTime = std::chrono::duration_cast<std::chrono::microseconds>(current - previous);
+	auto deltaTime = std::chrono::duration_cast<std::chrono::microseconds>((current - previous) * _playSpeed);
 
 	Locator::debugGui::value().SetScale(config.guiScale);
 

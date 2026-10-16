@@ -89,6 +89,11 @@ public:
 	void SetTime(float time) noexcept;
 	void SetGameSpeed(float multiplier) { _gameSpeedMultiplier = multiplier; }
 	[[nodiscard]] float GetGameSpeed() const { return _gameSpeedMultiplier; }
+	// How fast the whole game plays, for the player to hurry through or slow down (1 = normal; 2 = twice as fast).
+	// Unlike the scripts' game speed above, it also speeds up the frame time: the camera, animations and the
+	// scripts' clock.
+	void ChangePlaySpeed(float factor);
+	[[nodiscard]] float GetPlaySpeed() const { return _playSpeed; }
 
 	[[nodiscard]] uint32_t GetTurn() const { return _turnCount; }
 	[[nodiscard]] bool IsPaused() const { return _paused; }
@@ -110,6 +115,7 @@ private:
 	std::chrono::steady_clock::time_point _lastGameLoopTime;
 	std::chrono::steady_clock::duration _turnDeltaTime;
 	float _gameSpeedMultiplier {1.0f};
+	float _playSpeed {1.0f};
 	uint32_t _frameCount {0};
 	uint32_t _turnCount {0};
 	bool _paused {true};

@@ -289,9 +289,12 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 			return static_cast<entt::entity>(0);
 		}
 		// Unowned until a script gives it to a player (CREATURE_SET_PLAYER), standing on the land.
+		// An estimate, to check against the original: the meshes are 15-26 units tall, but the glade's first
+		// close-up puts the camera 16 units from the creature it shows, which fits one of about 9.
+		constexpr float k_NewCreatureScale = 0.4f;
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
 		return CreatureArchetype::Create(glm::vec3(position.x, ground, position.z), PlayerNames::NEUTRAL, species->second,
-		                                 0, yAngleRadians, scale, hint);
+		                                 0, yAngleRadians, scale * k_NewCreatureScale, hint);
 	}
 	case ObjectType::Villager:
 	case ObjectType::VillagerChild:
@@ -414,9 +417,17 @@ std::unordered_map<uint32_t, glm::vec3> g_flying;
 // When the current SET_FADE / SET_FADE_IN finishes.
 std::chrono::steady_clock::time_point g_fadeEnd {};
 
+// The scripts' clock: real time scaled by the play speed (UpdateScriptFrame advances it by the game's frame time),
+// so dialogue, fades and script timers keep pace when the game is sped up or slowed down.
+std::chrono::steady_clock::time_point g_scriptClock = std::chrono::steady_clock::now();
+std::chrono::steady_clock::time_point ScriptNow()
+{
+	return g_scriptClock;
+}
+
 void StartFade(float seconds)
 {
-	g_fadeEnd = std::chrono::steady_clock::now() +
+	g_fadeEnd = ScriptNow() +
 	            std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<float>(std::max(seconds, 0.0f)));
 }
 constexpr auto k_TextReadTime = std::chrono::seconds(2);
@@ -796,7 +807,7 @@ void RunText() // 013 RUN_TEXT
 	[[maybe_unused]] const auto singleLine = static_cast<bool>(Pop().intVal);
 	// No text display yet: the line is logged, and TEXT_READ reports it read after k_TextReadTime.
 	g_lastTextId = textID;
-	g_lastTextShown = std::chrono::steady_clock::now();
+	g_lastTextShown = ScriptNow();
 	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "RUN_TEXT: text {}", textID);
 }
 
@@ -811,7 +822,7 @@ void TempText() // 014 TEMP_TEXT
 
 void TextRead() // 015 TEXT_READ
 {
-	const bool read = g_lastTextId < 0 || std::chrono::steady_clock::now() - g_lastTextShown >= k_TextReadTime;
+	const bool read = g_lastTextId < 0 || ScriptNow() - g_lastTextShown >= k_TextReadTime;
 	Pushb(read);
 }
 
@@ -2452,7 +2463,7 @@ void SetTimerTime() // 145 SET_TIMER_TIME
 {
 	const auto time = Popf();
 	const auto timer = Pop().uintVal;
-	g_timers[timer] = std::chrono::steady_clock::now() +
+	g_timers[timer] = ScriptNow() +
 	                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<float>(std::max(time, 0.0f)));
 }
 
@@ -2460,7 +2471,7 @@ void CreateTimer() // 146 CREATE_TIMER
 {
 	const auto timeout = Popf();
 	const auto timer = g_nextTimer++;
-	g_timers[timer] = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+	g_timers[timer] = ScriptNow() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 	                                                        std::chrono::duration<float>(std::max(timeout, 0.0f)));
 	Pusho(timer);
 }
@@ -2470,7 +2481,7 @@ void GetTimerTimeRemaining() // 147 GET_TIMER_TIME_REMAINING
 	const auto timer = Pop().uintVal;
 	const auto it = g_timers.find(timer);
 	const float remaining =
-	    it == g_timers.end() ? 0.0f : std::chrono::duration<float>(it->second - std::chrono::steady_clock::now()).count();
+	    it == g_timers.end() ? 0.0f : std::chrono::duration<float>(it->second - ScriptNow()).count();
 	Pushf(std::max(remaining, 0.0f));
 }
 
@@ -2895,6 +2906,32 @@ const openblack::morphposes::Poses& CreaturePoses(CreatureType species)
 	return it->second;
 }
 
+// The creature animations in Data/ctrspec27.txt's order, without the spec's one-letter prefix: a script's creature
+// animation number (SET_SCRIPT_ULONG on a creature) is its place in this list - Land 1's glade asks for 69
+// look_at_me, 74 pick_me, 72 friendly_wave, 55 happy.
+const std::vector<std::string>& CreatureAnimationNames()
+{
+	static const auto names = [] {
+		std::vector<std::string> list;
+		std::ifstream spec(Locator::filesystem::value().GetPath<openblack::filesystem::Path::Data>() / "ctrspec27.txt");
+		std::string line;
+		std::getline(spec, line); // the spec version
+		while (std::getline(spec, line))
+		{
+			while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+			{
+				line.pop_back();
+			}
+			if (line.size() > 1 && line.front() != '=')
+			{
+				list.push_back(line.substr(1));
+			}
+		}
+		return list;
+	}();
+	return names;
+}
+
 // What each creature is playing: the pose's name in its CBN (ctrspec27.txt's names) and how far into it.
 struct CreaturePlaying
 {
@@ -2992,8 +3029,32 @@ void UpdateAnimations(float seconds)
 	registry.Each<const openblack::ecs::components::Creature, const Mesh>(
 	    [&registry, seconds](entt::entity entity, const openblack::ecs::components::Creature& creature, const Mesh& mesh) {
 		    const auto& poses = CreaturePoses(creature.species);
-		    auto& playing = g_creaturePlaying.try_emplace(static_cast<uint32_t>(entity), CreaturePlaying {"stand", 0.0f})
-		                        .first->second;
+		    const auto id = static_cast<uint32_t>(entity);
+		    auto& playing = g_creaturePlaying.try_emplace(id, CreaturePlaying {"stand", 0.0f}).first->second;
+		    // A script's animation while it plays (PLAYED waits on it), then back to standing. One this species
+		    // has no pose for counts as played at once, so a script waiting on it carries on.
+		    auto scripted = g_scriptAnimations.find(id);
+		    std::string wanted = "stand";
+		    if (scripted != g_scriptAnimations.end())
+		    {
+			    const auto& names = CreatureAnimationNames();
+			    const auto number = scripted->second.animation;
+			    if (number < names.size() && poses.contains(names[number]))
+			    {
+				    wanted = names[number];
+			    }
+			    else
+			    {
+				    SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "Creature {} has no animation {} ({})", id, number,
+				                       number < names.size() ? names[number] : "past the spec's list");
+				    g_scriptAnimations.erase(scripted);
+				    scripted = g_scriptAnimations.end();
+			    }
+		    }
+		    if (playing.pose != wanted)
+		    {
+			    playing = {wanted, 0.0f};
+		    }
 		    const auto pose = poses.find(playing.pose);
 		    const auto& meshes = Locator::resources::value().GetMeshes();
 		    if (pose == poses.end() || pose->second.keyframes.empty() || !meshes.Contains(mesh.id))
@@ -3001,7 +3062,16 @@ void UpdateAnimations(float seconds)
 			    return;
 		    }
 		    const auto frames = static_cast<float>(pose->second.keyframes.size());
-		    playing.frame = std::fmod(playing.frame + seconds * k_CreatureFramesPerSecond, frames);
+		    playing.frame += seconds * k_CreatureFramesPerSecond;
+		    if (playing.frame >= frames)
+		    {
+			    playing.frame = std::fmod(playing.frame, frames);
+			    if (scripted != g_scriptAnimations.end() && --scripted->second.playsLeft <= 0.0f)
+			    {
+				    g_scriptAnimations.erase(scripted); // PLAYED now reports it finished
+				    playing = {"stand", 0.0f};
+			    }
+		    }
 		    auto bones = openblack::morphposes::LocalBones(*meshes.Handle(mesh.id), pose->second, playing.frame, true);
 		    if (!bones.empty())
 		    {
@@ -4362,6 +4432,7 @@ void UpdateBuilders(float seconds)
 
 void UpdateScriptFrame(std::chrono::microseconds dt)
 {
+	g_scriptClock += std::chrono::duration_cast<std::chrono::steady_clock::duration>(dt);
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
 	auto& registry = Locator::entitiesRegistry::value();
 	UpdateBuilders(seconds);
@@ -5360,7 +5431,7 @@ void SetFadeIn() // 242 SET_FADE_IN
 
 void FadeFinished() // 243 FADE_FINISHED
 {
-	Pushb(std::chrono::steady_clock::now() >= g_fadeEnd);
+	Pushb(ScriptNow() >= g_fadeEnd);
 }
 
 void SetPlayerMagic() // 244 SET_PLAYER_MAGIC
@@ -7973,7 +8044,7 @@ bool SaveTestPoint(int slot)
 	}
 
 	std::ofstream out(dir / "state.txt");
-	const auto now = std::chrono::steady_clock::now();
+	const auto now = ScriptNow();
 	const auto& camera = Locator::camera::value();
 	out << fmt::format("camera {} {} {} {} {} {} {}\n", camera.GetOrigin().x, camera.GetOrigin().y, camera.GetOrigin().z,
 	                   camera.GetFocus().x, camera.GetFocus().y, camera.GetFocus().z, camera.IsScriptControlled() ? 1 : 0);
@@ -8091,7 +8162,7 @@ bool LoadTestPoint(int slot)
 	g_pedestalStones.clear();
 	g_openedStatics.clear();
 	g_gameTimeMove.reset();
-	const auto now = std::chrono::steady_clock::now();
+	const auto now = ScriptNow();
 	auto seconds = [](float value) {
 		return std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<float>(value));
 	};

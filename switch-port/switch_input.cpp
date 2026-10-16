@@ -24,12 +24,15 @@
 //   D-pad up / left       -> save test point 1 / 2 (keypad 1 / 2)
 //   D-pad down / right    -> load test point 1 / 2 (keypad 3 / 4)
 //   B                     -> leave the Temple
+//   Right stick press     -> play twice as fast (again for faster still, up to x8)
+//   Left stick press      -> play half as fast (down to x1/8)
 #include <cstdlib>
 
 #include <SDL.h>
 #include <switch.h>
 
 #include "CHLApi.h"
+#include "Game.h"
 #include "Camera/DefaultWorldCameraModel.h"
 
 namespace
@@ -215,6 +218,21 @@ void switchInputFrame()
 		openblack::chlapi::ExitTemple();
 	}
 	s_bWasDown = bDown;
+	// Play speed, for hurrying through cutscenes: each press of a stick doubles (right) or halves (left) it.
+	static u64 s_sticksWere = 0;
+	const u64 sticks = held & (HidNpadButton_StickR | HidNpadButton_StickL);
+	if (auto* game = openblack::Game::Instance(); game != nullptr)
+	{
+		if ((sticks & ~s_sticksWere & HidNpadButton_StickR) != 0)
+		{
+			game->ChangePlaySpeed(2.0f);
+		}
+		if ((sticks & ~s_sticksWere & HidNpadButton_StickL) != 0)
+		{
+			game->ChangePlaySpeed(0.5f);
+		}
+	}
+	s_sticksWere = sticks;
 
 	const u64 now = armTicksToNs(armGetSystemTick());
 	const bool zr = (held & HidNpadButton_ZR) != 0;
