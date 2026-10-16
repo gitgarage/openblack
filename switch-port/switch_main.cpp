@@ -17,7 +17,8 @@
 #include <vector>
 
 extern "C" int __real_main(int argc, char** argv);
-void startUpdateListener(); // switch_update.cpp
+void startUpdateListener();                // switch_update.cpp
+bool stopUpdateListener(unsigned timeoutMs); // switch_update.cpp
 extern "C" void* __real_malloc(size_t size);
 extern "C" void* __real_calloc(size_t count, size_t size);
 extern "C" void* __real_realloc(void* ptr, size_t size);
@@ -209,7 +210,16 @@ extern "C" int __wrap_main(int argc, char** argv)
 	g_memRunning = false;
 	threadWaitForExit(&g_memThread);
 	threadClose(&g_memThread);
-	atlasLinkExit();
+	// The update listener must be off the link before it closes (see switch_update.cpp). If it is still blocked,
+	// the link is left open rather than hang or crash the exit - the loader can still start the next build.
+	if (stopUpdateListener(5000))
+	{
+		atlasLinkExit();
+	}
+	else
+	{
+		printf("[update] the listener is still waiting on the link: leaving the link open\n");
+	}
 	if (g_logFile != nullptr)
 	{
 		fclose(g_logFile);

@@ -20,6 +20,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstdarg>
 #include <cstdio>
@@ -58,6 +59,12 @@ unsigned long crc32(unsigned long crc, const u8* data, size_t len)
 	}
 	return c ^ 0xFFFFFFFFu;
 }
+
+// Set at exit: the listener stops at its next line. Its read can't be interrupted, and closing the link under it
+// hung the exit (usbComms, straight to the laptop) or crashed it (through the tablet), so the new build never
+// started: the laptop keeps sending blank lines after "installed" for the listener to wake on.
+std::atomic<bool> g_stop {false};
+std::atomic<bool> g_stopped {false};
 
 u8 g_in[0x4000];
 size_t g_inPos = 0;
@@ -163,7 +170,7 @@ void listen(void*)
 	Transfer t;
 	std::vector<u8> chunk(k_MaxChunk);
 	std::string line;
-	while (true)
+	while (!g_stop)
 	{
 		if (!readLine(line))
 		{
@@ -251,10 +258,32 @@ void listen(void*)
 			restart();
 		}
 	}
+	if (t.file != nullptr)
+	{
+		std::fclose(t.file);
+	}
+	g_stopped = true;
 }
 
 Thread g_thread;
 } // namespace
+
+// At exit, before the link closes: true once the listener has stopped (within timeoutMs).
+bool stopUpdateListener(unsigned timeoutMs)
+{
+	g_stop = true;
+	for (unsigned waited = 0; !g_stopped && waited < timeoutMs; waited += 50)
+	{
+		svcSleepThread(50'000'000ULL);
+	}
+	if (!g_stopped)
+	{
+		return false;
+	}
+	threadWaitForExit(&g_thread);
+	threadClose(&g_thread);
+	return true;
+}
 
 void startUpdateListener()
 {

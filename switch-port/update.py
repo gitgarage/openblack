@@ -102,6 +102,14 @@ def main():
     reply = link.wait(nonce, 60)
     if not reply or reply[0] != 'installed':
         sys.exit(f'not installed: {" ".join(reply) if reply else "no answer"}')
+    # Blank lines for a while: openblack's listener is blocked reading, and stops (so the link can close and the
+    # new build start) when the next line wakes it.
+    for _ in range(40):
+        try:
+            link.send(b'\n')
+        except OSError:
+            break
+        time.sleep(0.2)
     print(f'installed {len(data)} bytes (crc {crc:08x}) in {time.monotonic() - start:.0f}s; openblack is restarting into it')
 
 
