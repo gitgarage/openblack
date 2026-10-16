@@ -512,6 +512,195 @@ bool ClickScrollAt(glm::vec2 screen)
 	return scroll != 0;
 }
 
+// --- Rewarding and punishing the creature ------------------------------------------------------------------------
+// The original's locked interaction: the action button held with the hand on your creature turns the camera to face
+// it; a quick swipe across it is a slap, slow movement over it a stroke. Land 1's punishment lesson (Sable) reads
+// GET_INTERACTION_MAGNITUDE every 2 s and waits for it to change - below 0 a slap, above 0 a stroke - and
+// IS_LOCKED_INTERACTION to prompt you once you face it.
+struct CreatureInteraction
+{
+	uint32_t creature = 0;
+	glm::vec2 lastScreen {};
+	bool haveLast = false;
+	float strokeSeconds = 0.0f;
+	float sinceSlap = 10.0f;
+	glm::vec3 savedOrigin {};
+	glm::vec3 savedFocus {};
+	bool cameraWasScripted = false;
+};
+std::optional<CreatureInteraction> g_interaction;
+std::unordered_map<uint32_t, float> g_interactionMagnitude; // the last slap (<0) or stroke (>0) each creature had
+
+// Where along the ray it enters the creature's box, and how high on the creature that is (0 its feet, 1 its head).
+std::optional<std::pair<float, float>> CreatureRayHit(entt::entity entity, const glm::vec3& origin, const glm::vec3& direction)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto& meshes = Locator::resources::value().GetMeshes();
+	const auto* mesh = registry.Valid(entity) ? registry.TryGet<openblack::ecs::components::Mesh>(entity) : nullptr;
+	const auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+	if (mesh == nullptr || transform == nullptr || !meshes.Contains(mesh->id))
+	{
+		return std::nullopt;
+	}
+	const auto box = meshes.Handle(mesh->id)->GetBoundingBox();
+	const auto toLocal = glm::transpose(transform->rotation);
+	const auto localOrigin = toLocal * (origin - transform->position) / transform->scale;
+	const auto localAlong = toLocal * glm::normalize(direction) / transform->scale;
+	float enter = 0.0f;
+	float leave = std::numeric_limits<float>::max();
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		if (std::abs(localAlong[axis]) < 1e-6f)
+		{
+			if (localOrigin[axis] < box.minima[axis] || localOrigin[axis] > box.maxima[axis])
+			{
+				return std::nullopt;
+			}
+			continue;
+		}
+		float near = (box.minima[axis] - localOrigin[axis]) / localAlong[axis];
+		float far = (box.maxima[axis] - localOrigin[axis]) / localAlong[axis];
+		if (near > far)
+		{
+			std::swap(near, far);
+		}
+		enter = std::max(enter, near);
+		leave = std::min(leave, far);
+	}
+	if (enter > leave)
+	{
+		return std::nullopt;
+	}
+	const float y = (localOrigin + localAlong * enter).y;
+	return std::pair {enter, std::clamp((y - box.minima.y) / std::max(box.maxima.y - box.minima.y, 1e-3f), 0.0f, 1.0f)};
+}
+
+// The creature player one owns. With none owned but only one creature on the land, that one: test save points
+// from before creatures' owners were saved (2026-10-16) remake the chosen creature unowned.
+uint32_t PlayersCreature()
+{
+	uint32_t found = 0;
+	uint32_t only = 0;
+	int count = 0;
+	Locator::entitiesRegistry::value().Each<openblack::ecs::components::Creature>(
+	    [&](entt::entity entity, openblack::ecs::components::Creature& creature) {
+		    ++count;
+		    only = static_cast<uint32_t>(entity);
+		    if (found == 0 && creature.owner == PlayerNames::PLAYER_ONE)
+		    {
+			    found = static_cast<uint32_t>(entity);
+		    }
+	    });
+	if (found == 0 && count == 1)
+	{
+		auto& registry = Locator::entitiesRegistry::value();
+		registry.Get<openblack::ecs::components::Creature>(static_cast<entt::entity>(only)).owner = PlayerNames::PLAYER_ONE;
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature {} is the only one: taken as the player's", only);
+		found = only;
+	}
+	return found;
+}
+
+bool BeginCreatureInteraction(const glm::vec3& origin, const glm::vec3& direction)
+{
+	const auto creature = PlayersCreature();
+	const auto entity = static_cast<entt::entity>(creature);
+	if (creature == 0 || !CreatureRayHit(entity, origin, direction))
+	{
+		return false;
+	}
+	auto& registry = Locator::entitiesRegistry::value();
+	auto& camera = Locator::camera::value();
+	const auto& transform = registry.Get<Transform>(entity);
+	const auto& mesh = registry.Get<openblack::ecs::components::Mesh>(entity);
+	const float height = Locator::resources::value().GetMeshes().Handle(mesh.id)->GetBoundingBox().Size().y * transform.scale.y;
+	CreatureInteraction interaction;
+	interaction.creature = creature;
+	interaction.savedOrigin = camera.GetOrigin();
+	interaction.savedFocus = camera.GetFocus();
+	interaction.cameraWasScripted = camera.IsScriptControlled();
+	g_interaction = interaction;
+	// In front of it, a little above its middle, looking at it (its front taken as the model's -Z, as everywhere).
+	const auto front = transform.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+	camera.SetScriptControl(true);
+	camera.SetOrigin(transform.position + front * height * 1.4f + glm::vec3(0.0f, height * 0.6f, 0.0f));
+	camera.SetFocus(transform.position + glm::vec3(0.0f, height * 0.5f, 0.0f));
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature interaction with {} begins", creature);
+	return true;
+}
+
+bool InCreatureInteraction()
+{
+	return g_interaction.has_value();
+}
+
+void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin, const glm::vec3& direction,
+                               std::chrono::microseconds dt)
+{
+	if (!g_interaction)
+	{
+		return;
+	}
+	constexpr float k_SlapSpeed = 2.5f;     // screen widths a second: faster is a slap
+	constexpr float k_StrokeSpeed = 0.05f;  // ...slower than this is the hand at rest
+	constexpr float k_SlapEvery = 0.5f;     // seconds between slaps one swipe can make
+	constexpr float k_FullStroke = 3.0f;    // seconds of stroking for the most a stroke gives
+	auto& interaction = *g_interaction;
+	const float seconds = std::max(std::chrono::duration<float>(dt).count(), 1e-4f);
+	interaction.sinceSlap += seconds;
+	const float speed = interaction.haveLast ? glm::length(screen - interaction.lastScreen) / seconds : 0.0f;
+	interaction.lastScreen = screen;
+	interaction.haveLast = true;
+	const auto entity = static_cast<entt::entity>(interaction.creature);
+	const auto hit = CreatureRayHit(entity, origin, direction);
+	if (!hit)
+	{
+		return;
+	}
+	const auto id = interaction.creature;
+	if (speed > k_SlapSpeed && interaction.sinceSlap > k_SlapEvery)
+	{
+		interaction.sinceSlap = 0.0f;
+		const float strength = std::min(speed / (k_SlapSpeed * 2.0f), 1.0f);
+		g_interactionMagnitude[id] = -strength;
+		// The slap where it landed: head, waist or feet (ctrspec27.txt 165/167/169; only the right-hand ones so far).
+		const uint32_t animation = hit->second > 0.66f ? 165u : hit->second > 0.33f ? 167u : 169u;
+		g_scriptAnimations[id] = {animation, 1.0f};
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Slap on creature {}: {:.2f} ({})", id, -strength,
+		                   animation == 165 ? "head" : animation == 167 ? "waist" : "feet");
+	}
+	else if (speed > k_StrokeSpeed && speed <= k_SlapSpeed * 0.5f)
+	{
+		interaction.strokeSeconds += seconds;
+		const float strength = std::min(interaction.strokeSeconds / k_FullStroke, 1.0f);
+		// Whole steps, so the lesson's every-2-seconds check sees a change it can act on, not a creep.
+		const float stepped = std::ceil(strength * 4.0f) / 4.0f;
+		if (g_interactionMagnitude[id] != stepped)
+		{
+			g_interactionMagnitude[id] = stepped;
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Stroke on creature {}: {:.2f}", id, stepped);
+		}
+		if (g_scriptAnimations.find(id) == g_scriptAnimations.end())
+		{
+			g_scriptAnimations[id] = {100u, 1.0f}; // stroke
+		}
+	}
+}
+
+void EndCreatureInteraction()
+{
+	if (!g_interaction)
+	{
+		return;
+	}
+	auto& camera = Locator::camera::value();
+	camera.SetOrigin(g_interaction->savedOrigin);
+	camera.SetFocus(g_interaction->savedFocus);
+	camera.SetScriptControl(g_interaction->cameraWasScripted);
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature interaction with {} ends", g_interaction->creature);
+	g_interaction.reset();
+}
+
 uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
 {
 	constexpr float k_ScrollReach = 5.0f;
@@ -5403,16 +5592,24 @@ void SpellAtPos() // 196 SPELL_AT_POS
 void CallPlayerCreature() // 197 CALL_PLAYER_CREATURE
 {
 	// The creature the player owns (CREATURE_SET_PLAYER gave it to them), or 0 before one is chosen. Land 1's
-	// creature lessons ask this every turn: unanswered, none of them ever found the chosen creature.
-	const auto player = static_cast<PlayerNames>(static_cast<int>(Popf()));
+	// creature lessons ask this every turn: unanswered, none of them ever found the chosen creature. The scripts
+	// number players from 1 (the lessons ask for 1.0, "you"); PlayerNames counts from 0.
+	const auto player = static_cast<PlayerNames>(static_cast<int>(Popf()) - 1);
 	uint32_t found = 0;
-	Locator::entitiesRegistry::value().Each<const openblack::ecs::components::Creature>(
-	    [&found, player](entt::entity entity, const openblack::ecs::components::Creature& creature) {
-		    if (found == 0 && creature.owner == player)
-		    {
-			    found = static_cast<uint32_t>(entity);
-		    }
-	    });
+	if (player == PlayerNames::PLAYER_ONE)
+	{
+		found = PlayersCreature();
+	}
+	else
+	{
+		Locator::entitiesRegistry::value().Each<const openblack::ecs::components::Creature>(
+		    [&found, player](entt::entity entity, const openblack::ecs::components::Creature& creature) {
+			    if (found == 0 && creature.owner == player)
+			    {
+				    found = static_cast<uint32_t>(entity);
+			    }
+		    });
+	}
 	Pusho(found);
 }
 
@@ -6223,10 +6420,10 @@ void IsLeashedToObject() // 269 IS_LEASHED_TO_OBJECT
 
 void GetInteractionMagnitude() // 270 GET_INTERACTION_MAGNITUDE
 {
-	[[maybe_unused]] const auto creature = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	// The last slap (below 0) or stroke (above 0) the creature had from the hand (UpdateCreatureInteraction).
+	const auto creature = Pop().uintVal;
+	const auto it = g_interactionMagnitude.find(creature);
+	Pushf(it != g_interactionMagnitude.end() ? it->second : 0.0f);
 }
 
 void IsCreatureAvailable() // 271 IS_CREATURE_AVAILABLE
@@ -6879,10 +7076,9 @@ void SetTownDesireBoost() // 341 SET_TOWN_DESIRE_BOOST
 
 void IsLockedInteraction() // 342 IS_LOCKED_INTERACTION
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	// Whether the hand is in a locked interaction with it: facing the creature, the action button held on it.
+	const auto object = Pop().uintVal;
+	Pushb(g_interaction && g_interaction->creature == object);
 }
 
 void SetCreatureName() // 343 SET_CREATURE_NAME
@@ -8481,6 +8677,20 @@ bool SaveTestPoint(int slot)
 	{
 		out << fmt::format("timer {} {}\n", id, std::chrono::duration<float>(end - now).count());
 	}
+	// Creatures: whose each is, its pen and its order - remade unowned, the chosen creature was nobody's after a load
+	// and every lesson lost it.
+	Locator::entitiesRegistry::value().Each<const openblack::ecs::components::Creature>(
+	    [&out](entt::entity entity, const openblack::ecs::components::Creature& creature) {
+		    out << fmt::format("creature {} {}\n", static_cast<uint32_t>(entity), static_cast<int>(creature.owner));
+	    });
+	for (const auto& [id, home] : g_creatureHomes)
+	{
+		out << fmt::format("creaturehome {} {} {} {}\n", id, home.x, home.y, home.z);
+	}
+	for (const auto& [id, order] : g_creatureOrders)
+	{
+		out << fmt::format("creatureorder {} {} {} {}\n", id, order.action, order.target, order.with);
+	}
 	out << fmt::format("nexttimer {}\n", g_nextTimer);
 	for (const auto& [type, value] : g_totalEvents)
 	{
@@ -8516,6 +8726,11 @@ bool LoadTestPoint(int slot)
 	g_flocks.clear();
 	g_objectProperties.clear();
 	g_scriptAnimations.clear();
+	g_creatureOrders.clear();
+	g_creatureHomes.clear();
+	g_creaturePlaying.clear();
+	g_interactionMagnitude.clear();
+	EndCreatureInteraction();
 	g_timers.clear();
 	g_totalEvents.clear();
 	g_notPickupable.clear();
@@ -8564,6 +8779,32 @@ bool LoadTestPoint(int slot)
 			float hour;
 			fields >> hour;
 			ApplyGameHour(hour);
+		}
+		else if (kind == "creature")
+		{
+			uint32_t id;
+			int owner;
+			fields >> id >> owner;
+			auto& registry = Locator::entitiesRegistry::value();
+			const auto entity = static_cast<entt::entity>(id);
+			if (auto* creature = registry.Valid(entity) ? registry.TryGet<openblack::ecs::components::Creature>(entity) : nullptr)
+			{
+				creature->owner = static_cast<PlayerNames>(owner);
+			}
+		}
+		else if (kind == "creaturehome")
+		{
+			uint32_t id;
+			glm::vec3 home;
+			fields >> id >> home.x >> home.y >> home.z;
+			g_creatureHomes[id] = home;
+		}
+		else if (kind == "creatureorder")
+		{
+			uint32_t id;
+			CreatureOrder order {};
+			fields >> id >> order.action >> order.target >> order.with;
+			g_creatureOrders[id] = order;
 		}
 		else if (kind == "dialogue")
 		{

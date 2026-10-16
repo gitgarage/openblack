@@ -77,6 +77,13 @@ bool HandCollectBegin(uint32_t pile);
 void HandCollect(std::chrono::microseconds dt);
 void HandCollectEnd();
 bool HandCollecting();
+// Rewarding and punishing your creature: the action button pressed with the hand on it locks the camera facing it;
+// while held, quick swipes across it are slaps and slow movement over it strokes; released, the camera goes back.
+bool BeginCreatureInteraction(const glm::vec3& origin, const glm::vec3& direction);
+bool InCreatureInteraction();
+void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin, const glm::vec3& direction,
+                               std::chrono::microseconds dt);
+void EndCreatureInteraction();
 // The Temple: a finished Temple's door takes the player in (a long press there on the Switch).
 std::optional<glm::vec3> TempleDoor();
 void SetHandGround(const glm::vec3& position);

@@ -551,9 +551,14 @@ bool Game::Update() noexcept
 				static bool s_letGoOnRelease = false;
 				if (rightDown && !s_rightWasDown && g_scrollUnderHand == 0)
 				{
+					// On your creature (with empty hands) the press starts rewarding or punishing it: the camera
+					// faces it, and the hand's movement while the button stays held strokes or slaps it.
 					// Over a wood pile the press collects wood for as long as it is held (adding to wood
 					// already in the hand); otherwise a press while holding lets go on its release.
-					if (const auto pile = chlapi::HandWoodUnder(); pile != 0)
+					if (!chlapi::HandHolding() && chlapi::BeginCreatureInteraction(rayOrigin, rayDirection))
+					{
+					}
+					else if (const auto pile = chlapi::HandWoodUnder(); pile != 0)
 					{
 						chlapi::HandCollectBegin(pile);
 					}
@@ -564,6 +569,17 @@ bool Game::Update() noexcept
 					else if (objectUnderHand != 0)
 					{
 						chlapi::HandPickUp(objectUnderHand);
+					}
+				}
+				if (chlapi::InCreatureInteraction())
+				{
+					if (rightDown)
+					{
+						chlapi::UpdateCreatureInteraction(handScreen, rayOrigin, rayDirection, deltaTime);
+					}
+					else
+					{
+						chlapi::EndCreatureInteraction();
 					}
 				}
 				if (rightDown && chlapi::HandCollecting())
