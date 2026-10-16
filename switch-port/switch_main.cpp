@@ -175,6 +175,10 @@ extern "C" int __wrap_main(int argc, char** argv)
 	atlasLinkStartBackground(linkLog);
 	// New builds can come down the same link (switch-port/update.py on the laptop): see switch_update.cpp.
 	startUpdateListener();
+	// No auto-sleep or screen dimming while openblack runs (Mike, 2026-10-16: development with the Switch sitting
+	// still between tests). The system restores both when the app exits.
+	appletSetMediaPlaybackState(true);
+	appletSetAutoSleepDisabled(true);
 	bool link = false;
 	devoptab_list[STD_OUT] = &g_teeDevoptab;
 	devoptab_list[STD_ERR] = &g_teeDevoptab;
