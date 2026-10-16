@@ -99,7 +99,10 @@ def main():
     print()
 
     link.send(f'ATLAS-UPDATE END {nonce}\n'.encode())
-    reply = link.wait(nonce, 60)
+    # Late answers to chunks sent twice can still be on their way: skip to the END's own answer.
+    deadline = time.monotonic() + 60
+    while (reply := link.wait(nonce, max(deadline - time.monotonic(), 0.1))) and reply[0] in ('ack', 'nak'):
+        pass
     if not reply or reply[0] != 'installed':
         sys.exit(f'not installed: {" ".join(reply) if reply else "no answer"}')
     # Blank lines for a while: openblack's listener is blocked reading, and stops (so the link can close and the
