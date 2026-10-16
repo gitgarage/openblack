@@ -17,7 +17,10 @@ import zlib
 TABLET = os.environ.get('SWITCH_TABLET', '10.0.1.48')
 PORT = 10810
 CHUNK = 32 * 1024
-REPLY_TIMEOUT = 20  # seconds to wait for each reply before asking again
+REPLY_TIMEOUT = 20  # seconds to wait for the Switch to answer BEGIN
+# Seconds to wait for a chunk's answer before sending padding and the chunk again. Short, because builds from
+# before 2026-10-15's one-packet reads leave a chunk stuck in a USB read until more data arrives.
+CHUNK_TIMEOUT = 2
 TRIES = 5
 
 
@@ -76,7 +79,7 @@ def main():
     while offset < len(data):
         piece = data[offset:offset + CHUNK]
         link.send(f'ATLAS-UPDATE CHUNK {nonce} {offset} {len(piece)} {zlib.crc32(piece):08x}\n'.encode() + piece)
-        reply = link.wait(nonce, REPLY_TIMEOUT)
+        reply = link.wait(nonce, CHUNK_TIMEOUT)
         if reply and reply[0] in ('ack', 'nak') and len(reply) > 1:
             got = int(reply[1])
             tries = 0 if got > offset else tries + 1
@@ -85,7 +88,7 @@ def main():
             tries += 1
             # Lost in between: fill out whatever the Switch is still waiting for, then send the chunk again.
             link.send(b'\n' * (CHUNK + 1024))
-        if tries >= TRIES:
+        if tries >= TRIES * 5:
             sys.exit(f'stuck at byte {offset} of {len(data)}')
         seconds = time.monotonic() - start
         print(f'\r{offset * 100 // len(data):3d}%  {offset // 1024} KiB  {offset / 1024 / max(seconds, 0.001):.0f} KiB/s',
