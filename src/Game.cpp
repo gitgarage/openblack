@@ -561,6 +561,9 @@ bool Game::Update() noexcept
 					if (!chlapi::HandHolding() && chlapi::BeginCreatureInteraction(rayOrigin, rayDirection))
 					{
 					}
+					else if (!chlapi::HandHolding() && chlapi::LeashCommand(intersectionTransform.position, objectUnderHand))
+					{
+					}
 					else if (chlapi::HandHolding() && chlapi::HandGiveToCreature(rayOrigin, rayDirection))
 					{
 					}

@@ -24,6 +24,7 @@
 //   D-pad up / left       -> save test point 1 / 2 (keypad 1 / 2)
 //   D-pad down / right    -> load test point 1 / 2 (keypad 3 / 4)
 //   B                     -> leave the Temple
+//   A                     -> cycle your creature's leash: none, regular, reward, punishment
 //   Right stick press     -> play twice as fast (again for faster still, up to x8)
 //   Left stick press      -> play half as fast (down to x1/8)
 #include <cstdlib>
@@ -218,6 +219,14 @@ void switchInputFrame()
 		openblack::chlapi::ExitTemple();
 	}
 	s_bWasDown = bDown;
+	// A: your creature's leash - none, regular, reward, punishment - one step each press.
+	static bool s_aWasDown = false;
+	const bool aDown = (held & HidNpadButton_A) != 0;
+	if (aDown && !s_aWasDown)
+	{
+		openblack::chlapi::CycleLeash();
+	}
+	s_aWasDown = aDown;
 	// Play speed, for hurrying through cutscenes: each press of a stick doubles (right) or halves (left) it.
 	static u64 s_sticksWere = 0;
 	const u64 sticks = held & (HidNpadButton_StickR | HidNpadButton_StickL);

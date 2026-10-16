@@ -3453,6 +3453,154 @@ bool TurnTowards(Transform& transform, const glm::vec3& target, float maxTurn)
 	return std::abs(diff) <= maxTurn;
 }
 
+// --- The leash ---------------------------------------------------------------------------------------------------
+// Mike's controls (2026-10-16), after the original: A cycles your creature's leash - none, regular, reward,
+// punishment - and the action button sends it about while it is on: to a point on the ground (it walks there), to
+// something it can lift (it fetches it), or onto something bigger, a tree or a house (the leash is tied there).
+// Type 2 is the one Land 1's LeashIntro waits for, taken to be the plain rope; 3 and 4 are guesses.
+struct Leash
+{
+	uint32_t creature = 0;
+	int32_t type = 0;
+	uint32_t tiedTo = 0;
+};
+Leash g_leash;
+std::unordered_map<uint32_t, glm::vec3> g_leashWalk;  // creature -> where it was sent
+std::unordered_map<uint32_t, uint32_t> g_leashFetch;  // creature -> what it was sent to pick up
+constexpr std::array<int32_t, 4> k_LeashCycle = {0, 2, 3, 4};
+
+void CycleLeashNow()
+{
+	const auto creature = PlayersCreature();
+	if (creature == 0)
+	{
+		return;
+	}
+	const auto at = std::find(k_LeashCycle.begin(), k_LeashCycle.end(), g_leash.creature == creature ? g_leash.type : 0);
+	const auto next = at == k_LeashCycle.end() || at + 1 == k_LeashCycle.end() ? k_LeashCycle.front() : *(at + 1);
+	g_leash = {creature, next, 0};
+	if (next == 0)
+	{
+		g_leashWalk.erase(creature);
+		g_leashFetch.erase(creature);
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Leash on creature {}: {}", creature,
+	                   next == 0 ? "off" : next == 2 ? "regular" : next == 3 ? "reward" : "punishment");
+}
+
+float ObjectHeight(entt::entity entity)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto& meshes = Locator::resources::value().GetMeshes();
+	const auto* mesh = registry.Valid(entity) ? registry.TryGet<openblack::ecs::components::Mesh>(entity) : nullptr;
+	const auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+	return mesh != nullptr && transform != nullptr && meshes.Contains(mesh->id)
+	           ? meshes.Handle(mesh->id)->GetBoundingBox().Size().y * transform->scale.y
+	           : 0.0f;
+}
+
+bool LeashCommandNow(const glm::vec3& ground, uint32_t objectUnderHand)
+{
+	if (g_leash.type == 0 || g_leash.creature == 0 || g_leash.creature != PlayersCreature())
+	{
+		return false;
+	}
+	const auto creature = g_leash.creature;
+	if (objectUnderHand != 0 && objectUnderHand != creature)
+	{
+		const auto object = static_cast<entt::entity>(objectUnderHand);
+		const float creatureHeight = ObjectHeight(static_cast<entt::entity>(creature));
+		if (ObjectHeight(object) < creatureHeight * 0.6f)
+		{
+			g_leashFetch[creature] = objectUnderHand;
+			g_leashWalk.erase(creature);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Leash: creature {} sent to pick up {}", creature, objectUnderHand);
+		}
+		else
+		{
+			g_leash.tiedTo = objectUnderHand;
+			g_leashWalk.erase(creature);
+			g_leashFetch.erase(creature);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Leash: creature {} tied to {}", creature, objectUnderHand);
+		}
+		return true;
+	}
+	g_leashWalk[creature] = ground;
+	g_leashFetch.erase(creature);
+	g_leash.tiedTo = 0;
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Leash: creature {} sent to ({:.1f}, {:.1f}, {:.1f})", creature, ground.x, ground.y, ground.z);
+	return true;
+}
+
+bool TurnTowards(Transform& transform, const glm::vec3& target, float maxTurn); // below
+
+// Walks a creature toward a point this frame; true once there.
+bool WalkCreatureTo(Transform& transform, const glm::vec3& to, float seconds, float arrived)
+{
+	constexpr float k_WalkSpeed = 3.0f;
+	const auto flat = glm::vec2(to.x - transform.position.x, to.z - transform.position.z);
+	const float distance = glm::length(flat);
+	if (distance <= arrived)
+	{
+		return true;
+	}
+	TurnTowards(transform, to, glm::radians(120.0f) * seconds);
+	const auto step = flat / distance * std::min(k_WalkSpeed * seconds, distance);
+	transform.position.x += step.x;
+	transform.position.z += step.y;
+	transform.position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(transform.position.x, transform.position.z));
+	return false;
+}
+
+// What the leash makes the creature do this frame, ahead of its script order: the animation, or none if nothing.
+std::optional<std::string> ActOutLeash(entt::entity entity, float seconds)
+{
+	const auto id = static_cast<uint32_t>(entity);
+	if (g_leash.creature != id || g_leash.type == 0)
+	{
+		return std::nullopt;
+	}
+	auto& registry = Locator::entitiesRegistry::value();
+	auto& transform = registry.Get<Transform>(entity);
+	if (const auto walk = g_leashWalk.find(id); walk != g_leashWalk.end())
+	{
+		if (WalkCreatureTo(transform, walk->second, seconds, 1.5f))
+		{
+			g_leashWalk.erase(walk);
+			return std::string("stand");
+		}
+		return std::string("walk");
+	}
+	if (const auto fetch = g_leashFetch.find(id); fetch != g_leashFetch.end())
+	{
+		const auto object = static_cast<entt::entity>(fetch->second);
+		if (!registry.Valid(object))
+		{
+			g_leashFetch.erase(fetch);
+			return std::nullopt;
+		}
+		if (WalkCreatureTo(transform, registry.Get<Transform>(object).position, seconds, 3.0f))
+		{
+			CreatureDropsHeld(id);
+			g_creatureHolding[id] = fetch->second;
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature {} picked up {}", id, fetch->second);
+			g_leashFetch.erase(fetch);
+			return std::string("hold");
+		}
+		return std::string("walk");
+	}
+	// Tied to something: it doesn't stray far from it.
+	if (g_leash.tiedTo != 0)
+	{
+		const auto post = static_cast<entt::entity>(g_leash.tiedTo);
+		if (registry.Valid(post) && !WalkCreatureTo(transform, registry.Get<Transform>(post).position, seconds, 10.0f))
+		{
+			return std::string("walk");
+		}
+	}
+	return std::nullopt;
+}
+
 // A creature's Hurl: the object it throws, at whom, and how far it has got. Land 1's punishment lesson has the creature
 // throw a small stone at Sable, then waits for her to be flying (knocked over) before you punish it.
 struct CreatureHurl
@@ -3692,7 +3840,11 @@ void UpdateAnimations(float seconds)
 		    auto scripted = g_scriptAnimations.find(id);
 		    std::string wanted = "stand";
 		    // Its order (CREATURE_DO_ACTION) moves it and picks its animation, unless a script animation plays.
-		    if (const auto order = g_creatureOrders.find(id); order != g_creatureOrders.end())
+		    if (const auto leashed = ActOutLeash(entity, seconds))
+		    {
+			    wanted = *leashed;
+		    }
+		    else if (const auto order = g_creatureOrders.find(id); order != g_creatureOrders.end())
 		    {
 			    wanted = ActOutCreatureOrder(entity, order->second, seconds);
 			    if (!poses.contains(wanted))
@@ -4543,6 +4695,16 @@ void HandCarry(const glm::vec3& handPosition)
 	{
 		g_handTrail.pop_front();
 	}
+}
+
+void CycleLeash()
+{
+	CycleLeashNow();
+}
+
+bool LeashCommand(const glm::vec3& ground, uint32_t objectUnderHand)
+{
+	return LeashCommandNow(ground, objectUnderHand);
 }
 
 // The hand gives what it holds to your creature when the action button is pressed with the hand on it.
@@ -5690,16 +5852,18 @@ void AttachObjectLeashToObject() // 185 ATTACH_OBJECT_LEASH_TO_OBJECT
 
 void AttachObjectLeashToHand() // 186 ATTACH_OBJECT_LEASH_TO_HAND
 {
-	[[maybe_unused]] const auto unk0 = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// The script puts your creature on a leash itself (the leash type, or the regular one).
+	const auto type = Pop().intVal;
+	g_leash = {PlayersCreature(), type >= 2 && type <= 4 ? type : 2, 0};
 }
 
 void DetachObjectLeash() // 187 DETACH_OBJECT_LEASH
 {
-	[[maybe_unused]] const auto creature = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto creature = Pop().uintVal;
+	if (g_leash.creature == creature)
+	{
+		g_leash = {};
+	}
 }
 
 void SetCreatureOnlyDesire() // 188 SET_CREATURE_ONLY_DESIRE
@@ -6007,10 +6171,8 @@ void GameSubType() // 221 GAME_SUB_TYPE
 
 void IsLeashed() // 222 IS_LEASHED
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const auto object = Pop().uintVal;
+	Pushb(object != 0 && g_leash.creature == object && g_leash.type != 0);
 }
 
 void SetCreatureHome() // 223 SET_CREATURE_HOME
@@ -6604,11 +6766,9 @@ void GetArsePosition() // 268 GET_ARSE_POSITION
 
 void IsLeashedToObject() // 269 IS_LEASHED_TO_OBJECT
 {
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	const auto target = Pop().uintVal;
+	const auto object = Pop().uintVal;
+	Pushb(object != 0 && g_leash.creature == object && g_leash.type != 0 && g_leash.tiedTo == target);
 }
 
 void GetInteractionMagnitude() // 270 GET_INTERACTION_MAGNITUDE
@@ -6659,10 +6819,8 @@ void GetActionCount() // 274 GET_ACTION_COUNT
 
 void GetObjectLeashType() // 275 GET_OBJECT_LEASH_TYPE
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushi(0);
+	const auto object = Pop().uintVal;
+	Pushi(object != 0 && g_leash.creature == object ? g_leash.type : 0);
 }
 
 void SetFocusFollow() // 276 SET_FOCUS_FOLLOW
@@ -6904,9 +7062,8 @@ void ImmersionExists() // 304 IMMERSION_EXISTS
 
 void SetDrawLeash() // 305 SET_DRAW_LEASH
 {
+	// Whether the leash is drawn: nothing draws it yet.
 	[[maybe_unused]] const auto enable = static_cast<bool>(Pop().intVal);
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
 void SetDrawHighlight() // 306 SET_DRAW_HIGHLIGHT

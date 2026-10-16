@@ -88,6 +88,9 @@ void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin,
 void EndCreatureInteraction();
 // Holding something with the hand on your creature, the action button gives it to the creature.
 bool HandGiveToCreature(const glm::vec3& origin, const glm::vec3& direction);
+// The leash: cycle none/regular/reward/punishment on your creature; send it with the action button while it is on.
+void CycleLeash();
+bool LeashCommand(const glm::vec3& ground, uint32_t objectUnderHand);
 // The Temple: a finished Temple's door takes the player in (a long press there on the Switch).
 std::optional<glm::vec3> TempleDoor();
 void SetHandGround(const glm::vec3& position);
