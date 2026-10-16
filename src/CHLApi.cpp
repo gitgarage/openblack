@@ -530,6 +530,14 @@ struct CreatureInteraction
 };
 std::optional<CreatureInteraction> g_interaction;
 std::unordered_map<uint32_t, float> g_interactionMagnitude; // the last slap (<0) or stroke (>0) each creature had
+// What each creature holds, given from the hand (HandGiveToCreature): stroked, it eats it; slapped, it drops it.
+std::unordered_map<uint32_t, uint32_t> g_creatureHolding;
+// How many times each creature has done each action (GET_ACTION_COUNT): Land 1's LearnToEat waits for one of
+// EatAlive (11), EatAfterExamining (12), 276 or EatFromFoodPile (158).
+std::map<std::pair<uint32_t, int32_t>, float> g_creatureActionCounts;
+void CreatureEatsHeld(uint32_t creature);  // below, with the hand
+void CreatureDropsHeld(uint32_t creature); // below, with the hand
+void UpdateCreatureHolding();             // below, with the hand
 
 // Where along the ray it enters the creature's box, and how high on the creature that is (0 its feet, 1 its head).
 std::optional<std::pair<float, float>> CreatureRayHit(entt::entity entity, const glm::vec3& origin, const glm::vec3& direction)
@@ -668,6 +676,7 @@ void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin,
 		// The slap where it landed: head, waist or feet (ctrspec27.txt 165/167/169; only the right-hand ones so far).
 		const uint32_t animation = hit->second > 0.66f ? 165u : hit->second > 0.33f ? 167u : 169u;
 		g_scriptAnimations[id] = {animation, 1.0f};
+		CreatureDropsHeld(id); // slapped, it lets go of what it holds
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Slap on creature {}: {:.2f} ({})", id, -strength,
 		                   animation == 165 ? "head" : animation == 167 ? "waist" : "feet");
 	}
@@ -683,6 +692,12 @@ void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin,
 		{
 			g_interactionMagnitude[id] = stepped;
 			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Stroke on creature {}: {:.2f}", id, stepped);
+		}
+		// Stroked while it holds something it was given, it eats it (the original's way to teach eating).
+		if (g_creatureHolding.contains(id) && interaction.strokeSeconds >= 1.0f)
+		{
+			CreatureEatsHeld(id);
+			return;
 		}
 		if (g_scriptAnimations.find(id) == g_scriptAnimations.end())
 		{
@@ -3394,6 +3409,8 @@ std::unordered_map<uint32_t, glm::vec3> g_creatureHomes; // SET_CREATURE_HOME
 // The creature actions acted out so far, by their place in the table.
 namespace CreatureAction
 {
+constexpr int32_t EatAlive = 11;
+constexpr int32_t EatAfterExamining = 12;
 constexpr int32_t SleepAtHome = 17;
 constexpr int32_t ExamineByLooking = 20;
 constexpr int32_t HoldObject = 64;
@@ -3654,6 +3671,8 @@ void UpdateAnimations(float seconds)
 			    registry.AssignOrReplace<Animated>(entity, 0u, 0.0f, std::move(bones));
 		    }
 	    });
+
+	UpdateCreatureHolding();
 
 	// Anything else a script animated (not a villager): play its animation through, then drop it.
 	for (auto it = g_scriptAnimations.begin(); it != g_scriptAnimations.end();)
@@ -4451,6 +4470,88 @@ void HandCarry(const glm::vec3& handPosition)
 	while (g_handTrail.size() > 2 && g_handTrail.front().first < std::chrono::steady_clock::now() - k_ThrowWindow)
 	{
 		g_handTrail.pop_front();
+	}
+}
+
+// The hand gives what it holds to your creature when the action button is pressed with the hand on it.
+bool HandGiveToCreature(const glm::vec3& origin, const glm::vec3& direction)
+{
+	const auto creature = PlayersCreature();
+	if (g_heldObject == 0 || creature == 0 || !CreatureRayHit(static_cast<entt::entity>(creature), origin, direction))
+	{
+		return false;
+	}
+	CreatureDropsHeld(creature);
+	g_creatureHolding[creature] = g_heldObject;
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand gave object {} to creature {}", g_heldObject, creature);
+	g_heldObject = 0;
+	g_scriptAnimations[creature] = {85u, 1.0f}; // hold (ctrspec27.txt)
+	return true;
+}
+
+void CreatureEatsHeld(uint32_t creature)
+{
+	const auto held = g_creatureHolding.find(creature);
+	if (held == g_creatureHolding.end())
+	{
+		return;
+	}
+	const auto object = held->second;
+	g_creatureHolding.erase(held);
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(object);
+	const bool alive = registry.Valid(entity) && registry.AllOf<openblack::ecs::components::Villager>(entity);
+	const int32_t action = alive ? CreatureAction::EatAlive : CreatureAction::EatAfterExamining;
+	g_creatureActionCounts[{creature, action}] += 1.0f;
+	g_scriptAnimations[creature] = {96u, 1.0f}; // eat
+	if (registry.Valid(entity))
+	{
+		ForgetObject(object);
+		registry.Destroy(entity);
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature {} ate object {} ({})", creature, object, CreatureActionName(action));
+}
+
+void CreatureDropsHeld(uint32_t creature)
+{
+	const auto held = g_creatureHolding.find(creature);
+	if (held == g_creatureHolding.end())
+	{
+		return;
+	}
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(held->second);
+	const auto creatureEntity = static_cast<entt::entity>(creature);
+	if (registry.Valid(entity) && registry.Valid(creatureEntity))
+	{
+		auto& transform = registry.Get<Transform>(entity);
+		const auto& at = registry.Get<Transform>(creatureEntity);
+		transform.position = at.position + at.rotation * glm::vec3(0.0f, 0.0f, -2.0f);
+		transform.position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(transform.position.x, transform.position.z));
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature {} dropped object {}", creature, held->second);
+	g_creatureHolding.erase(held);
+}
+
+// What creatures hold goes with them, in front of their chest.
+void UpdateCreatureHolding()
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto& meshes = Locator::resources::value().GetMeshes();
+	for (auto it = g_creatureHolding.begin(); it != g_creatureHolding.end();)
+	{
+		const auto creature = static_cast<entt::entity>(it->first);
+		const auto object = static_cast<entt::entity>(it->second);
+		if (!registry.Valid(creature) || !registry.Valid(object))
+		{
+			it = g_creatureHolding.erase(it);
+			continue;
+		}
+		const auto& at = registry.Get<Transform>(creature);
+		const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(creature);
+		const float height = mesh != nullptr && meshes.Contains(mesh->id) ? meshes.Handle(mesh->id)->GetBoundingBox().Size().y * at.scale.y : 5.0f;
+		registry.Get<Transform>(object).position = at.position + at.rotation * glm::vec3(0.0f, height * 0.55f, -height * 0.3f);
+		++it;
 	}
 }
 
@@ -6469,18 +6570,19 @@ void CreateHighlight() // 272 CREATE_HIGHLIGHT
 
 void GetObjectHeld273() // 273 GET_OBJECT_HELD
 {
-	// What a creature holds: creatures don't hold things yet, so nothing.
-	[[maybe_unused]] const auto creature = Pop().uintVal;
-	Pusho(0);
+	// What a creature holds (given from the hand), 0 if nothing.
+	const auto creature = Pop().uintVal;
+	const auto it = g_creatureHolding.find(creature);
+	Pusho(it != g_creatureHolding.end() ? it->second : 0u);
 }
 
 void GetActionCount() // 274 GET_ACTION_COUNT
 {
-	[[maybe_unused]] const auto creature = Pop().uintVal;
-	[[maybe_unused]] const auto action = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	// How many times the creature has done the action (so far only eating what it was given counts).
+	const auto creature = Pop().uintVal;
+	const auto action = Pop().intVal;
+	const auto it = g_creatureActionCounts.find({creature, action});
+	Pushf(it != g_creatureActionCounts.end() ? it->second : 0.0f);
 }
 
 void GetObjectLeashType() // 275 GET_OBJECT_LEASH_TYPE

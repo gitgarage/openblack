@@ -86,6 +86,8 @@ bool InCreatureInteraction();
 void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin, const glm::vec3& direction,
                                std::chrono::microseconds dt);
 void EndCreatureInteraction();
+// Holding something with the hand on your creature, the action button gives it to the creature.
+bool HandGiveToCreature(const glm::vec3& origin, const glm::vec3& direction);
 // The Temple: a finished Temple's door takes the player in (a long press there on the Switch).
 std::optional<glm::vec3> TempleDoor();
 void SetHandGround(const glm::vec3& position);

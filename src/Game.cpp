@@ -561,6 +561,9 @@ bool Game::Update() noexcept
 					if (!chlapi::HandHolding() && chlapi::BeginCreatureInteraction(rayOrigin, rayDirection))
 					{
 					}
+					else if (chlapi::HandHolding() && chlapi::HandGiveToCreature(rayOrigin, rayDirection))
+					{
+					}
 					else if (const auto pile = chlapi::HandWoodUnder(); pile != 0)
 					{
 						chlapi::HandCollectBegin(pile);
