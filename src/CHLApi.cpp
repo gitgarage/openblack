@@ -1686,8 +1686,15 @@ void PlaySoundEffect() // 043 PLAY_SOUND_EFFECT
 	auto& audio = Locator::audio::value();
 	if (withPosition)
 	{
-		audio.CreateEmitter(id, openblack::audio::PlayType::Once, position, glm::vec3(0.0f), glm::vec2(10.0f, 100.0f), 1.0f,
-		                    openblack::audio::AudioStatus::Playing, false);
+		// Started, and placed: CreateEmitter only prepares the source (one never started is never "stopped", so it
+		// was never freed - OpenAL ran out and the game crashed), and the audio update places it by its Transform.
+		const auto emitter = audio.CreateEmitter(id, openblack::audio::PlayType::Once, position, glm::vec3(0.0f),
+		                                         glm::vec2(10.0f, 100.0f), 1.0f, openblack::audio::AudioStatus::Playing, false);
+		if (emitter != entt::null)
+		{
+			Locator::entitiesRegistry::value().Get<Transform>(emitter).position = position;
+			audio.PlayEmitter(emitter);
+		}
 	}
 	else
 	{

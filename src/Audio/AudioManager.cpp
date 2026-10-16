@@ -133,8 +133,14 @@ entt::entity AudioManager::CreateEmitter(entt::id_type id, PlayType playType, gl
 {
 	auto sound = Locator::resources::value().GetSounds().Handle(id);
 	auto& registry = Locator::entitiesRegistry::value();
-	auto entity = registry.Create();
 	auto sourceId = _audioPlayer->CreateSource(static_cast<float>(sound->pitch), relative);
+	if (sourceId == 0)
+	{
+		// Out of OpenAL sources: the sound is skipped (carrying on with source 0 ended in a crash on the Switch).
+		SPDLOG_LOGGER_WARN(spdlog::get("audio"), "No OpenAL source free: a sound is skipped");
+		return entt::null;
+	}
+	auto entity = registry.Create();
 	if (!sound->buffer.empty())
 	{
 		CreateBuffer(sound);
@@ -220,7 +226,10 @@ void AudioManager::PlaySound(entt::id_type id, PlayType playType)
 	auto radius = glm::zero<glm::vec3>();
 	auto sound = Locator::resources::value().GetSounds().Handle(id);
 	auto entity = CreateEmitter(id, playType, position, direction, radius, sound->volume, AudioStatus::Playing, true);
-	PlayEmitter(entity);
+	if (entity != entt::null)
+	{
+		PlayEmitter(entity);
+	}
 }
 
 void AudioManager::CreateSoundGroup(const std::string& name)
@@ -265,7 +274,10 @@ void AudioManager::PlayMusic(const std::string& packPath, PlayType type)
 	auto direction = glm::zero<glm::vec3>();
 	auto radius = glm::zero<glm::vec3>();
 	_musicEntity = CreateEmitter(id, type, position, direction, radius, sound->volume, AudioStatus::Playing, true);
-	PlayEmitter(_musicEntity);
+	if (_musicEntity != entt::null)
+	{
+		PlayEmitter(_musicEntity);
+	}
 }
 
 void AudioManager::StopMusic()

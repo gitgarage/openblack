@@ -144,8 +144,12 @@ void AudioPlayer::DeleteBuffer(BufferId id)
 
 SourceId AudioPlayer::CreateSource(float pitch, bool relative)
 {
-	unsigned int id;
+	unsigned int id = 0; // stays 0 when OpenAL has no more sources to give
 	alCheckCall(alGenSources(1, &id));
+	if (id == 0)
+	{
+		return 0;
+	}
 	alCheckCall(alSourcef(id, AL_PITCH, pitch));
 	alCheckCall(alSourcei(id, AL_SOURCE_RELATIVE, relative));
 	return id;

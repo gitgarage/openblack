@@ -30,15 +30,19 @@ constexpr const char* k_GamePath = "sdmc:/switch/openblack/game";
 constexpr const char* k_LogPath = "sdmc:/switch/openblack/openblack.log";
 
 FILE* g_logFile = nullptr;
+// Every thread logs (the game, the memory thread, the update listener): one at a time into the SD card's log file.
+Mutex g_logMutex;
 
 ssize_t teeWrite(struct _reent*, void*, const char* ptr, size_t len)
 {
 	atlasLinkWrite(ptr, len);
+	mutexLock(&g_logMutex);
 	if (g_logFile != nullptr)
 	{
 		fwrite(ptr, 1, len, g_logFile);
 		fflush(g_logFile);
 	}
+	mutexUnlock(&g_logMutex);
 	return static_cast<ssize_t>(len);
 }
 
@@ -188,11 +192,9 @@ extern "C" int __wrap_main(int argc, char** argv)
 	threadCreate(&g_memThread, memoryThread, nullptr, nullptr, 0x4000, 0x3F, -2);
 	threadStart(&g_memThread);
 
-	// A screenshot every 20 s into sdmc:/switch/openblack/shots (emptied each run), which deliver.sh
-	// fetches, so a run can be looked at on the laptop afterwards.
-	setenv("OPENBLACK_SHOT_DIR", "sdmc:/switch/openblack/shots", 0);
-	setenv("OPENBLACK_SHOT_EVERY", "20", 0);
-	setenv("OPENBLACK_SHOT_SCALE", "2", 0); // 640x360: less to encode and write
+	// No periodic screenshots any more: the live log replaced them, and their writer thread crashed in newlib's
+	// write (2026-10-16, ShotWriter::Run -> fwrite -> _write_r, fault at 0x20) - set OPENBLACK_SHOT_EVERY to bring
+	// them back.
 	setenv("OPENBLACK_SAVEPOINT_DIR", "sdmc:/switch/openblack/savepoints", 0); // D-pad test save points
 	// Every 5 s: the camera and each script's position (what scripts are waiting on), into the log.
 	setenv("OPENBLACK_TRACE_VM", "1", 0);
