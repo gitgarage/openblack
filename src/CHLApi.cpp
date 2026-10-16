@@ -694,7 +694,7 @@ void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin,
 			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Stroke on creature {}: {:.2f}", id, stepped);
 		}
 		// Stroked while it holds something it was given, it eats it (the original's way to teach eating).
-		if (g_creatureHolding.contains(id) && interaction.strokeSeconds >= 1.0f)
+		if (g_creatureHolding.contains(id) && interaction.strokeSeconds >= 0.3f)
 		{
 			CreatureEatsHeld(id);
 			return;
