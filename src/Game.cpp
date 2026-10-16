@@ -975,7 +975,7 @@ bool Game::Initialize() noexcept
 				    {
 					    SPDLOG_LOGGER_WARN(spdlog::get("audio"), "Empty sound buffer found for {}. Skipping",
 					                       soundName.string());
-					    return;
+					    continue; // just this sample: `return` dropped the rest of the pack (InGame.sad starts with an empty one)
 				    }
 
 				    const auto stringId = fmt::format("{}/{}", groupName, audioHeaders[i].id);

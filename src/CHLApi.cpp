@@ -64,6 +64,8 @@
 #include "ECS/Components/RigidBody.h"
 #include "ECS/Components/Creature.h"
 #include "HandPoses.h"
+#include "Audio/AudioManagerInterface.h"
+#include "Resources/ResourcesInterface.h"
 #include "3D/CreatureBody.h"
 #include "ECS/Components/Feature.h"
 #include "ECS/Components/Field.h"
@@ -1543,27 +1545,176 @@ void GetHandPosition() // 042 GET_HAND_POSITION
 	PushVec(handTransform.position);
 }
 
+// --- Sound ---------------------------------------------------------------------------------------------------
+// The game's sound packs on disk, by their file name in lower case: the game's own lists name them in lower case,
+// the files aren't (InGame.sad, Scriptsfx.sad).
+const std::unordered_map<std::string, std::filesystem::path>& AudioPacks()
+{
+	static const auto packs = [] {
+		std::unordered_map<std::string, std::filesystem::path> found;
+		auto& fileSystem = Locator::filesystem::value();
+		fileSystem.Iterate(fileSystem.GetPath<openblack::filesystem::Path::Audio>(), true,
+		                   [&found](const std::filesystem::path& f) {
+			                   auto name = f.filename().string();
+			                   std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
+			                   found.emplace(name, f);
+		                   });
+		return found;
+	}();
+	return packs;
+}
+
+// PLAY_SOUND_EFFECT's banks, numbered from 1 as runblack.exe's list of them (at 0x9cb3f8, slot 0 empty): Land 1's
+// scripts play bank 1 sound 169 (G_CreatureSwap_01) at the creature choice, bank 5 sound 57
+// (CreatureGateStoneMove_01) at the creature gate.
+constexpr std::array<const char*, 11> k_SoundBanks = {nullptr, "ingame.sad", "editor.sad", "spells.sad", "creature.sad",
+                                                      "scriptsfx.sad", "helpsprites.sad", "villagers.sad",
+                                                      "villagersbanter.sad", "spelldialogue.sad", "guidance.sad"};
+
+// START_MUSIC's music types, from 1 (MUSIC_TYPE_GENERIC_EVIL) as runblack.exe's music table (at 0x9c974c, after
+// MUSIC_TYPE_NONE): 44-46 the citadel, 55 the singing stone circle, 65 the creature chosen.
+constexpr std::array<const char*, 84> k_MusicPacks = {
+	"evil.sad",
+	"neutral.sad",
+	"good.sad",
+	"celt_evil.sad",
+	"celt_neutral.sad",
+	"celt_good.sad",
+	"aztc_evil.sad",
+	"aztc_neutral.sad",
+	"aztc_good.sad",
+	"japn_evil.sad",
+	"japn_neutral.sad",
+	"japn_good.sad",
+	"indn_evil.sad",
+	"indn_neutral.sad",
+	"indn_good.sad",
+	"egpt_evil.sad",
+	"egpt_neutral.sad",
+	"egpt_good.sad",
+	"grek_evil.sad",
+	"grek_neutral.sad",
+	"grek_good.sad",
+	"celt_evil.sad",
+	"celt_neutral.sad",
+	"celt_good.sad",
+	"tbtn_evil.sad",
+	"tbtn_neutral.sad",
+	"tbtn_good.sad",
+	"celt_chant.sad",
+	"celt_chant_vox.sad",
+	"aztc_chant.sad",
+	"aztc_chant_vox.sad",
+	"japn_chant.sad",
+	"japn_chant_vox.sad",
+	"indn_chant.sad",
+	"indn_chant_vox.sad",
+	"egpt_chant.sad",
+	"egpt_chant_vox.sad",
+	"grek_chant.sad",
+	"grek_chant_vox.sad",
+	"nrse_chant.sad",
+	"nrse_chant_vox.sad",
+	"tbtn_chant.sad",
+	"tbtn_chant_vox.sad",
+	"citadel.sad",
+	"citadel.sad",
+	"citadel.sad",
+	"pipertune_m.sad",
+	"pipercave_m.sad",
+	"hermit.sad",
+	"missionariesbackground.sad",
+	"missionariesverse1.sad",
+	"missionariesverse2.sad",
+	"missionariesverse3.sad",
+	"intro.sad",
+	"singingstonesa.sad",
+	"followuswelcome.sad",
+	"script01.sad",
+	"script02.sad",
+	"script03.sad",
+	"script04.sad",
+	"epic01.sad",
+	"epic02.sad",
+	"epic03.sad",
+	"epic04.sad",
+	"creaturechosen.sad",
+	"funeral.sad",
+	"creatureguide.sad",
+	"khazar.sad",
+	"nemesis.sad",
+	"twinkle.sad",
+	"whistlefuneral.sad",
+	"whistletwinkle.sad",
+	"sleg.sad",
+	"creaturefight.sad",
+	"creaturebigfight.sad",
+	"guardianstone.sad",
+	"outro.sad",
+	"failure.sad",
+	"gregorian.sad",
+	"christmas.sad",
+	"gregorian3d.sad",
+	"circus.sad",
+	"circus3d.sad",
+	"creatureendsequence.sad"};
+constexpr int k_LastLoopingMusic = 46; // the town, chant and citadel themes loop; the story pieces play once
+
 void PlaySoundEffect() // 043 PLAY_SOUND_EFFECT
 {
-	[[maybe_unused]] const auto withPosition = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto soundbank = Pop().intVal;
-	[[maybe_unused]] const auto sound = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto withPosition = static_cast<bool>(Pop().intVal);
+	const auto position = PopVec();
+	const auto soundbank = Pop().intVal;
+	const auto sound = Pop().intVal;
+	// Sounds are loaded as "<pack file>/<sample id>" (Game.cpp); played where the script says, or everywhere.
+	static std::set<std::pair<int32_t, int32_t>> missing;
+	const auto& packs = AudioPacks();
+	const auto pack = soundbank > 0 && static_cast<size_t>(soundbank) < k_SoundBanks.size()
+	                      ? packs.find(k_SoundBanks.at(static_cast<size_t>(soundbank)))
+	                      : packs.end();
+	const auto id = pack != packs.end()
+	                    ? entt::hashed_string(fmt::format("{}/{}", pack->second.filename().string(), sound).c_str()).value()
+	                    : entt::id_type {0};
+	if (id == 0 || !Locator::resources::value().GetSounds().Contains(id))
+	{
+		if (missing.emplace(soundbank, sound).second)
+		{
+			SPDLOG_LOGGER_WARN(spdlog::get("audio"), "PLAY_SOUND_EFFECT: no sound {} in bank {}", sound, soundbank);
+		}
+		return;
+	}
+	auto& audio = Locator::audio::value();
+	if (withPosition)
+	{
+		audio.CreateEmitter(id, openblack::audio::PlayType::Once, position, glm::vec3(0.0f), glm::vec2(10.0f, 100.0f), 1.0f,
+		                    openblack::audio::AudioStatus::Playing, false);
+	}
+	else
+	{
+		audio.PlaySound(id, openblack::audio::PlayType::Once);
+	}
 }
 
 void StartMusic() // 044 START_MUSIC
 {
-	[[maybe_unused]] const auto music = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto music = Pop().intVal;
+	const auto& packs = AudioPacks();
+	const auto pack = music >= 1 && static_cast<size_t>(music) <= k_MusicPacks.size()
+	                      ? packs.find(k_MusicPacks.at(static_cast<size_t>(music - 1)))
+	                      : packs.end();
+	if (pack == packs.end())
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("audio"), "START_MUSIC {}: no such music here", music);
+		return;
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("audio"), "START_MUSIC {}: {}", music, pack->second.filename().string());
+	Locator::audio::value().PlayMusic(pack->second.string(), music <= k_LastLoopingMusic ? openblack::audio::PlayType::Repeat
+	                                                                                      : openblack::audio::PlayType::Once);
 }
 
 void StopMusic() // 045 STOP_MUSIC
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	Locator::audio::value().StopMusic();
 }
 
 void AttachMusic() // 046 ATTACH_MUSIC
