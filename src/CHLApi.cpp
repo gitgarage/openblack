@@ -416,6 +416,29 @@ struct ScriptAnimation
 	float playsLeft;
 };
 std::unordered_map<uint32_t, ScriptAnimation> g_scriptAnimations;
+
+// What a script last told each creature to do (CREATURE_DO_ACTION). The number is the creature action's place in
+// info.dat's creature action table (82 LookAtCamera, 161 BeIdle, 17 SleepAtHome...), the table the creature mind
+// itself uses: the original passes it straight on to the creature's mind.
+struct CreatureOrder
+{
+	int32_t action;
+	uint32_t target;
+	uint32_t with;
+};
+std::unordered_map<uint32_t, CreatureOrder> g_creatureOrders;
+
+std::string CreatureActionName(int32_t action)
+{
+	const auto& table = Locator::infoConstants::value().creatureAction;
+	if (action < 0 || static_cast<size_t>(action) >= table.size())
+	{
+		return "?";
+	}
+	const auto& name = table.at(static_cast<size_t>(action)).name;
+	return {name.data(), strnlen(name.data(), name.size())};
+}
+
 std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> g_pendingShots;
 // GET_TOTAL_EVENTS counters, by event type: 25 degrees the player has rotated the camera, 28 degrees
 // pitched, 29 metres zoomed (the tutorials ask for 60, 25 and 10-15 more than when they start).
@@ -1848,13 +1871,14 @@ void CreatureDoAction() // 075 CREATURE_DO_ACTION
 	const auto target = Pop().uintVal;
 	const auto action = Pop().intVal;
 	const auto creature = Pop().uintVal;
-	// Creatures don't act yet: the action is logged once per action number, to find which ones the scripts need.
-	static std::set<int32_t> logged;
-	if (logged.insert(action).second)
+	// Kept as the creature's order, acted out each frame (ActOutCreatureOrder) until the next one.
+	const auto previous = g_creatureOrders.find(creature);
+	if (previous == g_creatureOrders.end() || previous->second.action != action || previous->second.target != target)
 	{
-		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "CREATURE_DO_ACTION {} not done (creature {}, target {}, with {})",
-		                   action, creature, target, withObject);
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "CREATURE_DO_ACTION creature {}: {} ({}), target {}, with {}", creature,
+		                   CreatureActionName(action), action, target, withObject);
 	}
+	g_creatureOrders[creature] = {action, target, withObject};
 }
 
 void InCreatureHand() // 076 IN_CREATURE_HAND
@@ -2998,6 +3022,123 @@ struct CreaturePlaying
 };
 std::unordered_map<uint32_t, CreaturePlaying> g_creaturePlaying;
 std::unordered_map<uint32_t, glm::vec3> g_creatureHomes; // SET_CREATURE_HOME
+
+// The creature actions acted out so far, by their place in the table.
+namespace CreatureAction
+{
+constexpr int32_t SleepAtHome = 17;
+constexpr int32_t ExamineByLooking = 20;
+constexpr int32_t HoldObject = 64;
+constexpr int32_t PutDown = 67;
+constexpr int32_t SleepByObject = 78;
+constexpr int32_t SitDown = 81;
+constexpr int32_t LookAtCamera = 82;
+constexpr int32_t WaveAtPlayer = 90;
+constexpr int32_t WaveAtObject = 91;
+constexpr int32_t EatFromFoodPile = 158;
+constexpr int32_t BeIdle = 161;
+constexpr int32_t PointAtObject = 163;
+constexpr int32_t PointAtCamera = 168;
+constexpr int32_t BeFrightenedOnTheSpot = 174;
+constexpr int32_t LookButDontApproach = 188;
+constexpr int32_t LookForever = 189;
+} // namespace CreatureAction
+
+// Turns about the vertical axis toward a point, at most `maxTurn` radians; true once facing it. The model's -Z
+// is taken as its front, as the villagers' (FaceTowards) - not yet checked for creatures.
+bool TurnTowards(Transform& transform, const glm::vec3& target, float maxTurn)
+{
+	const auto to = target - transform.position;
+	if (to.x == 0.0f && to.z == 0.0f)
+	{
+		return true;
+	}
+	const float wanted = std::atan2(-to.x, -to.z);
+	const float now = std::atan2(transform.rotation[2][0], transform.rotation[2][2]);
+	const float diff = std::remainder(wanted - now, glm::two_pi<float>());
+	const float step = std::clamp(diff, -maxTurn, maxTurn);
+	transform.rotation = glm::mat3(glm::eulerAngleY(now + step));
+	return std::abs(diff) <= maxTurn;
+}
+
+// Acts out a creature's order for this frame - turning, walking - and says which of its animations fits.
+std::string ActOutCreatureOrder(entt::entity entity, const CreatureOrder& order, float seconds)
+{
+	using namespace CreatureAction;
+	constexpr float k_TurnSpeed = glm::radians(120.0f); // radians a second
+	constexpr float k_WalkSpeed = 3.0f;                 // units a second (a guess: about a brisk villager's two)
+	constexpr float k_Arrived = 2.0f;
+	auto& registry = Locator::entitiesRegistry::value();
+	auto& transform = registry.Get<Transform>(entity);
+	const auto targetEntity = static_cast<entt::entity>(order.target);
+	const auto* targetTransform =
+	    order.target != 0 && registry.Valid(targetEntity) ? registry.TryGet<Transform>(targetEntity) : nullptr;
+	const auto camera = Locator::camera::value().GetOrigin();
+	const float turn = k_TurnSpeed * seconds;
+	// Walks toward a point; true once there.
+	auto walkTo = [&](const glm::vec3& to) {
+		const auto flat = glm::vec2(to.x - transform.position.x, to.z - transform.position.z);
+		const float distance = glm::length(flat);
+		if (distance <= k_Arrived)
+		{
+			return true;
+		}
+		TurnTowards(transform, to, turn);
+		const auto step = flat / distance * std::min(k_WalkSpeed * seconds, distance);
+		transform.position.x += step.x;
+		transform.position.z += step.y;
+		transform.position.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(transform.position.x, transform.position.z));
+		return false;
+	};
+	switch (order.action)
+	{
+	case LookAtCamera:
+	case LookForever:
+		TurnTowards(transform, camera, turn);
+		return "stand";
+	case PointAtCamera:
+		TurnTowards(transform, camera, turn);
+		return "look_at_me";
+	case WaveAtPlayer:
+		TurnTowards(transform, camera, turn);
+		return "friendly_wave";
+	case LookButDontApproach:
+	case ExamineByLooking:
+	case PointAtObject:
+	case WaveAtObject:
+		if (targetTransform != nullptr)
+		{
+			TurnTowards(transform, targetTransform->position, turn);
+		}
+		return order.action == WaveAtObject ? "friendly_wave" : order.action == PointAtObject ? "look_at_me" : "stand";
+	case SitDown:
+		return "sit";
+	case BeFrightenedOnTheSpot:
+		return "frightened";
+	case HoldObject:
+		return "hold";
+	case PutDown:
+		return "put_down";
+	case SleepAtHome:
+	{
+		const auto home = g_creatureHomes.find(static_cast<uint32_t>(entity));
+		if (home != g_creatureHomes.end() && !walkTo(home->second))
+		{
+			return "walk";
+		}
+		return "sleep";
+	}
+	case SleepByObject:
+	case EatFromFoodPile:
+		if (targetTransform != nullptr && !walkTo(targetTransform->position))
+		{
+			return "walk";
+		}
+		return order.action == EatFromFoodPile ? "eat" : "sleep";
+	default: // BeIdle, and everything not acted out yet
+		return "stand";
+	}
+}
 // A guess, not yet checked against the original: the CBN headers' timing fields aren't decoded.
 constexpr float k_CreatureFramesPerSecond = 15.0f;
 
@@ -3093,6 +3234,15 @@ void UpdateAnimations(float seconds)
 		    // has no pose for counts as played at once, so a script waiting on it carries on.
 		    auto scripted = g_scriptAnimations.find(id);
 		    std::string wanted = "stand";
+		    // Its order (CREATURE_DO_ACTION) moves it and picks its animation, unless a script animation plays.
+		    if (const auto order = g_creatureOrders.find(id); order != g_creatureOrders.end())
+		    {
+			    wanted = ActOutCreatureOrder(entity, order->second, seconds);
+			    if (!poses.contains(wanted))
+			    {
+				    wanted = "stand"; // this species has no such animation
+			    }
+		    }
 		    if (scripted != g_scriptAnimations.end())
 		    {
 			    const auto& names = CreatureAnimationNames();
@@ -5094,10 +5244,18 @@ void SpellAtPos() // 196 SPELL_AT_POS
 
 void CallPlayerCreature() // 197 CALL_PLAYER_CREATURE
 {
-	[[maybe_unused]] const auto player = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	// The creature the player owns (CREATURE_SET_PLAYER gave it to them), or 0 before one is chosen. Land 1's
+	// creature lessons ask this every turn: unanswered, none of them ever found the chosen creature.
+	const auto player = static_cast<PlayerNames>(static_cast<int>(Popf()));
+	uint32_t found = 0;
+	Locator::entitiesRegistry::value().Each<const openblack::ecs::components::Creature>(
+	    [&found, player](entt::entity entity, const openblack::ecs::components::Creature& creature) {
+		    if (found == 0 && creature.owner == player)
+		    {
+			    found = static_cast<uint32_t>(entity);
+		    }
+	    });
+	Pusho(found);
 }
 
 void GetSlowestSpeed() // 198 GET_SLOWEST_SPEED
