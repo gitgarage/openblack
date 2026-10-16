@@ -113,6 +113,8 @@ private:
 	std::filesystem::path _startMap;
 
 	std::chrono::steady_clock::time_point _lastGameLoopTime;
+	bool _turnRan {false};
+	static constexpr int k_MaxTurnsPerFrame = 8;
 	std::chrono::steady_clock::duration _turnDeltaTime;
 	float _gameSpeedMultiplier {1.0f};
 	float _playSpeed {1.0f};

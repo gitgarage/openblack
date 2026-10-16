@@ -64,6 +64,7 @@
 #include "ECS/Components/RigidBody.h"
 #include "ECS/Components/Creature.h"
 #include "HandPoses.h"
+#include "3D/CreatureBody.h"
 #include "ECS/Components/Feature.h"
 #include "ECS/Components/Field.h"
 #include "ECS/Components/Temple.h"
@@ -288,13 +289,29 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 			SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "CREATE: creature subtype {} has no known species", subtype);
 			return static_cast<entt::entity>(0);
 		}
-		// Unowned until a script gives it to a player (CREATURE_SET_PLAYER), standing on the land.
-		// An estimate, to check against the original: the meshes are 15-26 units tall, but the glade's first
-		// close-up puts the camera 16 units from the creature it shows, which fits one of about 9.
-		constexpr float k_NewCreatureScale = 0.4f;
+		// Unowned until a script gives it to a player (CREATURE_SET_PLAYER), standing on the land, a few villagers
+		// tall: Mike's account of the original ("several times taller than a villager"); the meshes themselves are
+		// 15-26 units, and 0.4 of that still looked far too big. Measured against a villager on the land.
+		constexpr float k_VillagersTall = 4.0f;
+		auto& registry = Locator::entitiesRegistry::value();
+		const auto& meshes = Locator::resources::value().GetMeshes();
+		float villagerHeight = 0.0f;
+		registry.Each<const openblack::ecs::components::Villager, const openblack::ecs::components::Mesh, const Transform>(
+		    [&](const openblack::ecs::components::Villager&, const openblack::ecs::components::Mesh& mesh,
+		        const Transform& transform) {
+			    if (villagerHeight == 0.0f && meshes.Contains(mesh.id))
+			    {
+				    villagerHeight = meshes.Handle(mesh.id)->GetBoundingBox().Size().y * transform.scale.y;
+			    }
+		    });
+		const auto meshId = openblack::creature::GetIdFromType(species->second, openblack::creature::CreatureBody::Appearance::Base);
+		const float meshHeight = meshes.Contains(meshId) ? meshes.Handle(meshId)->GetBoundingBox().Size().y : 0.0f;
+		const float size = villagerHeight > 0.0f && meshHeight > 0.0f ? k_VillagersTall * villagerHeight / meshHeight : 0.25f;
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "CREATE creature {}: mesh {:.1f} tall, a villager {:.2f}, so x{:.3f}",
+		                   static_cast<int>(species->second), meshHeight, villagerHeight, size);
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
 		return CreatureArchetype::Create(glm::vec3(position.x, ground, position.z), PlayerNames::NEUTRAL, species->second,
-		                                 0, yAngleRadians, scale * k_NewCreatureScale, hint);
+		                                 0, yAngleRadians, scale * size, hint);
 	}
 	case ObjectType::Villager:
 	case ObjectType::VillagerChild:
@@ -425,6 +442,12 @@ std::chrono::steady_clock::time_point ScriptNow()
 	return g_scriptClock;
 }
 
+float PlaySpeed()
+{
+	const auto* game = openblack::Game::Instance();
+	return game != nullptr ? game->GetPlaySpeed() : 1.0f;
+}
+
 void StartFade(float seconds)
 {
 	g_fadeEnd = ScriptNow() +
@@ -520,15 +543,37 @@ uint32_t CreatureOnRay(const glm::vec3& origin, const glm::vec3& direction)
 		    {
 			    return;
 		    }
+		    // The ray against the creature's own box, in the mesh's frame: a sphere around the whole box was so
+		    // generous that the Ape's and Tiger's covered the Cow beside them, which could never be clicked.
 		    const auto box = meshes.Handle(mesh.id)->GetBoundingBox();
-		    const auto middle = transform.position + transform.rotation * (box.Center() * transform.scale);
-		    const float reach = glm::length(box.Size() * transform.scale) * 0.5f;
-		    const auto toCreature = middle - origin;
-		    const float ahead = glm::dot(toCreature, along);
-		    // The nearest one along the ray, of those it passes within reach of.
-		    if (ahead > 0.0f && glm::length(toCreature - along * ahead) < reach && ahead < bestAhead)
+		    const auto toLocal = glm::transpose(transform.rotation);
+		    const auto localOrigin = toLocal * (origin - transform.position) / transform.scale;
+		    const auto localAlong = toLocal * along / transform.scale;
+		    float enter = 0.0f;
+		    float leave = std::numeric_limits<float>::max();
+		    for (int axis = 0; axis < 3; ++axis)
 		    {
-			    bestAhead = ahead;
+			    if (std::abs(localAlong[axis]) < 1e-6f)
+			    {
+				    if (localOrigin[axis] < box.minima[axis] || localOrigin[axis] > box.maxima[axis])
+				    {
+					    return;
+				    }
+				    continue;
+			    }
+			    float near = (box.minima[axis] - localOrigin[axis]) / localAlong[axis];
+			    float far = (box.maxima[axis] - localOrigin[axis]) / localAlong[axis];
+			    if (near > far)
+			    {
+				    std::swap(near, far);
+			    }
+			    enter = std::max(enter, near);
+			    leave = std::min(leave, far);
+		    }
+		    // The nearest box the ray goes into (a distance along `along`, the scale having been divided out).
+		    if (enter <= leave && enter < bestAhead)
+		    {
+			    bestAhead = enter;
 			    best = static_cast<uint32_t>(entity);
 		    }
 	    });
@@ -2913,7 +2958,19 @@ const std::vector<std::string>& CreatureAnimationNames()
 {
 	static const auto names = [] {
 		std::vector<std::string> list;
-		std::ifstream spec(Locator::filesystem::value().GetPath<openblack::filesystem::Path::Data>() / "ctrspec27.txt");
+		// Through openblack's file system, which finds Data under the game path: a plain relative path found
+		// nothing on the Switch, and every creature animation was skipped as unknown.
+		auto& fileSystem = Locator::filesystem::value();
+		std::vector<uint8_t> bytes;
+		try
+		{
+			bytes = fileSystem.ReadAll(fileSystem.GetPath<openblack::filesystem::Path::Data>() / "ctrspec27.txt");
+		}
+		catch (const std::exception& e)
+		{
+			SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Creature animation names: {}", e.what());
+		}
+		std::istringstream spec(std::string(bytes.begin(), bytes.end()));
 		std::string line;
 		std::getline(spec, line); // the spec version
 		while (std::getline(spec, line))
@@ -2927,6 +2984,7 @@ const std::vector<std::string>& CreatureAnimationNames()
 				list.push_back(line.substr(1));
 			}
 		}
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature animation names: {} from ctrspec27.txt", list.size());
 		return list;
 	}();
 	return names;
@@ -4433,7 +4491,7 @@ void UpdateBuilders(float seconds)
 void UpdateScriptFrame(std::chrono::microseconds dt)
 {
 	g_scriptClock += std::chrono::duration_cast<std::chrono::steady_clock::duration>(dt);
-	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f);
+	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f * PlaySpeed()); // a long frame (a load) is cut short, at any play speed
 	auto& registry = Locator::entitiesRegistry::value();
 	UpdateBuilders(seconds);
 	// Sparkles: each keeps a few glitter sprites falling through what it is on, looping back to the top.
@@ -5740,7 +5798,7 @@ std::optional<glm::vec2> UpdateHandDemo()
 	{
 		return std::nullopt;
 	}
-	const auto now = std::chrono::steady_clock::now();
+	const auto now = ScriptNow(); // the tutorial hands keep pace with the play speed
 	const float dtMs = std::chrono::duration<float, std::milli>(now - demo.lastUpdate).count();
 	demo.lastUpdate = now;
 
@@ -5816,7 +5874,7 @@ void PlayHandDemo() // 266 PLAY_HAND_DEMO
 	g_handDemo.frames = std::move(frames);
 	g_handDemo.playing = true;
 	g_handDemo.withPause = withPause;
-	g_handDemo.lastUpdate = std::chrono::steady_clock::now();
+	g_handDemo.lastUpdate = ScriptNow();
 	g_handDemo.cameraWasScripted = camera.IsScriptControlled();
 	camera.SetScriptControl(true); // the player's camera controls would fight the recording
 	g_handDemo.scriptMoveCount = camera.GetScriptMoveCount();

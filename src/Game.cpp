@@ -352,7 +352,14 @@ bool Game::GameLogicLoop() noexcept
 		}
 	}
 
-	_lastGameLoopTime = currentTime;
+	// The turn's own slot, not the frame's time: the remainder carries to the next turn, so a sped-up game
+	// gets all its turns (dropping it held x2 to about x1.45, and capped any speed at one turn a frame).
+	_lastGameLoopTime += turnDuration;
+	if (currentTime - _lastGameLoopTime > turnDuration * k_MaxTurnsPerFrame)
+	{
+		_lastGameLoopTime = currentTime; // too far behind (a load, a stall): start again from now
+	}
+	_turnRan = true;
 	_turnDeltaTime = delta;
 	++_turnCount;
 
@@ -433,9 +440,18 @@ bool Game::Update() noexcept
 	// Update Game Logic in Registry
 	{
 		auto gameLogic = profiler.BeginScoped(Profiler::Stage::GameLogic);
-		if (GameLogicLoop())
+		// Every turn that is due, up to a few a frame: at x8 a turn is due every 12.5 ms, faster than frames.
+		for (int turn = 0; turn < k_MaxTurnsPerFrame; ++turn)
 		{
-			return false; // Quit event
+			_turnRan = false;
+			if (GameLogicLoop())
+			{
+				return false; // Quit event
+			}
+			if (!_turnRan)
+			{
+				break;
+			}
 		}
 	}
 
