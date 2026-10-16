@@ -20,7 +20,7 @@ CHUNK = 32 * 1024
 REPLY_TIMEOUT = 20  # seconds to wait for the Switch to answer BEGIN
 # Seconds to wait for a chunk's answer before sending padding and the chunk again. Short, because builds from
 # before 2026-10-15's one-packet reads leave a chunk stuck in a USB read until more data arrives.
-CHUNK_TIMEOUT = 2
+CHUNK_TIMEOUT = 0.5  # 2026-10-15: a chunk takes ~0.07 s; ~10% still stall until the next bytes, so wait little
 TRIES = 5
 
 
@@ -78,7 +78,10 @@ def main():
     tries = 0
     while offset < len(data):
         piece = data[offset:offset + CHUNK]
-        link.send(f'ATLAS-UPDATE CHUNK {nonce} {offset} {len(piece)} {zlib.crc32(piece):08x}\n'.encode() + piece)
+        # A little padding behind each chunk (ignored as blank lines): about a quarter of chunks otherwise stalled
+        # until more bytes followed them, somewhere between the tablet and the Switch (not yet pinned down).
+        link.send(f'ATLAS-UPDATE CHUNK {nonce} {offset} {len(piece)} {zlib.crc32(piece):08x}\n'.encode() + piece +
+                  b'\n' * 600)
         reply = link.wait(nonce, CHUNK_TIMEOUT)
         if reply and reply[0] in ('ack', 'nak') and len(reply) > 1:
             got = int(reply[1])
