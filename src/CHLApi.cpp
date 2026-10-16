@@ -3411,6 +3411,7 @@ namespace CreatureAction
 {
 constexpr int32_t EatAlive = 11;
 constexpr int32_t EatAfterExamining = 12;
+constexpr int32_t Hurl = 15;
 constexpr int32_t SleepAtHome = 17;
 constexpr int32_t ExamineByLooking = 20;
 constexpr int32_t HoldObject = 64;
@@ -3445,6 +3446,17 @@ bool TurnTowards(Transform& transform, const glm::vec3& target, float maxTurn)
 	transform.rotation = glm::mat3(glm::eulerAngleY(now + step));
 	return std::abs(diff) <= maxTurn;
 }
+
+// A creature's Hurl: the object it throws, at whom, and how far it has got. Land 1's punishment lesson has the creature
+// throw a small stone at Sable, then waits for her to be flying (knocked over) before you punish it.
+struct CreatureHurl
+{
+	CreatureOrder order;
+	bool launched = false;
+	bool done = false;
+	float sinceLaunch = 0.0f;
+};
+std::unordered_map<uint32_t, CreatureHurl> g_creatureHurls;
 
 // Acts out a creature's order for this frame - turning, walking - and says which of its animations fits.
 std::string ActOutCreatureOrder(entt::entity entity, const CreatureOrder& order, float seconds)
@@ -3496,6 +3508,53 @@ std::string ActOutCreatureOrder(entt::entity entity, const CreatureOrder& order,
 			TurnTowards(transform, targetTransform->position, turn);
 		}
 		return order.action == WaveAtObject ? "friendly_wave" : order.action == PointAtObject ? "look_at_me" : "stand";
+	case Hurl:
+	{
+		auto& hurl = g_creatureHurls[static_cast<uint32_t>(entity)];
+		if (hurl.order.action != order.action || hurl.order.target != order.target || hurl.order.with != order.with)
+		{
+			hurl = {order};
+		}
+		const auto stone = static_cast<entt::entity>(order.with);
+		if (hurl.done || targetTransform == nullptr || order.with == 0 || !registry.Valid(stone))
+		{
+			return "stand";
+		}
+		if (!hurl.launched)
+		{
+			if (!TurnTowards(transform, targetTransform->position, turn))
+			{
+				return "stand";
+			}
+			// From its hand, on an arc that comes down on the target's chest a second later.
+			constexpr float k_Gravity9 = 9.81f;
+			constexpr float k_FlightSeconds = 1.0f;
+			const auto& meshes = Locator::resources::value().GetMeshes();
+			const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(entity);
+			const float height = mesh != nullptr && meshes.Contains(mesh->id) ? meshes.Handle(mesh->id)->GetBoundingBox().Size().y * transform.scale.y : 5.0f;
+			auto& stoneTransform = registry.Get<Transform>(stone);
+			stoneTransform.position = transform.position + transform.rotation * glm::vec3(0.0f, height * 0.7f, -height * 0.3f);
+			const auto aim = targetTransform->position + glm::vec3(0.0f, 1.0f, 0.0f);
+			g_flying[order.with] = (aim - stoneTransform.position) / k_FlightSeconds + glm::vec3(0.0f, 0.5f * k_Gravity9 * k_FlightSeconds, 0.0f);
+			g_creatureHolding.erase(static_cast<uint32_t>(entity));
+			hurl.launched = true;
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature {} hurls {} at {}", static_cast<uint32_t>(entity), order.with, order.target);
+		}
+		hurl.sinceLaunch += seconds;
+		// It lands on the target, or anywhere near: either way the target is knocked off its feet.
+		const auto& stoneAt = registry.Get<Transform>(stone).position;
+		const bool hit = glm::distance(stoneAt, targetTransform->position + glm::vec3(0.0f, 1.0f, 0.0f)) < 3.0f;
+		const bool landed = !g_flying.contains(order.with) && hurl.sinceLaunch > 0.2f;
+		if (hit || landed)
+		{
+			const auto away = glm::normalize(glm::vec3(targetTransform->position.x - transform.position.x, 0.0f,
+			                                           targetTransform->position.z - transform.position.z) + glm::vec3(1e-3f, 0.0f, 0.0f));
+			g_flying[order.target] = away * 4.0f + glm::vec3(0.0f, 7.0f, 0.0f);
+			hurl.done = true;
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "{} knocked flying by creature {}'s throw", order.target, static_cast<uint32_t>(entity));
+		}
+		return hurl.sinceLaunch < 1.0f ? "hurl_flat" : "stand";
+	}
 	case SitDown:
 		return "sit";
 	case BeFrightenedOnTheSpot:
