@@ -482,9 +482,12 @@ bool Game::Update() noexcept
 				{
 					const bool rayValid = !glm::any(glm::isnan(rayOrigin) || glm::isnan(rayDirection));
 					const auto scroll = rayValid ? chlapi::HighlightOnRay(rayOrigin, rayDirection) : 0u;
-					// A creature is clicked the same way (it has no physics body for the ray below to hit).
-					const auto clickable =
-					    scroll != 0 ? scroll : (rayValid ? chlapi::CreatureOnRay(rayOrigin, rayDirection) : 0u);
+					// A creature or a person is clicked the same way (neither has a physics body for the ray below).
+					auto clickable = scroll != 0 ? scroll : (rayValid ? chlapi::CreatureOnRay(rayOrigin, rayDirection) : 0u);
+					if (clickable == 0 && rayValid)
+					{
+						clickable = chlapi::VillagerOnRay(rayOrigin, rayDirection);
+					}
 					static bool s_scrollRightWas = false;
 					static bool s_scrollLeftWas = false;
 					if (clickable != 0 && ((g_rightButtonDown && !s_scrollRightWas) || (g_leftButtonDown && !s_scrollLeftWas)))

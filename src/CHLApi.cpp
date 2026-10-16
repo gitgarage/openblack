@@ -645,6 +645,7 @@ void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin,
 	constexpr float k_StrokeSpeed = 0.05f;  // ...slower than this is the hand at rest
 	constexpr float k_SlapEvery = 0.5f;     // seconds between slaps one swipe can make
 	constexpr float k_FullStroke = 3.0f;    // seconds of stroking for the most a stroke gives
+	constexpr float k_NoStrokeAfterSlap = 1.5f;
 	auto& interaction = *g_interaction;
 	const float seconds = std::max(std::chrono::duration<float>(dt).count(), 1e-4f);
 	interaction.sinceSlap += seconds;
@@ -661,6 +662,7 @@ void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin,
 	if (speed > k_SlapSpeed && interaction.sinceSlap > k_SlapEvery)
 	{
 		interaction.sinceSlap = 0.0f;
+		interaction.strokeSeconds = 0.0f;
 		const float strength = std::min(speed / (k_SlapSpeed * 2.0f), 1.0f);
 		g_interactionMagnitude[id] = -strength;
 		// The slap where it landed: head, waist or feet (ctrspec27.txt 165/167/169; only the right-hand ones so far).
@@ -669,7 +671,9 @@ void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin,
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Slap on creature {}: {:.2f} ({})", id, -strength,
 		                   animation == 165 ? "head" : animation == 167 ? "waist" : "feet");
 	}
-	else if (speed > k_StrokeSpeed && speed <= k_SlapSpeed * 0.5f)
+	// Not straight after a slap: the swipe slowing to its end read as a full stroke, and the lesson, looking every
+	// 2 s, saw that instead of the slap.
+	else if (speed > k_StrokeSpeed && speed <= k_SlapSpeed * 0.5f && interaction.sinceSlap > k_NoStrokeAfterSlap)
 	{
 		interaction.strokeSeconds += seconds;
 		const float strength = std::min(interaction.strokeSeconds / k_FullStroke, 1.0f);
@@ -699,6 +703,23 @@ void EndCreatureInteraction()
 	camera.SetScriptControl(g_interaction->cameraWasScripted);
 	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature interaction with {} ends", g_interaction->creature);
 	g_interaction.reset();
+}
+
+// The villager the ray meets first (0 if none), by its own box like a creature: people have no physics body, so a
+// click on one was never seen. Land 1's creature lessons end their wait when you click the gold scroll or Sable.
+uint32_t VillagerOnRay(const glm::vec3& origin, const glm::vec3& direction)
+{
+	uint32_t best = 0;
+	float bestEnter = std::numeric_limits<float>::max();
+	Locator::entitiesRegistry::value().Each<const openblack::ecs::components::Villager>(
+	    [&](entt::entity entity, const openblack::ecs::components::Villager&) {
+		    if (const auto hit = CreatureRayHit(entity, origin, direction); hit && hit->first < bestEnter)
+		    {
+			    bestEnter = hit->first;
+			    best = static_cast<uint32_t>(entity);
+		    }
+	    });
+	return best;
 }
 
 uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
