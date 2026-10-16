@@ -456,6 +456,9 @@ uint32_t g_woodUnderHand = 0;
 std::unordered_set<uint32_t> g_notPickupable;
 // Thrown or dropped objects in flight: velocity, until they reach the ground (see UpdateScriptFrame).
 std::unordered_map<uint32_t, glm::vec3> g_flying;
+// Knocked off its feet until then (a creature's thrown stone): reads as Flying a while after landing, since Land 1's
+// punishment lesson only starts looking once Sable's line before it has been read, after she had already landed.
+std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_knockedUntil;
 // When the current SET_FADE / SET_FADE_IN finishes.
 std::chrono::steady_clock::time_point g_fadeEnd {};
 
@@ -1249,7 +1252,10 @@ void GetProperty() // 021 GET_PROPERTY
 		}
 		break;
 	case Prop::Flying:
-		value = g_flying.contains(object) ? 1.0f : 0.0f;
+	{
+		const auto knocked = g_knockedUntil.find(object);
+		value = g_flying.contains(object) || (knocked != g_knockedUntil.end() && ScriptNow() < knocked->second) ? 1.0f : 0.0f;
+	}
 		break;
 	case Prop::Angle:
 		value = transform != nullptr ? YawDegrees(transform->rotation) : value;
@@ -3529,7 +3535,8 @@ std::string ActOutCreatureOrder(entt::entity entity, const CreatureOrder& order,
 		{
 			const auto away = glm::normalize(glm::vec3(targetTransform->position.x - transform.position.x, 0.0f,
 			                                           targetTransform->position.z - transform.position.z) + glm::vec3(1e-3f, 0.0f, 0.0f));
-			g_flying[order.target] = away * 4.0f + glm::vec3(0.0f, 7.0f, 0.0f);
+			g_flying[order.target] = away * 5.0f + glm::vec3(0.0f, 12.0f, 0.0f); // about 2.5 s in the air
+			g_knockedUntil[order.target] = ScriptNow() + std::chrono::seconds(6);
 			hurl.done = true;
 			SPDLOG_LOGGER_INFO(spdlog::get("game"), "{} knocked flying by creature {}'s throw", order.target, static_cast<uint32_t>(entity));
 		}
