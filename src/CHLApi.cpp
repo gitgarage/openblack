@@ -5644,9 +5644,8 @@ void GetSlowestSpeed() // 198 GET_SLOWEST_SPEED
 
 void GetObjectHeld199() // 199 GET_OBJECT_HELD
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	// What the player's hand holds (0 if nothing): Land 1's LearnToEat waits for something held near your creature.
+	Pusho(g_heldObject);
 }
 
 void HelpSystemOn() // 200 HELP_SYSTEM_ON
@@ -6470,9 +6469,8 @@ void CreateHighlight() // 272 CREATE_HIGHLIGHT
 
 void GetObjectHeld273() // 273 GET_OBJECT_HELD
 {
+	// What a creature holds: creatures don't hold things yet, so nothing.
 	[[maybe_unused]] const auto creature = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 	Pusho(0);
 }
 
