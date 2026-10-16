@@ -121,7 +121,8 @@ function(_switch_finish)
     ${ATLAS_USB_LINK_DIR}/source/atlas_usb_link.c
     ${ATLAS_USB_LINK_DIR}/source/atlas_crash.c
     ${OB_ROOT}/switch-spike/compat/posix_memalign.c
-    ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_main.cpp)
+    ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_main.cpp
+    ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_update.cpp)
   # Joy-Con controls; switchInputFrame() is called from Game.cpp and lives in openblack_lib's link.
   target_sources(openblack_lib PRIVATE ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_input.cpp)
   # switch_main.cpp's __wrap_main runs first: USB link, stdout to the link, the game path argument.

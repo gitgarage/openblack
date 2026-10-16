@@ -17,6 +17,7 @@
 #include <vector>
 
 extern "C" int __real_main(int argc, char** argv);
+void startUpdateListener(); // switch_update.cpp
 extern "C" void* __real_malloc(size_t size);
 extern "C" void* __real_calloc(size_t count, size_t size);
 extern "C" void* __real_realloc(void* ptr, size_t size);
@@ -167,6 +168,8 @@ extern "C" int __wrap_main(int argc, char** argv)
 	// failed handshake never delays or loses anything: lines written before it connects are sent
 	// first once it does, and each failed attempt's reason goes to the SD log.
 	atlasLinkStartBackground(linkLog);
+	// New builds can come down the same link (switch-port/update.py on the laptop): see switch_update.cpp.
+	startUpdateListener();
 	bool link = false;
 	devoptab_list[STD_OUT] = &g_teeDevoptab;
 	devoptab_list[STD_ERR] = &g_teeDevoptab;
