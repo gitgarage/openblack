@@ -25,10 +25,10 @@ using namespace openblack::ecs::components;
 using namespace openblack::creature;
 
 entt::entity CreatureArchetype::Create(const glm::vec3& position, PlayerNames playerName, CreatureType creatureType,
-                                       entt::id_type creatureMindId, float yAngleRadians, float scale)
+                                       entt::id_type creatureMindId, float yAngleRadians, float scale, entt::entity hint)
 {
 	auto& registry = Locator::entitiesRegistry::value();
-	const auto entity = registry.Create();
+	const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
 	auto meshId = creature::GetIdFromType(creatureType, CreatureBody::Appearance::Base);
 	registry.Assign<Creature>(entity, playerName, creatureType, creatureMindId);
 	registry.Assign<Mesh>(entity, meshId);

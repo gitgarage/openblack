@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <entt/entity/entity.hpp>
 #include <entt/fwd.hpp>
 #include <glm/fwd.hpp>
 
@@ -20,7 +21,8 @@ class CreatureArchetype
 {
 public:
 	static entt::entity Create(const glm::vec3& position, PlayerNames playerName, CreatureType creatureType,
-	                           entt::id_type creatureMindId, float yAngleRadians, float scale);
+	                           entt::id_type creatureMindId, float yAngleRadians, float scale,
+	                           entt::entity hint = entt::null);
 	CreatureArchetype() = delete;
 };
 } // namespace openblack::ecs::archetypes

@@ -45,6 +45,7 @@
 #include "3D/TempleInteriorInterface.h"
 #include "Input/GameActionMapInterface.h"
 #include "Camera/Camera.h"
+#include "ECS/Archetypes/CreatureArchetype.h"
 #include "ECS/Archetypes/MobileStaticArchetype.h"
 #include "ECS/Archetypes/PotArchetype.h"
 #include "ECS/Components/Construction.h"
@@ -62,6 +63,7 @@
 #include "ECS/Components/Hand.h"
 #include "ECS/Components/RigidBody.h"
 #include "ECS/Components/Creature.h"
+#include "HandPoses.h"
 #include "ECS/Components/Feature.h"
 #include "ECS/Components/Field.h"
 #include "ECS/Components/Temple.h"
@@ -274,6 +276,23 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		registry.Assign<Transform>(entity, glm::vec3(position.x, ground, position.z), glm::mat3(1.0f), glm::vec3(1.0f));
 		return entity;
 	}
+	case ObjectType::Creature:
+	{
+		// Land 1's CreaturesInGlade names what it makes: subtype 0 its CreatureApe, 1 CreatureCow, 2 CreatureTiger.
+		// The rest of the script's creature numbering isn't known yet.
+		static const std::map<uint32_t, CreatureType> k_Species = {
+		    {0, CreatureType::GiantApe}, {1, CreatureType::Cow}, {2, CreatureType::Tiger}};
+		const auto species = k_Species.find(subtype);
+		if (species == k_Species.end())
+		{
+			SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "CREATE: creature subtype {} has no known species", subtype);
+			return static_cast<entt::entity>(0);
+		}
+		// Unowned until a script gives it to a player (CREATURE_SET_PLAYER), standing on the land.
+		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		return CreatureArchetype::Create(glm::vec3(position.x, ground, position.z), PlayerNames::NEUTRAL, species->second,
+		                                 0, yAngleRadians, scale, hint);
+	}
 	case ObjectType::Villager:
 	case ObjectType::VillagerChild:
 		// The script subtype is the VILLAGER_INFO number; the abode position picks the home town.
@@ -419,6 +438,7 @@ void NotifyGameThingClicked(uint32_t entity)
 // The scroll (highlight) the hand is pointing at: the nearest within reach of the pointer's ray. Scrolls float and
 // have no physics body for the ray to hit.
 uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction);
+uint32_t CreatureOnRay(const glm::vec3& origin, const glm::vec3& direction);
 
 bool ClickScrollAt(glm::vec2 screen)
 {
@@ -470,6 +490,37 @@ uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
 			best = id;
 		}
 	}
+	return best;
+}
+
+// The creature the pointer is on, if any: like a scroll, by its shape's middle and size, since a creature has no
+// physics body for the hand's ray to hit (Land 1's glade asks for a click on the Ape, Cow or Tiger to choose one).
+uint32_t CreatureOnRay(const glm::vec3& origin, const glm::vec3& direction)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto& meshes = Locator::resources::value().GetMeshes();
+	const auto along = glm::normalize(direction);
+	uint32_t best = 0;
+	float bestAhead = std::numeric_limits<float>::max();
+	registry.Each<const openblack::ecs::components::Creature, const openblack::ecs::components::Mesh, const Transform>(
+	    [&](entt::entity entity, const openblack::ecs::components::Creature&, const openblack::ecs::components::Mesh& mesh,
+	        const Transform& transform) {
+		    if (!meshes.Contains(mesh.id))
+		    {
+			    return;
+		    }
+		    const auto box = meshes.Handle(mesh.id)->GetBoundingBox();
+		    const auto middle = transform.position + transform.rotation * (box.Center() * transform.scale);
+		    const float reach = glm::length(box.Size() * transform.scale) * 0.5f;
+		    const auto toCreature = middle - origin;
+		    const float ahead = glm::dot(toCreature, along);
+		    // The nearest one along the ray, of those it passes within reach of.
+		    if (ahead > 0.0f && glm::length(toCreature - along * ahead) < reach && ahead < bestAhead)
+		    {
+			    bestAhead = ahead;
+			    best = static_cast<uint32_t>(entity);
+		    }
+	    });
 	return best;
 }
 
@@ -1672,10 +1723,14 @@ void CallInNear() // 067 CALL_IN_NEAR
 
 void OverrideStateAnimation() // 068 OVERRIDE_STATE_ANIMATION
 {
-	[[maybe_unused]] const auto animType = Pop().intVal;
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto animType = Pop().intVal;
+	const auto obj = Pop().uintVal;
+	// Which animation each script number means isn't known yet: logged once per number, the creature keeps standing.
+	static std::set<int32_t> logged;
+	if (logged.insert(animType).second)
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "OVERRIDE_STATE_ANIMATION {} not played (object {})", animType, obj);
+	}
 }
 
 void CreatureCreateRelativeToCreature() // 069 CREATURE_CREATE_RELATIVE_TO_CREATURE
@@ -1733,12 +1788,17 @@ void CreatureLearnDistinctionAboutActivityObject() // 074 CREATURE_LEARN_DISTINC
 
 void CreatureDoAction() // 075 CREATURE_DO_ACTION
 {
-	[[maybe_unused]] const auto withObject = Pop().uintVal;
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	[[maybe_unused]] const auto unk1 = Pop().intVal;
-	[[maybe_unused]] const auto creature = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto withObject = Pop().uintVal;
+	const auto target = Pop().uintVal;
+	const auto action = Pop().intVal;
+	const auto creature = Pop().uintVal;
+	// Creatures don't act yet: the action is logged once per action number, to find which ones the scripts need.
+	static std::set<int32_t> logged;
+	if (logged.insert(action).second)
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "CREATURE_DO_ACTION {} not done (creature {}, target {}, with {})",
+		                   action, creature, target, withObject);
+	}
 }
 
 void InCreatureHand() // 076 IN_CREATURE_HAND
@@ -1873,9 +1933,17 @@ void ConvertCameraFocus() // 082 CONVERT_CAMERA_FOCUS
 
 void CreatureSetPlayer() // 083 CREATURE_SET_PLAYER
 {
-	[[maybe_unused]] const auto creature = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// The creature becomes the player's: Land 1's glade, once one of the three is chosen.
+	const auto creature = Pop().uintVal;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(creature);
+	if (auto* component = creature != 0 && registry.Valid(entity) ? registry.TryGet<openblack::ecs::components::Creature>(entity)
+	                                                              : nullptr)
+	{
+		component->owner = PlayerNames::PLAYER_ONE;
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "CREATURE_SET_PLAYER: creature {} ({}) is the player's", creature,
+		                   static_cast<int>(component->species));
+	}
 }
 
 void StartCountdownTimer() // 084 START_COUNTDOWN_TIMER
@@ -2801,6 +2869,43 @@ namespace
 constexpr float k_AnimationFramesPerSecond = 15.0f;
 std::unordered_map<uint32_t, glm::vec3> g_lastPositions;
 
+// Each species' body animations, from its Data/CTR file, loaded the first time one is needed.
+const openblack::morphposes::Poses& CreaturePoses(CreatureType species)
+{
+	static const std::map<CreatureType, const char*> k_Files = {
+	    {CreatureType::GiantApe, "Bape.CBN"},      {CreatureType::BrownBear, "bbear.CBN"},
+	    {CreatureType::Chimp, "bchimp.CBN"},       {CreatureType::Cow, "Bcow.CBN"},
+	    {CreatureType::Gorilla, "bgorilla.CBN"},   {CreatureType::Ogre, "Bgreek.CBN"},
+	    {CreatureType::Horse, "Bhorse.CBN"},       {CreatureType::Leopard, "bleopard.CBN"},
+	    {CreatureType::Lion, "Blion.CBN"},         {CreatureType::Mandrill, "bmandrill.CBN"},
+	    {CreatureType::PolarBear, "BPolarBear.CBN"}, {CreatureType::Rhino, "brhino.CBN"},
+	    {CreatureType::Sheep, "bsheep.CBN"},       {CreatureType::Tiger, "btiger.CBN"},
+	    {CreatureType::Tortoise, "btort.CBN"},     {CreatureType::Wolf, "bwolf.CBN"},
+	    {CreatureType::Zebra, "bzebra.CBN"}};
+	static std::map<CreatureType, openblack::morphposes::Poses> loaded;
+	auto [it, added] = loaded.try_emplace(species);
+	if (added)
+	{
+		if (const auto file = k_Files.find(species); file != k_Files.end())
+		{
+			const auto path = Locator::filesystem::value().GetPath<openblack::filesystem::Path::Data>() / "CTR" / file->second;
+			openblack::morphposes::Load(path, "Creature", it->second);
+		}
+	}
+	return it->second;
+}
+
+// What each creature is playing: the pose's name in its CBN (ctrspec27.txt's names) and how far into it.
+struct CreaturePlaying
+{
+	std::string pose;
+	float frame;
+};
+std::unordered_map<uint32_t, CreaturePlaying> g_creaturePlaying;
+std::unordered_map<uint32_t, glm::vec3> g_creatureHomes; // SET_CREATURE_HOME
+// A guess, not yet checked against the original: the CBN headers' timing fields aren't decoded.
+constexpr float k_CreatureFramesPerSecond = 15.0f;
+
 // Animation units (keyframe time) per second of play, and one play's length in those units.
 std::pair<float, float> AnimationRate(uint32_t animation)
 {
@@ -2883,6 +2988,27 @@ void UpdateAnimations(float seconds)
 		    }
 	    });
 
+	// Creatures: posed from their species' own body animations, standing until something says otherwise.
+	registry.Each<const openblack::ecs::components::Creature, const Mesh>(
+	    [&registry, seconds](entt::entity entity, const openblack::ecs::components::Creature& creature, const Mesh& mesh) {
+		    const auto& poses = CreaturePoses(creature.species);
+		    auto& playing = g_creaturePlaying.try_emplace(static_cast<uint32_t>(entity), CreaturePlaying {"stand", 0.0f})
+		                        .first->second;
+		    const auto pose = poses.find(playing.pose);
+		    const auto& meshes = Locator::resources::value().GetMeshes();
+		    if (pose == poses.end() || pose->second.keyframes.empty() || !meshes.Contains(mesh.id))
+		    {
+			    return;
+		    }
+		    const auto frames = static_cast<float>(pose->second.keyframes.size());
+		    playing.frame = std::fmod(playing.frame + seconds * k_CreatureFramesPerSecond, frames);
+		    auto bones = openblack::morphposes::LocalBones(*meshes.Handle(mesh.id), pose->second, playing.frame, true);
+		    if (!bones.empty())
+		    {
+			    registry.AssignOrReplace<Animated>(entity, 0u, 0.0f, std::move(bones));
+		    }
+	    });
+
 	// Anything else a script animated (not a villager): play its animation through, then drop it.
 	for (auto it = g_scriptAnimations.begin(); it != g_scriptAnimations.end();)
 	{
@@ -2892,7 +3018,7 @@ void UpdateAnimations(float seconds)
 			it = g_scriptAnimations.erase(it);
 			continue;
 		}
-		if (registry.AllOf<Villager>(entity))
+		if (registry.AnyOf<Villager, openblack::ecs::components::Creature>(entity))
 		{
 			++it;
 			continue;
@@ -5054,10 +5180,12 @@ void IsLeashed() // 222 IS_LEASHED
 
 void SetCreatureHome() // 223 SET_CREATURE_HOME
 {
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto creature = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// Where it goes back to (its pen): kept for when creatures move about on their own; nothing reads it yet.
+	const auto position = PopVec();
+	const auto creature = Pop().uintVal;
+	g_creatureHomes[creature] = position;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SET_CREATURE_HOME: creature {} at ({:.1f}, {:.1f}, {:.1f})", creature,
+	                   position.x, position.y, position.z);
 }
 
 void GetHitObject() // 224 GET_HIT_OBJECT

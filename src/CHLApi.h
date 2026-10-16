@@ -47,6 +47,8 @@ void NotifyGameThingClicked(uint32_t entity);
 // After the scripts' turn: what was clicked before it has been seen by all of them.
 void EndScriptTurn();
 uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction);
+// The creature the ray passes over, nearest first (0 if none).
+uint32_t CreatureOnRay(const glm::vec3& origin, const glm::vec3& direction);
 // A long press on a scroll (screen position 0..1 each way) clicks it; false if there is none there.
 bool ClickScrollAt(glm::vec2 screen);
 

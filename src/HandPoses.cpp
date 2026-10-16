@@ -27,7 +27,8 @@ namespace openblack::handposes
 {
 namespace
 {
-std::map<std::string, morph::Animation, std::less<>> g_poses;
+morphposes::Poses g_poses;
+} // namespace
 
 // The segment named `name` of a Lionhead segmented file ("LiOnHeAd", then name[32], size, data...).
 std::vector<uint8_t> Segment(const std::vector<uint8_t>& file, std::string_view name)
@@ -52,20 +53,21 @@ std::vector<uint8_t> Segment(const std::vector<uint8_t>& file, std::string_view 
 	}
 	return {};
 }
-} // namespace
+} // namespace openblack::handposes
 
-bool Load()
+namespace openblack::morphposes
+{
+bool Load(const std::filesystem::path& path, std::string_view segmentName, Poses& poses)
 {
 	auto& fileSystem = Locator::filesystem::value();
-	const auto path = fileSystem.GetPath<filesystem::Path::Data>() / "CTR" / "hh.HBN";
 	try
 	{
-		const auto segment = Segment(fileSystem.ReadAll(path), "Hand");
+		const auto segment = handposes::Segment(fileSystem.ReadAll(path), segmentName);
 		morph::MorphFile file;
 		const auto result = file.Open(segment, fileSystem.GetPath<filesystem::Path::Data>(true));
 		if (result != morph::MorphResult::Success)
 		{
-			SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Hand poses: {}", morph::ResultToStr(result));
+			SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Poses in {}: {}", path.filename().string(), morph::ResultToStr(result));
 			return false;
 		}
 		// The file keeps a pose only for some of the spec's names, in the spec's order.
@@ -87,33 +89,25 @@ bool Load()
 		{
 			if (offsets[i] != 0)
 			{
-				g_poses.emplace(names[i], animations[next++]);
+				poses.emplace(names[i], animations[next++]);
 			}
 		}
-		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand poses: {} loaded", g_poses.size());
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Poses in {}: {} loaded", path.filename().string(), poses.size());
 		return true;
 	}
 	catch (const std::exception& e)
 	{
-		SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Hand poses: {}", e.what());
+		SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Poses in {}: {}", path.filename().string(), e.what());
 		return false;
 	}
 }
 
-int FrameCount(std::string_view name)
+std::vector<glm::mat4> LocalBones(const graphics::L3DMesh& mesh, const morph::Animation& pose, float frame, bool rootMoves)
 {
-	const auto it = g_poses.find(name);
-	return it == g_poses.end() ? 0 : static_cast<int>(it->second.keyframes.size());
-}
-
-std::vector<glm::mat4> LocalBones(const graphics::L3DMesh& mesh, std::string_view name, float frame)
-{
-	const auto it = g_poses.find(name);
-	if (it == g_poses.end() || it->second.keyframes.empty())
+	if (pose.keyframes.empty())
 	{
 		return {};
 	}
-	const auto& pose = it->second;
 	const auto& composed = mesh.GetBoneMatrices();
 	const auto& parents = mesh.GetBoneParents();
 	std::vector<glm::mat4> local(composed.size());
@@ -144,9 +138,9 @@ std::vector<glm::mat4> LocalBones(const graphics::L3DMesh& mesh, std::string_vie
 	for (size_t j = 0; j < pose.translatedJointIndices.size(); ++j)
 	{
 		const auto bone = pose.translatedJointIndices[j];
-		// Not the root: its translation lifts the whole hand clear of what it holds, and here the hand stays
-		// at the pointer with the held thing hanging under it.
-		if (bone < position.size() && parents[bone] != std::numeric_limits<uint32_t>::max())
+		// The hand's root stays put: its translation lifts the whole hand clear of what it holds, and here the
+		// hand stays at the pointer with the held thing hanging under it.
+		if (bone < position.size() && (rootMoves || parents[bone] != std::numeric_limits<uint32_t>::max()))
 		{
 			const auto& pa = pose.keyframes[a].translations[j];
 			const auto& pb = pose.keyframes[b].translations[j];
@@ -161,5 +155,26 @@ std::vector<glm::mat4> LocalBones(const graphics::L3DMesh& mesh, std::string_vie
 		local[i] = glm::translate(glm::mat4(1.0f), position[i]) * glm::mat4(glm::mat3(local[i])) * turn;
 	}
 	return local;
+}
+} // namespace openblack::morphposes
+
+namespace openblack::handposes
+{
+bool Load()
+{
+	const auto path = Locator::filesystem::value().GetPath<filesystem::Path::Data>() / "CTR" / "hh.HBN";
+	return morphposes::Load(path, "Hand", g_poses);
+}
+
+int FrameCount(std::string_view name)
+{
+	const auto it = g_poses.find(name);
+	return it == g_poses.end() ? 0 : static_cast<int>(it->second.keyframes.size());
+}
+
+std::vector<glm::mat4> LocalBones(const graphics::L3DMesh& mesh, std::string_view name, float frame)
+{
+	const auto it = g_poses.find(name);
+	return it == g_poses.end() ? std::vector<glm::mat4> {} : morphposes::LocalBones(mesh, it->second, frame, false);
 }
 } // namespace openblack::handposes

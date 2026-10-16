@@ -456,14 +456,16 @@ bool Game::Update() noexcept
 				// A scroll (highlight) pointed at: the Action Button or a tap on it is a click for the scripts
 				// (GAME_THING_CLICKED) - the original's "Click the Action Button to access them".
 				{
-					const auto scroll = glm::any(glm::isnan(rayOrigin) || glm::isnan(rayDirection))
-					                        ? 0u
-					                        : chlapi::HighlightOnRay(rayOrigin, rayDirection);
+					const bool rayValid = !glm::any(glm::isnan(rayOrigin) || glm::isnan(rayDirection));
+					const auto scroll = rayValid ? chlapi::HighlightOnRay(rayOrigin, rayDirection) : 0u;
+					// A creature is clicked the same way (it has no physics body for the ray below to hit).
+					const auto clickable =
+					    scroll != 0 ? scroll : (rayValid ? chlapi::CreatureOnRay(rayOrigin, rayDirection) : 0u);
 					static bool s_scrollRightWas = false;
 					static bool s_scrollLeftWas = false;
-					if (scroll != 0 && ((g_rightButtonDown && !s_scrollRightWas) || (g_leftButtonDown && !s_scrollLeftWas)))
+					if (clickable != 0 && ((g_rightButtonDown && !s_scrollRightWas) || (g_leftButtonDown && !s_scrollLeftWas)))
 					{
-						chlapi::NotifyGameThingClicked(scroll);
+						chlapi::NotifyGameThingClicked(clickable);
 					}
 					s_scrollRightWas = g_rightButtonDown;
 					s_scrollLeftWas = g_leftButtonDown;
