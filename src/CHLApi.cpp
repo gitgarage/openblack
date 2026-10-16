@@ -781,49 +781,29 @@ uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
 // physics body for the hand's ray to hit (Land 1's glade asks for a click on the Ape, Cow or Tiger to choose one).
 uint32_t CreatureOnRay(const glm::vec3& origin, const glm::vec3& direction)
 {
+	// Of the creatures whose box the ray passes through, the one whose middle it passes closest to, for its size: the
+	// boxes cover arms and all, and the nearest box along the ray let the Ape in front take every click meant for the
+	// Tiger behind it.
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto& meshes = Locator::resources::value().GetMeshes();
 	const auto along = glm::normalize(direction);
 	uint32_t best = 0;
-	float bestAhead = std::numeric_limits<float>::max();
+	float bestOff = std::numeric_limits<float>::max();
 	registry.Each<const openblack::ecs::components::Creature, const openblack::ecs::components::Mesh, const Transform>(
 	    [&](entt::entity entity, const openblack::ecs::components::Creature&, const openblack::ecs::components::Mesh& mesh,
 	        const Transform& transform) {
-		    if (!meshes.Contains(mesh.id))
+		    if (!meshes.Contains(mesh.id) || !CreatureRayHit(entity, origin, direction))
 		    {
 			    return;
 		    }
-		    // The ray against the creature's own box, in the mesh's frame: a sphere around the whole box was so
-		    // generous that the Ape's and Tiger's covered the Cow beside them, which could never be clicked.
 		    const auto box = meshes.Handle(mesh.id)->GetBoundingBox();
-		    const auto toLocal = glm::transpose(transform.rotation);
-		    const auto localOrigin = toLocal * (origin - transform.position) / transform.scale;
-		    const auto localAlong = toLocal * along / transform.scale;
-		    float enter = 0.0f;
-		    float leave = std::numeric_limits<float>::max();
-		    for (int axis = 0; axis < 3; ++axis)
+		    const auto middle = transform.position + transform.rotation * (box.Center() * transform.scale);
+		    const auto toMiddle = middle - origin;
+		    const float off = glm::length(toMiddle - along * glm::dot(toMiddle, along)) /
+		                      std::max(glm::length(box.Size() * transform.scale) * 0.5f, 1e-3f);
+		    if (off < bestOff)
 		    {
-			    if (std::abs(localAlong[axis]) < 1e-6f)
-			    {
-				    if (localOrigin[axis] < box.minima[axis] || localOrigin[axis] > box.maxima[axis])
-				    {
-					    return;
-				    }
-				    continue;
-			    }
-			    float near = (box.minima[axis] - localOrigin[axis]) / localAlong[axis];
-			    float far = (box.maxima[axis] - localOrigin[axis]) / localAlong[axis];
-			    if (near > far)
-			    {
-				    std::swap(near, far);
-			    }
-			    enter = std::max(enter, near);
-			    leave = std::min(leave, far);
-		    }
-		    // The nearest box the ray goes into (a distance along `along`, the scale having been divided out).
-		    if (enter <= leave && enter < bestAhead)
-		    {
-			    bestAhead = enter;
+			    bestOff = off;
 			    best = static_cast<uint32_t>(entity);
 		    }
 	    });
