@@ -309,11 +309,12 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		const auto meshId = openblack::creature::GetIdFromType(species->second, openblack::creature::CreatureBody::Appearance::Base);
 		const float meshHeight = meshes.Contains(meshId) ? meshes.Handle(meshId)->GetBoundingBox().Size().y : 0.0f;
 		const float size = villagerHeight > 0.0f && meshHeight > 0.0f ? k_VillagersTall * villagerHeight / meshHeight : 0.25f;
-		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "CREATE creature {}: mesh {:.1f} tall, a villager {:.2f}, so x{:.3f}",
-		                   static_cast<int>(species->second), meshHeight, villagerHeight, size);
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
-		return CreatureArchetype::Create(glm::vec3(position.x, ground, position.z), PlayerNames::NEUTRAL, species->second,
-		                                 0, yAngleRadians, scale * size, hint);
+		const auto made = CreatureArchetype::Create(glm::vec3(position.x, ground, position.z), PlayerNames::NEUTRAL,
+		                                            species->second, 0, yAngleRadians, scale * size, hint);
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "CREATE creature {} (species {}): mesh {:.1f} tall, a villager {:.2f}, so x{:.3f}",
+		                   static_cast<uint32_t>(made), static_cast<int>(species->second), meshHeight, villagerHeight, size);
+		return made;
 	}
 	case ObjectType::Villager:
 	case ObjectType::VillagerChild:
@@ -494,7 +495,26 @@ void EndScriptTurn()
 void NotifyGameThingClicked(uint32_t entity)
 {
 	g_clickedThing = entity;
-	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Clicked {}", entity);
+	// What it was, so a click that went to the wrong thing can be told from the log.
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto e = static_cast<entt::entity>(entity);
+	std::string what = "object";
+	if (registry.Valid(e))
+	{
+		if (const auto* creature = registry.TryGet<openblack::ecs::components::Creature>(e))
+		{
+			what = fmt::format("creature (species {})", static_cast<int>(creature->species));
+		}
+		else if (registry.AllOf<openblack::ecs::components::Villager>(e))
+		{
+			what = "villager";
+		}
+		else if (g_highlights.contains(entity))
+		{
+			what = "scroll";
+		}
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Clicked {} ({})", entity, what);
 }
 
 // The scroll (highlight) the hand is pointing at: the nearest within reach of the pointer's ray. Scrolls float and
