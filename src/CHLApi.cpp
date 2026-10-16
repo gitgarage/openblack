@@ -3521,14 +3521,20 @@ std::string ActOutCreatureOrder(entt::entity entity, const CreatureOrder& order,
 		{
 			hurl = {order};
 		}
-		const auto stone = static_cast<entt::entity>(order.with);
-		if (hurl.done || targetTransform == nullptr || order.with == 0 || !registry.Valid(stone))
+		// The script passes what is thrown in the target slot and whom it is thrown at in the with slot (Land 1:
+		// MyCreature, HURL, TinyStone, Trainer); read the other way round, the Ape threw Sable at the stone.
+		const auto thrown = order.target;
+		const auto victim = order.with;
+		const auto stone = static_cast<entt::entity>(thrown);
+		const auto victimEntity = static_cast<entt::entity>(victim);
+		const auto* victimTransform = victim != 0 && registry.Valid(victimEntity) ? registry.TryGet<Transform>(victimEntity) : nullptr;
+		if (hurl.done || victimTransform == nullptr || thrown == 0 || !registry.Valid(stone))
 		{
 			return "stand";
 		}
 		if (!hurl.launched)
 		{
-			if (!TurnTowards(transform, targetTransform->position, turn))
+			if (!TurnTowards(transform, victimTransform->position, turn))
 			{
 				return "stand";
 			}
@@ -3540,25 +3546,25 @@ std::string ActOutCreatureOrder(entt::entity entity, const CreatureOrder& order,
 			const float height = mesh != nullptr && meshes.Contains(mesh->id) ? meshes.Handle(mesh->id)->GetBoundingBox().Size().y * transform.scale.y : 5.0f;
 			auto& stoneTransform = registry.Get<Transform>(stone);
 			stoneTransform.position = transform.position + transform.rotation * glm::vec3(0.0f, height * 0.7f, -height * 0.3f);
-			const auto aim = targetTransform->position + glm::vec3(0.0f, 1.0f, 0.0f);
-			g_flying[order.with] = (aim - stoneTransform.position) / k_FlightSeconds + glm::vec3(0.0f, 0.5f * k_Gravity9 * k_FlightSeconds, 0.0f);
+			const auto aim = victimTransform->position + glm::vec3(0.0f, 1.0f, 0.0f);
+			g_flying[thrown] = (aim - stoneTransform.position) / k_FlightSeconds + glm::vec3(0.0f, 0.5f * k_Gravity9 * k_FlightSeconds, 0.0f);
 			g_creatureHolding.erase(static_cast<uint32_t>(entity));
 			hurl.launched = true;
-			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature {} hurls {} at {}", static_cast<uint32_t>(entity), order.with, order.target);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature {} hurls {} at {}", static_cast<uint32_t>(entity), thrown, victim);
 		}
 		hurl.sinceLaunch += seconds;
 		// It lands on the target, or anywhere near: either way the target is knocked off its feet.
 		const auto& stoneAt = registry.Get<Transform>(stone).position;
-		const bool hit = glm::distance(stoneAt, targetTransform->position + glm::vec3(0.0f, 1.0f, 0.0f)) < 3.0f;
-		const bool landed = !g_flying.contains(order.with) && hurl.sinceLaunch > 0.2f;
+		const bool hit = glm::distance(stoneAt, victimTransform->position + glm::vec3(0.0f, 1.0f, 0.0f)) < 3.0f;
+		const bool landed = !g_flying.contains(thrown) && hurl.sinceLaunch > 0.2f;
 		if (hit || landed)
 		{
-			const auto away = glm::normalize(glm::vec3(targetTransform->position.x - transform.position.x, 0.0f,
-			                                           targetTransform->position.z - transform.position.z) + glm::vec3(1e-3f, 0.0f, 0.0f));
-			g_flying[order.target] = away * 5.0f + glm::vec3(0.0f, 12.0f, 0.0f); // about 2.5 s in the air
-			g_knockedUntil[order.target] = ScriptNow() + std::chrono::seconds(6);
+			const auto away = glm::normalize(glm::vec3(victimTransform->position.x - transform.position.x, 0.0f,
+			                                           victimTransform->position.z - transform.position.z) + glm::vec3(1e-3f, 0.0f, 0.0f));
+			g_flying[victim] = away * 5.0f + glm::vec3(0.0f, 12.0f, 0.0f); // about 2.5 s in the air
+			g_knockedUntil[victim] = ScriptNow() + std::chrono::seconds(6);
 			hurl.done = true;
-			SPDLOG_LOGGER_INFO(spdlog::get("game"), "{} knocked flying by creature {}'s throw", order.target, static_cast<uint32_t>(entity));
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "{} knocked flying by creature {}'s throw", victim, static_cast<uint32_t>(entity));
 		}
 		return hurl.sinceLaunch < 1.0f ? "hurl_flat" : "stand";
 	}
