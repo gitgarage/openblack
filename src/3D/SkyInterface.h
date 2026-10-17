@@ -25,6 +25,9 @@ public:
 	[[nodiscard]] virtual graphics::L3DMesh& GetMesh() const noexcept = 0;
 	[[nodiscard]] virtual graphics::Texture2D& GetTexture() const noexcept = 0;
 	virtual void SetTime(float time) noexcept = 0;
+	/// Draw broad daylight whatever the time is; the time itself, and everything scripts read of it, is unchanged.
+	virtual void SetForceDaylight(bool force) noexcept = 0;
+	[[nodiscard]] virtual bool GetForceDaylight() const noexcept = 0;
 };
 
 } // namespace openblack

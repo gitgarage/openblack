@@ -40,6 +40,8 @@ public:
 	void SetDayNightTimes(float nightFull, float duskStart, float duskEnd, float dayFull) noexcept;
 	/// Time between 0 and 24 in hours
 	void SetTime(float time) noexcept override;
+	void SetForceDaylight(bool force) noexcept override { _forceDaylight = force; }
+	[[nodiscard]] bool GetForceDaylight() const noexcept override { return _forceDaylight; }
 	/// Return index in times as a float for interpolation between adjacent times
 	/// Will use _nightFullTime, _duskStartTime, _duskEndTime and _dayFullTime to determine value
 	/// 0 -> Night (min value)
@@ -76,6 +78,7 @@ private:
 	float _duskStartTime;
 	float _duskEndTime;
 	float _dayFullTime;
+	bool _forceDaylight {false};
 };
 
 } // namespace openblack

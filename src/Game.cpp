@@ -430,6 +430,15 @@ bool Game::Update() noexcept
 	}
 
 	camera.Update(deltaTime);
+	{
+		// A script's camera (cutscenes, the creature close-up) comes within a unit of the person it films, and the
+		// usual near plane cut away the half of them facing it. Only then, as the 24-bit depth buffer's far precision
+		// pays for a closer plane.
+		const auto& config = Locator::config::value();
+		const float nearClip = camera.IsScriptControlled() ? std::min(config.cameraNearClip, 0.1f) : config.cameraNearClip;
+		const float aspect = Locator::windowing::has_value() ? Locator::windowing::value().GetAspectRatio() : 1.0f;
+		camera.SetProjectionMatrixPerspective(config.cameraXFov, aspect, nearClip, config.cameraFarClip);
+	}
 	chlapi::UpdateTemple(deltaTime); // inside the Temple the view only turns, in place
 	Locator::cameraBookmarkSystem::value().Update(deltaTime);
 	if (!_paused)
@@ -549,6 +558,7 @@ bool Game::Update() noexcept
 				}
 				chlapi::SetObjectUnderHand(objectUnderHand);
 				chlapi::SetHandGround(intersectionTransform.position);
+				chlapi::SetHandRay(rayOrigin, rayDirection);
 				chlapi::SetWoodUnderHand(chlapi::FindWoodNear(intersectionTransform.position, k_HandReach));
 				static bool s_rightWasDown = false;
 				static bool s_letGoOnRelease = false;

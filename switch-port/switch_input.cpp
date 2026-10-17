@@ -8,7 +8,8 @@
 //                                                               collect wood until the finger lifts (ZL then
 //                                                               puts it down where the hand is), or at a
 //                                                               finished Temple's door: go in, or on a
-//                                                               scroll: click it
+//                                                               scroll: click it, or with your creature's leash
+//                                                               on, on a tree or house: tie it there (untie: again)
 //                              move straight away              -> no button (hover: drawing a gesture)
 //                              quick tap without moving        -> left click
 //   ZR (hold)             -> left mouse button at the cursor (also turns any touch into a grab at once)
@@ -18,7 +19,8 @@
 //   R / L                 -> zoom in / out, continuously while held (straight into the camera's held zoom:
 //                            not the wheel, whose steps each waited on a camera flight, nor Ctrl + Up / Down,
 //                            which took over the left stick's keys)
-//   X / Y                 -> Space (zoom to temple) / C (zoom to creature)
+//   X                     -> Space (zoom to temple)
+//   Y                     -> switch between the time of day's own light and broad daylight (to see at night)
 //   +                     -> P (pause/unpause - openblack starts paused, so nothing simulates until
 //                            this is pressed)
 //   D-pad up / left       -> save test point 1 / 2 (keypad 1 / 2)
@@ -131,6 +133,7 @@ bool touchFrame(u64 now, bool forceGrab)
 
 	if (g_touch == Touch::None)
 	{
+		openblack::chlapi::HandJumped(); // the hand lands where the finger does, from wherever it was
 		g_touch = Touch::Undecided;
 		g_touchStart = now;
 		g_touchStartX = x;
@@ -158,6 +161,10 @@ bool touchFrame(u64 now, bool forceGrab)
 			{
 				openblack::chlapi::EnterTemple();
 				g_touch = Touch::Hover;
+			}
+			else if (!forceGrab && openblack::chlapi::LeashTieAtPointer())
+			{
+				g_touch = Touch::Hover; // a long press on a tree or house with the leash on ties it there (or unties it)
 			}
 			else
 			{
@@ -206,7 +213,6 @@ void switchInputFrame()
 	setKey(SDL_SCANCODE_Q, right.y < -k_StickThreshold);
 
 	setKey(SDL_SCANCODE_SPACE, (held & HidNpadButton_X) != 0);
-	setKey(SDL_SCANCODE_C, (held & HidNpadButton_Y) != 0);
 	setKey(SDL_SCANCODE_P, (held & HidNpadButton_Plus) != 0);
 	setKey(SDL_SCANCODE_KP_1, (held & HidNpadButton_Up) != 0);
 	setKey(SDL_SCANCODE_KP_2, (held & HidNpadButton_Left) != 0);
@@ -227,6 +233,14 @@ void switchInputFrame()
 		openblack::chlapi::CycleLeash();
 	}
 	s_aWasDown = aDown;
+	// Y: broad daylight, or back to the time of day's own light - one switch each press.
+	static bool s_yWasDown = false;
+	const bool yDown = (held & HidNpadButton_Y) != 0;
+	if (yDown && !s_yWasDown)
+	{
+		openblack::chlapi::ToggleDaylight();
+	}
+	s_yWasDown = yDown;
 	// Play speed, for hurrying through cutscenes: each press of a stick doubles (right) or halves (left) it.
 	static u64 s_sticksWere = 0;
 	const u64 sticks = held & (HidNpadButton_StickR | HidNpadButton_StickL);

@@ -90,6 +90,11 @@ float Sky::GetCurrentSkyType() const noexcept
 {
 	assert(_timeOfDay <= 24.0f);
 
+	if (_forceDaylight)
+	{
+		return 2.0f; // Index for day texture
+	}
+
 	// Reflect time at 12
 	float time = _timeOfDay > 12.0f ? 24.0f - _timeOfDay : _timeOfDay;
 

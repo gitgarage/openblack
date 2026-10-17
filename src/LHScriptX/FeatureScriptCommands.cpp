@@ -33,6 +33,7 @@
 #include "ECS/Archetypes/StreetLanternArchetype.h"
 #include "ECS/Archetypes/TownArchetype.h"
 #include "ECS/Archetypes/TreeArchetype.h"
+#include "ECS/Archetypes/AnimalArchetype.h"
 #include "ECS/Archetypes/VillagerArchetype.h"
 #include "ECS/Components/Footpath.h"
 #include "ECS/Components/Stream.h"
@@ -398,16 +399,15 @@ void FeatureScriptCommands::CreatePlannedWorshipSite([[maybe_unused]] glm::vec3 
 	// __func__);
 }
 
-void FeatureScriptCommands::CreateAnimal([[maybe_unused]] glm::vec3 position, int32_t, int32_t, int32_t)
+// The animal's type comes first (Land 1: CREATE_NEW_ANIMAL("x,z", 10, 1, 0, 13) is a pig); the rest isn't known yet.
+void FeatureScriptCommands::CreateAnimal(glm::vec3 position, int32_t type, int32_t, int32_t)
 {
-	// SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "LHScriptX: {}:{}: Function {} not implemented.", __FILE__, __LINE__,
-	// __func__);
+	AnimalArchetype::Create(position, static_cast<AnimalInfo>(type));
 }
 
-void FeatureScriptCommands::CreateNewAnimal([[maybe_unused]] glm::vec3 position, int32_t, int32_t, int32_t, int32_t)
+void FeatureScriptCommands::CreateNewAnimal(glm::vec3 position, int32_t type, int32_t, int32_t, int32_t)
 {
-	// SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "LHScriptX: {}:{}: Function {} not implemented.", __FILE__, __LINE__,
-	// __func__);
+	AnimalArchetype::Create(position, static_cast<AnimalInfo>(type));
 }
 
 void FeatureScriptCommands::CreateForest([[maybe_unused]] int32_t forestId, [[maybe_unused]] glm::vec3 position)

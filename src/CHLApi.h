@@ -82,6 +82,8 @@ bool HandCollecting();
 // Rewarding and punishing your creature: the action button pressed with the hand on it locks the camera facing it;
 // while held, quick swipes across it are slaps and slow movement over it strokes; released, the camera goes back.
 bool BeginCreatureInteraction(const glm::vec3& origin, const glm::vec3& direction);
+// The hand moved without being swept there (a new touch puts it where the finger lands): not a slap.
+void HandJumped();
 bool InCreatureInteraction();
 void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin, const glm::vec3& direction,
                                std::chrono::microseconds dt);
@@ -90,10 +92,16 @@ void EndCreatureInteraction();
 bool HandGiveToCreature(const glm::vec3& origin, const glm::vec3& direction);
 // The leash: cycle none/regular/reward/punishment on your creature; send it with the action button while it is on.
 void CycleLeash();
+// Switches between the time of day's own light and broad daylight (to see at night); the game's time is untouched.
+void ToggleDaylight();
 bool LeashCommand(const glm::vec3& ground, uint32_t objectUnderHand);
+// With the leash on, a long press on a tree, a house or anything else fixed ties it there, or unties it if it already is.
+bool LeashTieAtPointer();
 // The Temple: a finished Temple's door takes the player in (a long press there on the Switch).
 std::optional<glm::vec3> TempleDoor();
 void SetHandGround(const glm::vec3& position);
+// The pointer's ray this frame, for what a press is on.
+void SetHandRay(const glm::vec3& origin, const glm::vec3& direction);
 bool HandAtTempleDoor();
 bool InTemple();
 void EnterTemple();
