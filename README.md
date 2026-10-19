@@ -80,7 +80,7 @@ are.
 | **R / L** | Zoom in / zoom out (held) |
 | **ZL** | The **Action Button**: pick up, collect, give, let go, throw (see below) |
 | **ZR** | While holding something: the Action Button too, as ZL |
-| **ZR** (held, hand empty) | Grab the land and drag to move around |
+| **Long press on an area of the ground, then drag** | Drags the user in that direction |
 | **A** | Your creature's leash: none, regular, reward (good), punishment (evil), one step each press |
 | **X** | Bring your creature to where your hand is |
 | **Y** | Switch between the time of day's own light and broad daylight (for seeing at night) |
