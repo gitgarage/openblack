@@ -57,7 +57,11 @@ entt::entity VillagerArchetype::Create([[maybe_unused]] const glm::vec3& abodePo
 
 	registry.Assign<Villager>(entity, health, static_cast<uint32_t>(age), hunger, lifeStage, sex, info.tribeType,
 	                          info.villagerNumber, task, town, abode);
-	registry.Assign<WallHug>(entity, glm::vec2(), glm::vec2(), 0.0f, GetSpeedStateSpeed(info.speedGroup.speedDefault));
+	// The pathfinder steps a living by its WallHug speed once a game turn (100 ms), and info.dat's speed is metres a
+	// second: a tenth of it a turn. Given whole, villagers about the town went ten times their pace (Mike,
+	// 2026-10-17: much faster than the builders, whose walk is right).
+	constexpr float k_TurnSeconds = 0.1f;
+	registry.Assign<WallHug>(entity, glm::vec2(), glm::vec2(), 0.0f, GetSpeedStateSpeed(info.speedGroup.speedDefault) * k_TurnSeconds);
 	registry.Assign<Mesh>(entity, MeshResource(type, age), static_cast<int8_t>(0), static_cast<int8_t>(0));
 	auto turnsSinceStateChange = Locator::rng::value().NextValue<uint16_t>(1, 500);
 	registry.Assign<LivingAction>(entity, VillagerStates::Created, turnsSinceStateChange);

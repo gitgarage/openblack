@@ -12,14 +12,21 @@
 #include "RenderingSystem.h"
 
 #include <algorithm>
+#include <chrono>
+#include <array>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <glm/gtx/transform.hpp>
+#include <spdlog/spdlog.h>
 
 #include "3D/L3DAnim.h"
 #include "3D/L3DMesh.h"
 #include "ECS/Components/Construction.h"
+#include "ECS/Components/ShownAsShadow.h"
+#include "ECS/Components/Asleep.h"
+#include "ECS/Components/Feature.h"
 #include "Graphics/Renderer.h"
 #include "ECS/Components/Mesh.h"
 #include "ECS/Components/MorphWithTerrain.h"
@@ -27,9 +34,11 @@
 #include "ECS/Components/Temple.h"
 #include "ECS/Components/Transform.h"
 #include "ECS/Registry.h"
+#include "3D/LandIslandInterface.h"
 #include "Graphics/DebugLines.h"
 #include "Graphics/GraphicsHandleBgfx.h"
 #include "Graphics/ShaderManager.h"
+#include "Camera/Camera.h"
 #include "Locator.h"
 #include "Resources/ResourceManager.h"
 #include "Resources/ResourcesInterface.h"
@@ -148,9 +157,108 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 	// Store offsets of uniforms for descs
 	std::map<entt::id_type, uint32_t> uniformOffsets;
 
+	// Whether a thing shows in the water: the sea (land under height 0) within its height above the sea of where it
+	// stands (Mike, 2026-10-17: reflect only what is near the water and tall enough to be in the reflection). Kept
+	// per thing, looked at again once it has moved 2 or more.
+	_renderContext.reflectedDrawDescs.clear();
+	static std::unordered_map<entt::entity, std::pair<glm::vec3, bool>> s_reflects;
+	auto reflects = [&meshes](entt::entity entity, const Mesh& mesh, const Transform& transform) {
+		auto& cached = s_reflects[entity];
+		if (glm::distance(cached.first, transform.position) < 2.0f && cached.first != glm::vec3(0.0f))
+		{
+			return cached.second;
+		}
+		cached.first = transform.position;
+		const auto& terrain = Locator::terrainSystem::value();
+		const float top = transform.position.y + meshes.Handle(mesh.id)->GetBoundingBox().maxima.y * transform.scale.y;
+		bool near = false;
+		if (top > 0.5f)
+		{
+			const auto at = glm::vec2(transform.position.x, transform.position.z);
+			near = terrain.GetHeightAt(at) < 0.0f;
+			const float reach = std::min(top, 80.0f);
+			const float step = std::max(reach / 6.0f, 2.0f);
+			for (float r = step; !near && r <= reach; r += step)
+			{
+				for (int d = 0; d < 8 && !near; ++d)
+				{
+					const float a = static_cast<float>(d) * glm::quarter_pi<float>();
+					near = terrain.GetHeightAt(at + glm::vec2(std::cos(a), std::sin(a)) * r) < 0.0f;
+				}
+			}
+		}
+		cached.second = near;
+		return near;
+	};
+
+	// What is drawn: only what is in the camera's view; cow-sized and smaller only while big enough there to see
+	// (under ~3 pixels across it is left out). Mike, 2026-10-18: draw nothing far off or off camera. A bounding sphere each, tested against the four
+	// sides of the view (Gribb-Hartmann planes from view x projection) and by its size over its distance.
+	const auto& camera = Locator::camera::value();
+	const auto viewProjection = camera.GetViewProjectionMatrix();
+	std::array<glm::vec4, 4> sides;
+	for (int i = 0; i < 2; ++i)
+	{
+		const glm::vec4 row(viewProjection[0][i], viewProjection[1][i], viewProjection[2][i], viewProjection[3][i]);
+		const glm::vec4 w(viewProjection[0][3], viewProjection[1][3], viewProjection[2][3], viewProjection[3][3]);
+		sides.at(static_cast<size_t>(i * 2)) = w + row;
+		sides.at(static_cast<size_t>(i * 2 + 1)) = w - row;
+	}
+	for (auto& side : sides)
+	{
+		side /= std::max(glm::length(glm::vec3(side)), 1e-6f);
+	}
+	const auto eye = camera.GetOrigin();
+	constexpr float k_SmallestSeen = 0.0025f; // radius over distance: about 3 pixels across at 720 lines
+	auto inView = [&](entt::id_type meshId, const Transform& transform) {
+		if (!meshes.Contains(meshId))
+		{
+			return true;
+		}
+		const auto box = meshes.Handle(meshId)->GetBoundingBox();
+		const float scale = std::max({transform.scale.x, transform.scale.y, transform.scale.z});
+		const auto middle = transform.position + transform.rotation * (box.Center() * transform.scale);
+		const float radius = glm::length(box.Size()) * 0.5f * scale;
+		for (const auto& side : sides)
+		{
+			if (glm::dot(glm::vec3(side), middle) + side.w < -radius)
+			{
+				return false; // wholly off one side of the view
+			}
+		}
+		// Bigger than a cow (a large rock, a house, a tree), it is drawn however far off, while in view; cows, people and
+		// smaller drop out once too small to see (Mike, 2026-10-18). The cow measured from its own mesh.
+		static const float s_cowRadius = [&meshes]() {
+			const auto cow = resources::HashIdentifier(MeshId::AnimalCow1);
+			return meshes.Contains(cow) ? glm::length(meshes.Handle(cow)->GetBoundingBox().Size()) * 0.5f : 2.0f;
+		}();
+		// Never too small: what the player looks for - scrolls (the miniscrolls, gold, silver, bronze), the miracle
+		// bubble and its icon models (Mike, 2026-10-18: the gold scroll was gone).
+		static const std::unordered_set<entt::id_type> s_alwaysSeen = []() {
+			std::unordered_set<entt::id_type> ids;
+			for (int m = static_cast<int>(MeshId::I_Blast); m <= static_cast<int>(MeshId::I_Wall); ++m)
+			{
+				ids.insert(resources::HashIdentifier(static_cast<MeshId>(m)));
+			}
+			for (int m = static_cast<int>(MeshId::SpellHealMesh); m <= static_cast<int>(MeshId::SpellPhileSmall); ++m)
+			{
+				ids.insert(resources::HashIdentifier(static_cast<MeshId>(m)));
+			}
+			ids.insert(entt::hashed_string("spell/seed").value());
+			return ids;
+		}();
+		return radius > s_cowRadius * 1.05f || s_alwaysSeen.contains(meshId) || radius >= k_SmallestSeen * glm::distance(eye, middle);
+	};
+
 	// Set transforms for instanced draw at offsets
 	registry.Each<const Mesh, const Transform>(
-	    [this, &uniformOffsets, drawBoundingBox, &defaultPoseRow](const Mesh& mesh, const Transform& transform) {
+	    [this, &registry, &uniformOffsets, drawBoundingBox, &defaultPoseRow, &reflects, &inView](entt::entity entity, const Mesh& mesh,
+	                                                                                            const Transform& transform) {
+		    // Far-off trees are drawn as just their shadows (ShownAsShadow, set by CHLApi's shadows).
+		    if (!inView(mesh.id, transform) || registry.AllOf<ShownAsShadow>(entity))
+		    {
+			    return;
+		    }
 		    auto offset = uniformOffsets.insert(std::make_pair(mesh.id, 0));
 		    auto desc = _renderContext.instancedDrawDescs.find(mesh.id);
 
@@ -169,8 +277,31 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 		    modelMatrix[0][3] = static_cast<float>(defaultPoseRow(mesh.id)); // bone texture row
 		    _renderContext.instanceUniforms[idx] = modelMatrix;
 		    offset.first->second++;
+		    if (reflects(entity, mesh, transform))
+		    {
+			    _renderContext.reflectedDrawDescs.push_back({mesh.id, idx, false, desc->second.morphWithTerrain});
+		    }
 	    },
 	    entt::exclude<TempleInteriorPart, Animated, Construction>);
+	// Each mesh's draw: as many as are in view, from the start of its slots.
+	uint32_t drawn = 0;
+	uint32_t slots = 0;
+	for (auto& [meshId, desc] : _renderContext.instancedDrawDescs)
+	{
+		slots += desc.count;
+		const auto counted = uniformOffsets.find(meshId);
+		desc.count = counted != uniformOffsets.end() ? counted->second : 0;
+		drawn += desc.count;
+	}
+	{
+		static auto s_said = std::chrono::steady_clock::now();
+		if (std::chrono::steady_clock::now() - s_said > std::chrono::seconds(10))
+		{
+			s_said = std::chrono::steady_clock::now();
+			SPDLOG_LOGGER_INFO(spdlog::get("graphics"), "Culling: {} of {} models drawn (the rest off camera or too small to see)",
+			                   drawn, slots);
+		}
+	}
 
 
 	// Animated entities: each posed from its animation's frame. The animation gives each bone relative to its
@@ -179,7 +310,13 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 	uint32_t animatedIndex = _renderContext.animatedOffset;
 	std::vector<glm::mat4> bones;
 	registry.Each<const Mesh, const Transform, const Animated>(
-	    [&](const Mesh& mesh, const Transform& transform, const Animated& animated) {
+	    [&](entt::entity entity, const Mesh& mesh, const Transform& transform, const Animated& animated) {
+		    // Far-off villagers and animals are drawn as just their shadows (ShownAsShadow, set by CHLApi's shadows).
+		    // And villagers asleep in their houses (Asleep) aren't seen at all.
+		    if (!inView(mesh.id, transform) || registry.AnyOf<ShownAsShadow, Asleep>(entity))
+		    {
+			    return; // not drawn: no pose worked out either
+		    }
 		    auto modelMatrix = glm::mat4(transform.rotation);
 		    modelMatrix = glm::translate(modelMatrix, transform.position * transform.rotation);
 		    modelMatrix = glm::scale(modelMatrix, transform.scale);
@@ -216,6 +353,10 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 		    modelMatrix[0][3] = static_cast<float>(row);
 		    _renderContext.instanceUniforms[idx] = modelMatrix;
 		    _renderContext.animatedDrawDescs.push_back({mesh.id, idx, animated.animation, animated.time});
+		    if (reflects(entity, mesh, transform))
+		    {
+			    _renderContext.reflectedDrawDescs.push_back({mesh.id, idx, true, false});
+		    }
 	    },
 	    entt::exclude<TempleInteriorPart>);
 
@@ -223,21 +364,27 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 	_renderContext.constructionDrawDescs.clear();
 	uint32_t constructionIndex = animatedIndex; // after the animated entities' uniforms
 	registry.Each<const Mesh, const Transform, const Construction>(
-	    [&](const Mesh& mesh, const Transform& transform, const Construction& construction) {
+	    [&](entt::entity entity, const Mesh& mesh, const Transform& transform, const Construction& construction) {
 		    const auto l3dMesh = meshes.Handle(mesh.id);
 		    // As the original's: for the first half the building and its scaffold go up together, layer by layer
 		    // from the bottom; for the second half the building is whole and the scaffold comes down from the top.
 		    const auto box = l3dMesh->GetBoundingBox();
 		    const float bottom = transform.position.y + box.minima.y * transform.scale.y;
 		    const float height = box.Size().y * transform.scale.y;
-		    const float firstHalf = std::min(construction.built * 2.0f, 1.0f);
-		    const float secondHalf = std::max(construction.built * 2.0f - 1.0f, 0.0f);
-		    graphics::SetScaffoldShown(*l3dMesh, construction.built < 1.0f ? 1.0f : 0.0f);
+		    const float built = construction.drawnFrom + construction.built * (1.0f - construction.drawnFrom);
+		    const float firstHalf = std::min(built * 2.0f, 1.0f);
+		    const float secondHalf = std::max(built * 2.0f - 1.0f, 0.0f);
+		    graphics::SetScaffoldShown(*l3dMesh, built < 1.0f ? 1.0f : 0.0f);
 		    graphics::SetBuiltHeight(*l3dMesh, bottom + firstHalf * height + (secondHalf > 0.0f ? 1.0f : 0.0f));
 		    // The scaffold on an inverse bell: up fast to keep ahead of the building, easing to a stop at the top as
 		    // the building is finished; then down slowly at first, as fast as it went up by the end.
-		    const float scaffoldShare = secondHalf > 0.0f ? std::cos(secondHalf * glm::half_pi<float>())
-		                                             : std::sin(firstHalf * glm::half_pi<float>());
+		    float scaffoldShare = secondHalf > 0.0f ? std::cos(secondHalf * glm::half_pi<float>())
+		                                       : std::sin(firstHalf * glm::half_pi<float>());
+		    // Land 1's Ark stands in its whole frame from the start (Mike's photo of the original, 2026-10-18).
+		    if (registry.AllOf<Feature>(entity) && construction.built < 1.0f)
+		    {
+			    scaffoldShare = 1.0f;
+		    }
 		    graphics::SetScaffoldHeight(*l3dMesh, bottom + scaffoldShare * height);
 		    auto modelMatrix = glm::mat4(transform.rotation);
 		    modelMatrix = glm::translate(modelMatrix, transform.position * transform.rotation);

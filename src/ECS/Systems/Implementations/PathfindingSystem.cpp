@@ -146,6 +146,10 @@ bool LinearScanForObstacle(entt::entity entity, const glm::vec2& pos, const glm:
 	}
 
 	// Do ray-circle intersection with all objects found
+	if (!registry.Valid(*fixedEntity) || !registry.AllOf<Fixed>(*fixedEntity))
+	{
+		return false; // gone from the way since the map was built
+	}
 	const auto& fixed = registry.Get<Fixed>(*fixedEntity);
 	const auto stepSize = glm::length(step);
 	const auto direction = step / stepSize;
@@ -395,6 +399,29 @@ void ApplyStepGoal(ecs::Registry& registry, Exclude... exclude)
 void PathfindingSystem::Update()
 {
 	auto& registry = Locator::entitiesRegistry::value();
+
+	// 0.  An obstacle a walker is going round that is gone, or no longer in the way (a tree picked up, shredded or
+	//     thrown has no Fixed): forget it, and walk on straight. Reading its Fixed crashed the game (2026-10-18, a tree
+	//     picked up from beside a walking villager).
+	{
+		std::vector<entt::entity> stale;
+		registry.Each<const WallHugObjectReference>([&registry, &stale](entt::entity entity, const WallHugObjectReference& reference) {
+			if (!registry.Valid(reference.entity) || !registry.AllOf<Fixed>(reference.entity))
+			{
+				stale.push_back(entity);
+			}
+		});
+		for (const auto entity : stale)
+		{
+			if (const auto* orbit = registry.TryGet<MoveStateOrbitTag>(entity))
+			{
+				const auto goal = orbit->stepGoal;
+				registry.Remove<MoveStateOrbitTag>(entity);
+				registry.AssignOrReplace<MoveStateLinearTag>(entity, MoveStateClockwise::Undefined, goal);
+			}
+			registry.Remove<WallHugObjectReference>(entity);
+		}
+	}
 
 	// 1.  ARRIVED:
 	//         If AreWeThere is false, set to STEP_THROUGH (and it will trigger following steps)

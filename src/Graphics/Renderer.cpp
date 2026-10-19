@@ -7,6 +7,7 @@
  * openblack is licensed under the GNU General Public License version 3.
  *******************************************************************************/
 
+#include <set>
 #include <memory>
 #include <chrono>
 #include <cstdlib>
@@ -421,6 +422,10 @@ const Texture2D* GetTexture(uint32_t skinID, const std::unordered_map<SkinId, st
 		{
 			texture = &*textureManager.Handle(skinID);
 		}
+		else if (const auto* shared = L3DMesh::FindLoadedSkin(skinID); shared != nullptr)
+		{
+			texture = shared; // a skin another mesh carries
+		}
 		else
 		{
 			SPDLOG_LOGGER_ERROR(spdlog::get("graphics"), "Could not find the texture");
@@ -571,7 +576,12 @@ void Renderer::DrawMesh(const graphics::L3DMesh& mesh, const L3DMeshSubmitDesc& 
 {
 	if (mesh.GetNumSubMeshes() == 0)
 	{
-		SPDLOG_LOGGER_WARN(spdlog::get("graphics"), "Mesh {} has no submeshes to draw", mesh.GetDebugName());
+		// Once each: Land 1's SingingStoneCenter, every frame, was hundreds of thousands of lines.
+		static std::set<std::string> s_warned;
+		if (s_warned.emplace(mesh.GetDebugName()).second)
+		{
+			SPDLOG_LOGGER_WARN(spdlog::get("graphics"), "Mesh {} has no submeshes to draw", mesh.GetDebugName());
+		}
 		return;
 	}
 
@@ -659,9 +669,10 @@ void Renderer::DrawScene(const DrawSceneDesc& drawDesc) const noexcept
 	{
 		auto section = Locator::profiler::value().BeginScoped(Profiler::Stage::ReflectionPass);
 #if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
-		// Switch minimal graphics: keep the sea, skip rendering the whole scene a second time into
-		// its reflection. The water then reflects only what the reflection buffer last held.
-		if (false)
+		// Switch minimal graphics: the water reflects the sky and the land only, at 512 x 512 (Ocean.cpp), every frame
+		// (the whole scene cost ~10 FPS; none left the sea a still picture). Mike, 2026-10-17. The near-the-sea models
+		// (reflectedDrawDescs) are there for when models are wanted back: drawEntities true below.
+		if (drawDesc.drawWater)
 #else
 		if (drawDesc.drawWater)
 #endif
@@ -677,6 +688,10 @@ void Renderer::DrawScene(const DrawSceneDesc& drawDesc) const noexcept
 			drawPassDesc.drawWater = false;
 			drawPassDesc.drawBoundingBoxes = false;
 			drawPassDesc.cullBack = true;
+#if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
+			drawPassDesc.drawEntities = false;
+			drawPassDesc.drawSprites = false;
+#endif
 
 			DrawPass(drawPassDesc);
 		}
@@ -830,9 +845,44 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 			    ;
 			const auto& renderCtx = Locator::rendereringSystem::value().GetContext();
 
+#if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
+			// The Switch's reflection: only what stands near enough to the sea to show in it, one draw each.
+			const bool reflectionOnly = desc.viewId == RenderPass::Reflection;
+			if (reflectionOnly)
+			{
+				for (const auto& reflected : renderCtx.reflectedDrawDescs)
+				{
+					auto mesh = meshManager.Handle(reflected.meshId);
+					submitDesc.instanceDesc =
+					    std::make_unique<graphics::InstanceDesc>(renderCtx.instanceUniformBuffer, reflected.offset, 1);
+					const static auto identity = glm::mat4(1.0f);
+					if (!reflected.animated && mesh->IsBoned())
+					{
+						submitDesc.modelMatrices = mesh->GetBoneMatrices().data();
+						submitDesc.matrixCount = static_cast<uint8_t>(mesh->GetBoneMatrices().size());
+					}
+					else
+					{
+						submitDesc.modelMatrices = &identity;
+						submitDesc.matrixCount = 1;
+					}
+					submitDesc.isSky = false;
+					submitDesc.morphWithTerrain = reflected.morphWithTerrain;
+					submitDesc.program = submitDesc.morphWithTerrain ? objectShaderHeightMapInstanced : objectShaderInstanced;
+					DrawMesh(*mesh, submitDesc, std::numeric_limits<uint8_t>::max());
+				}
+			}
+#else
+			constexpr bool reflectionOnly = false;
+#endif
+
 			// Instance meshes
 			for (const auto& [meshId, placers] : renderCtx.instancedDrawDescs)
 			{
+				if (reflectionOnly)
+				{
+					break;
+				}
 				auto mesh = meshManager.Handle(meshId);
 
 				submitDesc.instanceDesc =
@@ -860,6 +910,10 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 			// Animated meshes: one draw each (their instance transform carries their own bone-texture row).
 			for (const auto& animated : renderCtx.animatedDrawDescs)
 			{
+				if (reflectionOnly)
+				{
+					break;
+				}
 				auto mesh = meshManager.Handle(animated.meshId);
 				submitDesc.instanceDesc =
 				    std::make_unique<graphics::InstanceDesc>(renderCtx.instanceUniformBuffer, animated.offset, 1);
@@ -951,12 +1005,15 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 					    bgfx::setTransform(glm::value_ptr(modelMatrix));
 					    spriteShader->SetUniformValue("u_sampleRect", glm::value_ptr(u_sampleRect));
 					    spriteShader->SetUniformValue("u_tint", glm::value_ptr(sprite.tint));
+					    const glm::vec4 u_spriteMode(sprite.fullColour ? 1.0f : 0.0f, sprite.flat ? 1.0f : 0.0f, 0.0f, 0.0f);
+					    spriteShader->SetUniformValue("u_spriteMode", glm::value_ptr(u_spriteMode));
 					    spriteShader->SetTextureSampler("s_diffuse", 0, sprite.texture);
 
 					    _plane->GetVertexBuffer().Bind();
 
 					    bgfx::setState(0 | BGFX_STATE_DEPTH_TEST_GREATER | BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
-					                   BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_SRC_ALPHA, BGFX_STATE_BLEND_ONE) |
+					                   (sprite.darkens ? BGFX_STATE_BLEND_ALPHA
+					                                   : BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_SRC_ALPHA, BGFX_STATE_BLEND_ONE)) |
 					                   BGFX_STATE_BLEND_EQUATION(BGFX_STATE_BLEND_EQUATION_ADD));
 
 					    bgfx::submit(static_cast<bgfx::ViewId>(desc.viewId), toBgfx(spriteShader->GetRawHandle()));

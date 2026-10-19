@@ -19,6 +19,9 @@
 #include <spdlog/spdlog.h>
 
 #include "Common/RandomNumberManager.h"
+#include "3D/SkyInterface.h"
+#include "ECS/Components/Asleep.h"
+#include "ECS/Components/Fixed.h"
 #include "ECS/Components/LivingAction.h"
 #include "ECS/Components/Transform.h"
 #include "ECS/Components/Villager.h"
@@ -65,8 +68,34 @@ static constexpr float k_WanderWorldBoundMax = 5090.0f;
 
 namespace
 {
+// Night by the game's clock, the hours the creature sleeps too (CHLApi's own life).
+bool IsNight()
+{
+	const float hour = Locator::skySystem::value().GetTime();
+	return hour >= 21.0f || hour < 6.0f;
+}
+
+// Walk to the front of a house: the edge of its footprint nearest the villager (its middle is inside the building,
+// which the pathfinder can't reach).
+glm::vec2 HouseDoor(entt::entity abode, glm::vec2 from)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto& at = registry.Get<Transform>(abode).position;
+	glm::vec2 centre(at.x, at.z);
+	float radius = 3.0f;
+	if (const auto* fixed = registry.TryGet<Fixed>(abode))
+	{
+		centre = fixed->boundingCenter;
+		radius = fixed->boundingRadius;
+	}
+	const auto away = from - centre;
+	const auto way = glm::length(away) > 1e-3f ? away / glm::length(away) : glm::vec2(1.0f, 0.0f);
+	return centre + way * (radius + 1.0f);
+}
+
 // Pick a random nearby point and hand it to the PathfindingSystem the same way the
 // debug "Move To Point" tool does (see Debug/PathFinding.cpp), then wait in MoveToPos.
+// At night a villager with a house walks home instead, and sleeps in it till morning (Mike, 2026-10-18).
 uint32_t VillagerDecideWhatToDo(LivingAction& action)
 {
 	if (action.turnsSinceStateChange < k_WanderCooldownTurns)
@@ -81,12 +110,36 @@ uint32_t VillagerDecideWhatToDo(LivingAction& action)
 	const auto entity = registry.ToEntity(action);
 	if (registry.AllOf<ScriptMove>(entity))
 	{
+		registry.Remove<Asleep, GoingHome>(entity); // a script wants it: up, and seen
 		return 0; // held by a script, which decides where it goes
 	}
 
 	const auto& transform = registry.Get<Transform>(entity);
 	auto& wallHug = registry.Get<WallHug>(entity);
 	auto& rng = Locator::rng::value();
+
+	const bool night = IsNight();
+	if (registry.AllOf<Asleep>(entity))
+	{
+		if (night)
+		{
+			return 0; // still asleep
+		}
+		registry.Remove<Asleep>(entity); // morning: out of the house, at its door, and off about the day
+	}
+	if (const auto& home = registry.Get<Villager>(entity).abode;
+	    night && home != entt::null && registry.Valid(home) && registry.AllOf<Transform>(home))
+	{
+		wallHug.goal = HouseDoor(home, glm::xz(transform.position));
+		wallHug.step = glm::vec2(0.0f);
+		registry.Remove<MoveStateLinearTag, MoveStateOrbitTag, MoveStateExitCircleTag, MoveStateStepThroughTag,
+		                MoveStateFinalStepTag, MoveStateArrivedTag>(entity);
+		registry.Remove<WallHugObjectReference>(entity);
+		registry.Assign<MoveStateLinearTag>(entity);
+		registry.AssignOrReplace<GoingHome>(entity);
+		Locator::livingActionSystem::value().VillagerSetState(action, LivingAction::Index::Top, VillagerStates::MoveToPos, true);
+		return 0;
+	}
 
 	const float angle = rng.NextValue(0.0f, glm::two_pi<float>());
 	const float distance = rng.NextValue(0.0f, k_WanderRadius);
@@ -137,6 +190,15 @@ uint32_t VillagerMoveToPos(LivingAction& action)
 	if (!stillMoving)
 	{
 		registry.Remove<MoveStateFinalStepTag, MoveStateArrivedTag>(entity);
+		// Home for the night: in, and asleep.
+		if (registry.AllOf<GoingHome>(entity))
+		{
+			registry.Remove<GoingHome>(entity);
+			if (IsNight())
+			{
+				registry.Assign<Asleep>(entity);
+			}
+		}
 		Locator::livingActionSystem::value().VillagerSetState(action, LivingAction::Index::Top, VillagerStates::DecideWhatToDo,
 		                                                      true);
 	}

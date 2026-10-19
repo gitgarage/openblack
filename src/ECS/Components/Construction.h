@@ -23,6 +23,9 @@ struct Construction
 	float built = 0.0f;
 	// Villagers take a site up once it has had the town's totalWoodNeededToStartBuilding (600) given to it.
 	bool started = false;
+	// How far up it is drawn before any building (as a share of built): Land 1's Ark starts already standing as high
+	// as the Missionaries' hut beside it. Drawing only; built (what scripts read) still starts at 0.
+	float drawnFrom = 0.0f;
 };
 
 } // namespace openblack::ecs::components

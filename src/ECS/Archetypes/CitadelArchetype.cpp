@@ -32,7 +32,10 @@ entt::entity CitadelArchetype::Create(const glm::vec3& position, PlayerNames pla
 	const auto entity = registry.Create();
 	registry.Assign<Transform>(entity, position, rotation, size);
 	registry.Assign<Temple>(entity, playerOwner);
-	const auto meshId = entt::hashed_string("temple/b_first_temple_l3d");
+	// The original builds its Temple from B_TEMPLE<height><shape>: height 0-2 by its size, shape 0 (evil: curved feet,
+	// arches) to 4 (good) by alignment (runblack.exe 0x882b10). Neither is tracked here yet: the smallest, neutral
+	// (2), with B_FIRST_TEMPLE's skin, which the shapes refer to (Mike, 2026-10-18; B_FIRST_TEMPLE is shape 0).
+	const auto meshId = entt::hashed_string("temple/b_temple02_l3d");
 	registry.Assign<Mesh>(entity, meshId, static_cast<int8_t>(0), static_cast<int8_t>(0));
 	return entity;
 }

@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include <array>
+
 #include <cstdint>
 
 #include <filesystem>
@@ -53,6 +55,11 @@ public:
 	/// run 2.46, 0 for animations done on the spot). Unconfirmed from the original's code; inferred from
 	/// the values across the locomotion animations.
 	[[nodiscard]] float GetDistancePerPlay() const noexcept { return _unknown_0x28; }
+	/// The header's undecoded floats at 0x24..0x34, for inspection.
+	[[nodiscard]] std::array<float, 5> GetHeaderFloats() const noexcept
+	{
+		return {_unknown_0x24, _unknown_0x28, _unknown_0x2C, _unknown_0x30, _unknown_0x34};
+	}
 
 private:
 	std::string _name;

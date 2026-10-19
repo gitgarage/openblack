@@ -25,8 +25,13 @@ using namespace openblack::graphics;
 
 Ocean::Ocean() noexcept
 {
+#if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
+	constexpr uint16_t k_ReflectionSize = 512; // a quarter of the pixels: the waves blur it anyway
+#else
+	constexpr uint16_t k_ReflectionSize = 1024;
+#endif
 	_reflectionFrameBuffer =
-	    std::make_unique<FrameBuffer>("Reflection", static_cast<uint16_t>(1024), static_cast<uint16_t>(1024),
+	    std::make_unique<FrameBuffer>("Reflection", k_ReflectionSize, k_ReflectionSize,
 	                                  graphics::TextureFormat::RGBA8, graphics::TextureFormat::Depth24Stencil8);
 	CreateMesh();
 }

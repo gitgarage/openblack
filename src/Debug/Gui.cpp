@@ -30,9 +30,11 @@
 #endif
 #include <SDL.h>
 #include <bx/timer.h>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/compatibility.hpp>
 #include <imgui.h>
+#include <spdlog/spdlog.h>
 #include <imgui_impl_sdl2.h>
 #include <imgui_internal.h>
 #include <imgui_stdlib.h>
@@ -58,6 +60,8 @@
 #include "ImGuiUtils.h"
 #include "LHVMViewer.h"
 #include "LandIsland.h"
+#include "CHLApi.h"
+#include "3D/LandIslandInterface.h"
 #include "Locator.h"
 #include "MeshViewer.h"
 #include "PathFinding.h"
@@ -65,6 +69,7 @@
 #include "Resources/ResourcesInterface.h"
 #include "Temple.h"
 #include "TextureViewer.h"
+#include "Video/MoviePlayer.h"
 #include "Windowing/WindowingInterface.h"
 
 // Turn off formatting because it adds spaces which break the stringifying
@@ -289,6 +294,7 @@ bool Gui::Loop() noexcept
 	if (ShowMenu())
 	{
 		// Exit option selected
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Quitting: the debug menu's Quit");
 		return true;
 	}
 	for (auto& window : _debugWindows)
@@ -297,6 +303,68 @@ bool Gui::Loop() noexcept
 	}
 	ShowVillagerNames();
 	ShowCameraPositionOverlay();
+	// A fight's ring: a circle on the ground round the two creatures.
+	if (const auto ring = chlapi::FightRing())
+	{
+		const auto& displaySize = ImGui::GetIO().DisplaySize;
+		const glm::vec4 viewport(0.0f, 0.0f, displaySize.x, displaySize.y);
+		const auto& camera = Locator::camera::value();
+		const auto& land = Locator::terrainSystem::value();
+		auto* draw = ImGui::GetForegroundDrawList();
+		constexpr int k_Segments = 48;
+		std::optional<ImVec2> previous;
+		for (int i = 0; i <= k_Segments; ++i)
+		{
+			const float a = glm::two_pi<float>() * static_cast<float>(i) / k_Segments;
+			const glm::vec2 xz = glm::vec2(ring->first.x, ring->first.z) + glm::vec2(std::cos(a), std::sin(a)) * ring->second;
+			glm::vec3 screen;
+			if (camera.ProjectWorldToScreen(glm::vec3(xz.x, land.GetHeightAt(xz) + 0.3f, xz.y), viewport, screen))
+			{
+				const ImVec2 point(screen.x, screen.y);
+				if (previous)
+				{
+					draw->AddLine(*previous, point, IM_COL32(255, 220, 120, 220), 3.0f);
+				}
+				previous = point;
+			}
+			else
+			{
+				previous.reset();
+			}
+		}
+	}
+	// The wood or food in the hand, counting up as it is collected.
+	if (const auto label = chlapi::HandResourceLabel())
+	{
+		const auto& displaySize = ImGui::GetIO().DisplaySize;
+		glm::vec3 screen;
+		if (Locator::camera::value().ProjectWorldToScreen(label->first, glm::vec4(0.0f, 0.0f, displaySize.x, displaySize.y), screen))
+		{
+			const auto text = fmt::format("{}", label->second);
+			ImGui::GetForegroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 2.0f, ImVec2(screen.x, screen.y),
+			                                        IM_COL32(255, 230, 150, 255), text.c_str());
+		}
+	}
+	// "+N" followers a miracle won over a town, in the original's green.
+	{
+		const auto& displaySize = ImGui::GetIO().DisplaySize;
+		const glm::vec4 viewport(0.0f, 0.0f, displaySize.x, displaySize.y);
+		const auto& camera = Locator::camera::value();
+		auto* draw = ImGui::GetForegroundDrawList();
+		for (const auto& [at, count] : chlapi::FollowerPopups())
+		{
+			glm::vec3 screen;
+			if (camera.ProjectWorldToScreen(at, viewport, screen))
+			{
+				const auto text = fmt::format("+{}", count);
+				draw->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 2.5f, ImVec2(screen.x, screen.y), IM_COL32(80, 255, 80, 255),
+				              text.c_str());
+			}
+		}
+	}
+
+	// A movie playing covers everything, this overlay too (drawn last).
+	video::DrawMovie();
 
 	ImGui::Render();
 
@@ -633,8 +701,13 @@ bool Gui::ShowMenu() noexcept
 			return true;
 		}
 
-		ImGui::SameLine(ImGui::GetWindowWidth() - 154.0f);
-		ImGui::Text("%.2f FPS (%.2f ms)", ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
+		// The leash's state beside the frame rate: off, on (and which kind), or tied to something...
+		// ...and the play speed (the stick presses' x1/8 to x8).
+		const float playSpeed = Game::Instance() != nullptr ? Game::Instance()->GetPlaySpeed() : 1.0f;
+		const auto status = fmt::format("{}   Speed x{:g}   {:.2f} FPS ({:.2f} ms)", chlapi::LeashStatus(), playSpeed,
+		                                ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
+		ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(status.c_str()).x - 16.0f);
+		ImGui::TextUnformatted(status.c_str());
 
 		_menuBarSize = ImGui::GetWindowSize();
 

@@ -187,7 +187,8 @@ int ViewSounds(openblack::pack::PackFile& pack)
 	{
 		const auto& header = headers[i];
 		auto name = std::string(header.name.begin(), header.name.end());
-		std::printf("sound #%-5d %s size %u\n", i++, name.c_str(), header.size);
+		std::printf("sound #%-5d id %-5d %s size %u rate %u clone %d\n", i, header.id, name.c_str(), header.size, header.sampleRate,
+		            header.isClone);
 	}
 
 	return EXIT_SUCCESS;

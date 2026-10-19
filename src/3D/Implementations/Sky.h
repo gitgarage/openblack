@@ -42,6 +42,7 @@ public:
 	void SetTime(float time) noexcept override;
 	void SetForceDaylight(bool force) noexcept override { _forceDaylight = force; }
 	[[nodiscard]] bool GetForceDaylight() const noexcept override { return _forceDaylight; }
+	[[nodiscard]] float GetTime() const noexcept override { return _timeOfDay; }
 	/// Return index in times as a float for interpolation between adjacent times
 	/// Will use _nightFullTime, _duskStartTime, _duskEndTime and _dayFullTime to determine value
 	/// 0 -> Night (min value)

@@ -15,6 +15,10 @@ namespace openblack::ecs::components
 struct Field
 {
 	int town;
+	// The grain in it, which the hand takes as from a store (info.dat's totalFoodInField when full), and how much that
+	// is when full. The wheat stands as tall as the share left (FieldArchetype's mesh flattened), and grows back.
+	float grain = 0.0f;
+	float capacity = 0.0f;
 };
 
 } // namespace openblack::ecs::components

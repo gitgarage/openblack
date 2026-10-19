@@ -25,13 +25,14 @@ entt::entity FieldArchetype::Create(int townId, const glm::vec3& position, Field
 {
 	auto& registry = Locator::entitiesRegistry::value();
 
-	[[maybe_unused]] const auto& info = Locator::infoConstants::value().fieldType.at(static_cast<size_t>(type));
+	const auto& info = Locator::infoConstants::value().fieldType.at(static_cast<size_t>(type));
 
 	auto townTribe = registry.Get<Tribe>(registry.Context().towns[townId]);
 	auto abodeInfo = GAbodeInfo::Find(townTribe, AbodeNumber::Field);
 
 	auto entity = AbodeArchetype::Create(townId, position, abodeInfo, yAngleRadians, 1.0f, 0, 0);
-	registry.Assign<Field>(entity, townId);
+	// Full of grain to begin with (Land 1's fields hold 350 each).
+	registry.Assign<Field>(entity, townId, info.totalFoodInField, info.totalFoodInField);
 
 	return entity;
 }

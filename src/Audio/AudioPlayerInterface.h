@@ -38,6 +38,8 @@ public:
 	virtual void DeleteSource(SourceId id) = 0;
 	virtual void UpdateSource(SourceId id, glm::vec3 pos, float volume, bool loop) = 0;
 	virtual void UpdateSource(SourceId id, float volume, bool loop) = 0;
+	/// Full until `reference` away, silent from `maximum` (linear, clamped).
+	virtual void SetSourceRange(SourceId id, float reference, float maximum) {}
 	[[nodiscard]] virtual float GetDuration(BufferId id) = 0;
 	virtual void PlaySource(SourceId id, glm::vec3 pos, float volume, bool loop) = 0;
 	virtual void PlaySource(SourceId id, float volume, bool loop) = 0;

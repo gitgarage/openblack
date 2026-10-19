@@ -81,6 +81,10 @@ void AudioManager::Update()
 			    volume *= _sfxVolume;
 		    }
 		    _audioPlayer->UpdateSource(emitter.sourceId, transform.position, volume, emitter.loop == PlayType::Repeat);
+		    if (emitter.radius.y > emitter.radius.x && emitter.radius.x > 0.0f)
+		    {
+			    _audioPlayer->SetSourceRange(emitter.sourceId, emitter.radius.x, emitter.radius.y); // the emitter's own reach
+		    }
 		    auto audioStatus = _audioPlayer->GetStatus(emitter.sourceId);
 		    if (audioStatus == AudioStatus::Stopped)
 		    {

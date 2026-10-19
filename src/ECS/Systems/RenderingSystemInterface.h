@@ -48,7 +48,7 @@ struct RenderContext
 	/// bounding boxes in the second half of the list.
 	std::vector<glm::mat4> instanceUniforms;
 	/// Stores information for rendering which is prepared at \ref PrepareDraw.
-	std::map<entt::id_type, const InstancedDrawDesc> instancedDrawDescs;
+	std::map<entt::id_type, InstancedDrawDesc> instancedDrawDescs; // count: those in view (see PrepareDrawUploadUniforms)
 	/// Animated entities, drawn one at a time with their own bone pose. Each has one instance uniform, at
 	/// `offset`, after those of the instanced draws.
 	struct AnimatedDrawDesc
@@ -59,6 +59,16 @@ struct RenderContext
 		float time;
 	};
 	std::vector<AnimatedDrawDesc> animatedDrawDescs;
+	/// What the water reflects (the Switch's reflection pass draws only these, one each): things standing near enough
+	/// to the sea, and tall enough, to show in it. Each is its uniform in \ref instanceUniforms.
+	struct ReflectedDrawDesc
+	{
+		entt::id_type meshId;
+		uint32_t offset;
+		bool animated;
+		bool morphWithTerrain;
+	};
+	std::vector<ReflectedDrawDesc> reflectedDrawDescs;
 	/// Buildings under construction: the building's instance uniform (sunk into the ground by how much is left to
 	/// build) and its scaffold's (where the building stands).
 	struct ConstructionDrawDesc

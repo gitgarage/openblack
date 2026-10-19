@@ -136,6 +136,8 @@ void reply(const std::string& nonce, const char* fmt, ...)
 	fflush(stdout);
 }
 
+std::atomic<bool> g_restartRequested = false;
+
 void restart()
 {
 	if (!envHasNextLoad())
@@ -149,6 +151,9 @@ void restart()
 	SDL_Event quit {};
 	quit.type = SDL_QUIT;
 	SDL_PushEvent(&quit); // the game ends as if closed, and the loader starts the new file
+	// And the main loop checks this every frame: the pushed event (from this thread) was sometimes lost, and the game
+	// kept running on the old build (2026-10-17 20:39).
+	g_restartRequested = true;
 }
 
 struct Transfer
@@ -267,6 +272,11 @@ void listen(void*)
 
 Thread g_thread;
 } // namespace
+
+bool switchUpdateWantsRestart()
+{
+	return g_restartRequested;
+}
 
 // At exit, before the link closes: true once the listener has stopped (within timeoutMs).
 bool stopUpdateListener(unsigned timeoutMs)

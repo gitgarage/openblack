@@ -100,6 +100,9 @@ void AudioPlayer::Initialize()
 	alcGetIntegerv(_device.get(), ALC_MINOR_VERSION, 1, &minorVersion);
 	SPDLOG_LOGGER_INFO(spdlog::get("audio"), "ALC Version {}.{}", majorVersion, minorVersion);
 	alCheckCall(alcMakeContextCurrent(_context.get()));
+	// Sounds in the world fade to nothing at their max distance (200): OpenAL's default model only flattens out there,
+	// and Land 1's singing stones were still heard at a tenth from the Temple.
+	alCheckCall(alDistanceModel(AL_LINEAR_DISTANCE_CLAMPED));
 }
 
 void AudioPlayer::UpdateListener(glm::vec3 pos, glm::vec3 vel, glm::vec3 front, glm::vec3 up) const
@@ -152,7 +155,18 @@ SourceId AudioPlayer::CreateSource(float pitch, bool relative)
 	}
 	alCheckCall(alSourcef(id, AL_PITCH, pitch));
 	alCheckCall(alSourcei(id, AL_SOURCE_RELATIVE, relative));
+	// A sound in the world is full until 20 away and fades out by 200: at OpenAL's default (1, no limit) a script's
+	// sound at a thing (Land 1's singing stones) was a fiftieth as loud from the camera, and not heard; at 40/400 it
+	// carried across the whole island (Mike, 2026-10-17: half that).
+	alCheckCall(alSourcef(id, AL_REFERENCE_DISTANCE, 20.0f));
+	alCheckCall(alSourcef(id, AL_MAX_DISTANCE, 200.0f));
 	return id;
+}
+
+void AudioPlayer::SetSourceRange(SourceId id, float reference, float maximum)
+{
+	alCheckCall(alSourcef(id, AL_REFERENCE_DISTANCE, reference));
+	alCheckCall(alSourcef(id, AL_MAX_DISTANCE, maximum));
 }
 
 void AudioPlayer::DeleteSource(SourceId id)

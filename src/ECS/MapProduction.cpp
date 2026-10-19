@@ -24,9 +24,20 @@
 using namespace openblack::ecs;
 using namespace openblack::ecs::components;
 
+namespace
+{
+// A cell off the map (a walker at its edge looking past it - 2026-10-18: villagers a script made at (0, 0) took the
+// game down here) holds nothing.
+const std::unordered_set<entt::entity> k_NothingThere;
+bool OnGrid(const openblack::ecs::MapInterface::CellId& cellId)
+{
+	return cellId.x < openblack::ecs::MapInterface::k_GridSize.x && cellId.y < openblack::ecs::MapInterface::k_GridSize.y;
+}
+} // namespace
+
 const std::unordered_set<entt::entity>& MapProduction::GetFixedInGridCell(const CellId& cellId) const
 {
-	return _fixedGrid.at(cellId.x + cellId.y * k_GridSize.x);
+	return OnGrid(cellId) ? _fixedGrid.at(cellId.x + cellId.y * k_GridSize.x) : k_NothingThere;
 }
 
 const std::unordered_set<entt::entity>& MapProduction::GetFixedInGridCell(const glm::vec3& pos) const
@@ -37,7 +48,7 @@ const std::unordered_set<entt::entity>& MapProduction::GetFixedInGridCell(const 
 
 const std::unordered_set<entt::entity>& MapProduction::GetMobileInGridCell(const CellId& cellId) const
 {
-	return _mobileGrid.at(cellId.x + cellId.y * k_GridSize.x);
+	return OnGrid(cellId) ? _mobileGrid.at(cellId.x + cellId.y * k_GridSize.x) : k_NothingThere;
 }
 
 const std::unordered_set<entt::entity>& MapProduction::GetMobileInGridCell(const glm::vec3& pos) const

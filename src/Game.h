@@ -120,7 +120,7 @@ private:
 	float _playSpeed {1.0f};
 	uint32_t _frameCount {0};
 	uint32_t _turnCount {0};
-	bool _paused {true};
+	bool _paused {false}; // running from the start (Mike, 2026-10-18); + (P) pauses
 	glm::ivec2 _mousePosition;
 	bool _handGripping;
 	std::optional<std::pair</* frame number */ uint32_t, /* output */ std::filesystem::path>> _requestScreenshot;

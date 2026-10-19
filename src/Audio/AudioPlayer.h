@@ -32,6 +32,7 @@ public:
 	void DeleteSource(SourceId id) override;
 	void UpdateSource(SourceId id, glm::vec3 pos, float volume, bool loop) override;
 	void UpdateSource(SourceId id, float volume, bool loop) override;
+	void SetSourceRange(SourceId id, float reference, float maximum) override;
 	float GetDuration(BufferId id) override;
 	SourceId CreateSource(float pitch, bool relative) override;
 	void PlaySource(SourceId id, glm::vec3 pos, float volume, bool loop) override;

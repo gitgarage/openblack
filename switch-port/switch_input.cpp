@@ -19,13 +19,12 @@
 //   R / L                 -> zoom in / out, continuously while held (straight into the camera's held zoom:
 //                            not the wheel, whose steps each waited on a camera flight, nor Ctrl + Up / Down,
 //                            which took over the left stick's keys)
-//   X                     -> Space (zoom to temple)
+//   X                     -> bring your creature to where the hand is
 //   Y                     -> switch between the time of day's own light and broad daylight (to see at night)
-//   +                     -> P (pause/unpause - openblack starts paused, so nothing simulates until
-//                            this is pressed)
+//   +                     -> P (pause/unpause; the game starts running)
 //   D-pad up / left       -> save test point 1 / 2 (keypad 1 / 2)
 //   D-pad down / right    -> load test point 1 / 2 (keypad 3 / 4)
-//   B                     -> leave the Temple
+//   B, -                  -> leave the Temple (- is the original's Esc), or the side-on fight view
 //   A                     -> cycle your creature's leash: none, regular, reward, punishment
 //   Right stick press     -> play twice as fast (again for faster still, up to x8)
 //   Left stick press      -> play half as fast (down to x1/8)
@@ -162,9 +161,17 @@ bool touchFrame(u64 now, bool forceGrab)
 				openblack::chlapi::EnterTemple();
 				g_touch = Touch::Hover;
 			}
+			else if (!forceGrab && openblack::chlapi::TakeSphereUnderHand())
+			{
+				g_touch = Touch::Hover; // a long press on a miracle sphere picks it up
+			}
 			else if (!forceGrab && openblack::chlapi::LeashTieAtPointer())
 			{
 				g_touch = Touch::Hover; // a long press on a tree or house with the leash on ties it there (or unties it)
+			}
+			else if (!forceGrab && openblack::chlapi::LetGoAtPointer())
+			{
+				g_touch = Touch::Hover; // something held: a long press lets go of it there (into the village store if on it)
 			}
 			else
 			{
@@ -212,12 +219,28 @@ void switchInputFrame()
 	setKey(SDL_SCANCODE_A, right.y > k_StickThreshold);
 	setKey(SDL_SCANCODE_Q, right.y < -k_StickThreshold);
 
-	setKey(SDL_SCANCODE_SPACE, (held & HidNpadButton_X) != 0);
+	// X: your creature to where the hand is (Mike, 2026-10-17: it was slow to come to its fight). Was Space.
+	static bool s_xWasDown = false;
+	const bool xDown = (held & HidNpadButton_X) != 0;
+	if (xDown && !s_xWasDown)
+	{
+		openblack::chlapi::TeleportCreatureToHand();
+	}
+	s_xWasDown = xDown;
 	setKey(SDL_SCANCODE_P, (held & HidNpadButton_Plus) != 0);
 	setKey(SDL_SCANCODE_KP_1, (held & HidNpadButton_Up) != 0);
 	setKey(SDL_SCANCODE_KP_2, (held & HidNpadButton_Left) != 0);
 	setKey(SDL_SCANCODE_KP_3, (held & HidNpadButton_Down) != 0);
 	setKey(SDL_SCANCODE_KP_4, (held & HidNpadButton_Right) != 0);
+	// - is the original's Esc: out of the Temple (as a long press on its floor), out of the side-on fight view. Not
+	// SDL's Escape, which quits openblack.
+	static bool s_minusWasDown = false;
+	const bool minusDown = (held & HidNpadButton_Minus) != 0;
+	if (minusDown && !s_minusWasDown)
+	{
+		openblack::chlapi::ExitTemple();
+	}
+	s_minusWasDown = minusDown;
 	static bool s_bWasDown = false;
 	const bool bDown = (held & HidNpadButton_B) != 0;
 	if (bDown && !s_bWasDown)
@@ -258,7 +281,10 @@ void switchInputFrame()
 	s_sticksWere = sticks;
 
 	const u64 now = armTicksToNs(armGetSystemTick());
-	const bool zr = (held & HidNpadButton_ZR) != 0;
+	// Holding something, either trigger is the action button (the original's throw: press it while holding, sweep
+	// with the finger, let go of it to let go of what is held - its throwrock.hnd demo; Mike, 2026-10-17: ZL or ZR).
+	const bool holding = openblack::chlapi::HandHolding();
+	const bool zr = (held & HidNpadButton_ZR) != 0 && !holding;
 	if (g_tapPending)
 	{
 		g_tapPending = false;
@@ -266,7 +292,8 @@ void switchInputFrame()
 	}
 	const bool touchLeft = touchFrame(now, zr);
 	setMouseButton(g_leftDown, SDL_BUTTON_LEFT, zr || touchLeft);
-	setMouseButton(g_rightDown, SDL_BUTTON_RIGHT, (held & HidNpadButton_ZL) != 0 || g_touch == Touch::Collect);
+	setMouseButton(g_rightDown, SDL_BUTTON_RIGHT,
+	               (held & HidNpadButton_ZL) != 0 || (holding && (held & HidNpadButton_ZR) != 0) || g_touch == Touch::Collect);
 
 
 }

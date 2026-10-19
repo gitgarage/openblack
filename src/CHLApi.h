@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <optional>
+#include <string>
 
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -75,6 +76,8 @@ uint32_t FindWoodNear(const glm::vec3& point, float radius);
 void SetWoodUnderHand(uint32_t pile);
 // The wood pile the hand could collect from (0 for none, or while it holds something other than wood).
 uint32_t HandWoodUnder();
+bool HandDepositIntoStore(const glm::vec3& point);
+bool LetGoAtPointer(); // a touchscreen long press: what the hand holds let go of there (into the store if on one)
 bool HandCollectBegin(uint32_t pile);
 void HandCollect(std::chrono::microseconds dt);
 void HandCollectEnd();
@@ -84,6 +87,31 @@ bool HandCollecting();
 bool BeginCreatureInteraction(const glm::vec3& origin, const glm::vec3& direction);
 // The hand moved without being swept there (a new touch puts it where the finger lands): not a slap.
 void HandJumped();
+// A click with a miracle sphere under the hand takes it; with one in the hand, casts it at the ground point clicked.
+bool MiracleClick(const glm::vec3& ground);
+// A tap or ZR on an object under the hand (a singing stone): a click for the scripts, unless a script set it in place.
+void ObjectClick(uint32_t object);
+// A long press on a miracle sphere picks it up.
+bool TakeSphereUnderHand();
+// X: your creature to where the hand is.
+void TeleportCreatureToHand();
+// The wood or food the hand holds, and where to show its amount (refreshed a few times a second).
+std::optional<std::pair<glm::vec3, uint32_t>> HandResourceLabel();
+// A script is filming (not a tutorial hand demo, which shows the hand): the hand is not drawn.
+bool InCutscene();
+// "Leash: off", "Leash: regular", "Leash: regular, tied to 1234" - for the debug bar.
+std::string LeashStatus();
+// During your creature's fight: a tap (ZR) on the opponent queues an attack there, on your creature a block there,
+// on the ground a step that way.
+bool FightClick(const glm::vec3& origin, const glm::vec3& direction, const glm::vec3& ground);
+// The fight ring (centre, radius) while creatures fight.
+std::optional<std::pair<glm::vec3, float>> FightRing();
+// Your creature and its opponent, while it fights.
+std::optional<std::pair<uint32_t, uint32_t>> PlayersFight();
+// Whether B asked to leave the side-on fight view since last asked.
+bool TakeFightViewExit();
+// "+N followers" to show: where, and how many.
+std::vector<std::pair<glm::vec3, int>> FollowerPopups();
 bool InCreatureInteraction();
 void UpdateCreatureInteraction(const glm::vec2& screen, const glm::vec3& origin, const glm::vec3& direction,
                                std::chrono::microseconds dt);
@@ -114,11 +142,14 @@ void TempleLongPress(glm::vec2 screen);
 constexpr const char* k_HandHoldPose = "hold_above";
 void HandCarry(const glm::vec3& handPosition);
 void HandDrop(const glm::vec3& handPosition);
+// When the hand last picked something up (a press that picked it up doesn't let go of it on its release).
+std::chrono::steady_clock::time_point HandPickedUpAt();
 // What the hand is over this frame (0 for none), for GET_OBJECT_HAND_IS_OVER.
 void SetObjectUnderHand(uint32_t entity);
 // The nearest object the hand could take within `radius` of a point on the ground (0 for none): most
 // objects (rocks, people, logs) have no physics body for the hand's ray to hit.
-uint32_t FindObjectNear(const glm::vec3& point, float radius);
+uint32_t FindObjectNear(const glm::vec3& point, float radius, bool byPointer = true); // byPointer: an animal or person on the pointer's ray first
+uint32_t PickUpTarget(uint32_t underHand, const glm::vec3& point);
 // Test hook (OPENBLACK_TEST_PICKUP): where to put the hand and whether to hold the right button this
 // frame, to pick up, swing and throw the object nearest the camera's focus.
 std::optional<std::pair<glm::vec3, bool>> TestPickupStep();

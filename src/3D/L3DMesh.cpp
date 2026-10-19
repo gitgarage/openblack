@@ -35,7 +35,31 @@ L3DMesh::L3DMesh(std::string debugName) noexcept
 {
 }
 
-L3DMesh::~L3DMesh() noexcept = default;
+namespace
+{
+std::unordered_map<SkinId, const Texture2D*>& LoadedSkins()
+{
+	static std::unordered_map<SkinId, const Texture2D*> skins;
+	return skins;
+}
+} // namespace
+
+const Texture2D* L3DMesh::FindLoadedSkin(SkinId id)
+{
+	const auto it = LoadedSkins().find(id);
+	return it != LoadedSkins().end() ? it->second : nullptr;
+}
+
+L3DMesh::~L3DMesh() noexcept
+{
+	for (const auto& [id, texture] : _skins)
+	{
+		if (const auto it = LoadedSkins().find(id); it != LoadedSkins().end() && it->second == texture.get())
+		{
+			LoadedSkins().erase(it);
+		}
+	}
+}
 
 bool L3DMesh::Load(const l3d::L3DFile& l3d) noexcept
 {
@@ -49,6 +73,7 @@ bool L3DMesh::Load(const l3d::L3DFile& l3d) noexcept
 		_skins[skin.id]->Create(
 		    l3d::L3DTexture::k_Width, l3d::L3DTexture::k_Height, 1, TextureFormat::BGRA4, Wrapping::Repeat, Filter::Linear,
 		    bgfx::makeRef(skin.texels.data(), static_cast<uint32_t>(skin.texels.size() * sizeof(skin.texels[0]))));
+		LoadedSkins().try_emplace(skin.id, _skins[skin.id].get());
 	}
 
 	if (HasDoorPosition() && !l3d.GetExtraPoints().empty())
