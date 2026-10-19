@@ -79,7 +79,8 @@ are.
 | **Right stick** | Turn the view left and right, tilt it up and down |
 | **R / L** | Zoom in / zoom out (held) |
 | **ZL** | The **Action Button**: pick up, collect, give, let go, throw (see below) |
-| **ZR** (held) | Grab the land and drag to move around. While holding something, ZR is the Action Button too |
+| **ZR** | While holding something: the Action Button too, as ZL |
+| **ZR** (held, hand empty) | Grab the land and drag to move around |
 | **A** | Your creature's leash: none, regular, reward (good), punishment (evil), one step each press |
 | **X** | Bring your creature to where your hand is |
 | **Y** | Switch between the time of day's own light and broad daylight (for seeing at night) |
@@ -142,6 +143,8 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
   more.
 - The intro movie (`INTRO.bik`) plays at the point the original plays it, with its sound, and can be skipped.
 - Music and sound effects from the original's sound banks, placed in the world.
+- Spoken dialogue: each scripted line plays its recorded voice (Guidance, your advisors, the villagers), matched
+  to its line by the text table recovered from the original `runblack.exe`.
 - The original's camera positions, camera paths and hand demonstrations (the tutorial's recorded hand) are read
   from the game's own data files.
 
@@ -167,8 +170,6 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
   portal.
 - **The missionaries' ship** does not sail away at the end of their quest; in the original the engine itself does
   this.
-- **No spoken narration.** The original streamed the story's speech from the CD; it is not part of the installed
-  data.
 - **Gestures** are not used for casting miracles yet. Miracles are cast from spheres.
 - Some objects do not topple when hit, and thrown things pass through trees.
 - Saving uses two test save points on the D-pad, not the original's save menu.
