@@ -25,7 +25,8 @@ using the data files from your own copy of the PC game. It plays at about 44 fra
 
 ## Installing
 
-1. **Copy the program.** Put `openblack.nro` here on the SD card:
+1. **Copy the program.** Download `openblack.nro` from the
+   [Releases page](https://github.com/gitgarage/openblack/releases/latest) and put it here on the SD card:
 
    ```
    sdmc:/switch/openblack/openblack.nro
@@ -57,7 +58,8 @@ Loading takes about half a minute. The game starts straight into Land 1's openin
 
 ### Updating
 
-Replace `sdmc:/switch/openblack/openblack.nro` with the new one. Your game data and save points stay where they
+Download the newest `openblack.nro` from the [Releases page](https://github.com/gitgarage/openblack/releases) and
+replace `sdmc:/switch/openblack/openblack.nro` with it. Your game data and save points stay where they
 are.
 
 ### Files the game writes
