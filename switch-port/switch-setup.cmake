@@ -94,7 +94,9 @@ set_target_properties(unofficial::minizip::minizip PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES ${PORTLIBS}/include
   INTERFACE_LINK_LIBRARIES "${PORTLIBS}/lib/libminizip.a;${PORTLIBS}/lib/libz.a")
 
-# The live USB log and crash reports (atlas-usb-link), in every Switch build of openblack.
+# The development link (atlas-usb-link): the live log over USB-C, crash reports, and new builds sent down the cable
+# (update.py). Off for a release, which logs to the SD card only and contains none of it.
+option(OPENBLACK_SWITCH_DEV_LINK "Switch: build in the atlas-usb-link development link" OFF)
 set(ATLAS_USB_LINK_DIR ${OB_ROOT}/../atlas-usb-link CACHE PATH "atlas-usb-link checkout")
 
 # --- find_package: answer for what is supplied above, pass the rest (SDL2, OpenAL, Bullet) through --
@@ -118,19 +120,30 @@ set(UNIX TRUE)
 # Once openblack's whole tree is configured: link the USB log and crash reports in, and make the NRO.
 function(_switch_finish)
   target_sources(openblack PRIVATE
-    ${ATLAS_USB_LINK_DIR}/source/atlas_usb_link.c
-    ${ATLAS_USB_LINK_DIR}/source/atlas_crash.c
     ${OB_ROOT}/switch-spike/compat/posix_memalign.c
-    ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_main.cpp
-    ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_update.cpp)
+    ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_main.cpp)
+  if(OPENBLACK_SWITCH_DEV_LINK)
+    target_sources(openblack PRIVATE
+      ${ATLAS_USB_LINK_DIR}/source/atlas_usb_link.c
+      ${ATLAS_USB_LINK_DIR}/source/atlas_crash.c
+      ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_update.cpp)
+    target_compile_definitions(openblack PRIVATE OPENBLACK_SWITCH_DEV_LINK=1)
+    target_include_directories(openblack PRIVATE ${ATLAS_USB_LINK_DIR}/source)
+  endif()
   # Joy-Con controls; switchInputFrame() is called from Game.cpp and lives in openblack_lib's link.
   target_sources(openblack_lib PRIVATE ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/switch_input.cpp)
+  # The original's Bink movies (src/Video/MoviePlayer.cpp): portlibs' ffmpeg has the Bink demuxer and decoders.
+  target_compile_definitions(openblack_lib PRIVATE OPENBLACK_HAVE_FFMPEG=1)
+  target_include_directories(openblack_lib PRIVATE ${PORTLIBS}/include)
+  target_link_libraries(openblack_lib PRIVATE
+    ${PORTLIBS}/lib/libavformat.a ${PORTLIBS}/lib/libavcodec.a ${PORTLIBS}/lib/libdav1d.a ${PORTLIBS}/lib/libswscale.a
+    ${PORTLIBS}/lib/libswresample.a ${PORTLIBS}/lib/libavutil.a ${PORTLIBS}/lib/libbz2.a ${PORTLIBS}/lib/libz.a)
   # switch_main.cpp's __wrap_main runs first: USB link, stdout to the link, the game path argument.
   target_link_options(openblack PRIVATE -Wl,--wrap=main)
   # Allocation failures are logged (switch_main.cpp): the first console runs died mid-load.
   target_link_options(openblack PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=memalign)
   # main.cpp needs cxxopts too; on a desktop it comes from the system include path.
-  target_include_directories(openblack PRIVATE ${ATLAS_USB_LINK_DIR}/source ${CXXOPTS_INCLUDE_DIRS})
+  target_include_directories(openblack PRIVATE ${CXXOPTS_INCLUDE_DIRS})
   target_link_libraries(openblack PRIVATE glm::glm) # main.cpp's headers need glm; a desktop has it system-wide
   nx_create_nro(openblack)
 endfunction()

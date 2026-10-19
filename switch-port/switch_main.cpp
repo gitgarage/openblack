@@ -6,7 +6,11 @@
 //    when the link is down,
 //  - supplies the arguments hbmenu can't: the game data folder and the Switch's screen size.
 // Crash reports come from atlas_crash.c, linked in alongside.
+// All of the link (and the crash reports, new builds over the cable, the script trace and no auto-sleep) is the
+// development build's only (OPENBLACK_SWITCH_DEV_LINK): a release logs to the SD card alone.
+#if defined(OPENBLACK_SWITCH_DEV_LINK)
 #include "atlas_usb_link.h"
+#endif
 
 #include <switch.h>
 
@@ -14,11 +18,21 @@
 #include <cstdlib>
 #include <cstring>
 #include <sys/iosupport.h>
+#include <exception>
 #include <vector>
 
 extern "C" int __real_main(int argc, char** argv);
+#if defined(OPENBLACK_SWITCH_DEV_LINK)
 void startUpdateListener();                // switch_update.cpp
 bool stopUpdateListener(unsigned timeoutMs); // switch_update.cpp
+#else
+// A release has no link: nothing comes down a cable, and Game.cpp's check for a new build is always no.
+void atlasLinkWrite(const char*, size_t) {}
+bool switchUpdateWantsRestart()
+{
+	return false;
+}
+#endif
 extern "C" void* __real_malloc(size_t size);
 extern "C" void* __real_calloc(size_t count, size_t size);
 extern "C" void* __real_realloc(void* ptr, size_t size);
@@ -92,6 +106,7 @@ void logAllocationFailure(const char* what, size_t size)
 	inside = false;
 }
 
+#if defined(OPENBLACK_SWITCH_DEV_LINK)
 // The link's own progress: SD log only, since the link is what is failing when these are written.
 void linkLog(const char* line)
 {
@@ -101,6 +116,7 @@ void linkLog(const char* line)
 		fflush(g_logFile);
 	}
 }
+#endif
 
 // Every 500ms, one line: how full memory is. The last one before a death shows how close it was.
 Thread g_memThread;
@@ -172,6 +188,7 @@ extern "C" int __wrap_main(int argc, char** argv)
 	// The link comes up in the background, retried for as long as openblack runs, so a slow or
 	// failed handshake never delays or loses anything: lines written before it connects are sent
 	// first once it does, and each failed attempt's reason goes to the SD log.
+#if defined(OPENBLACK_SWITCH_DEV_LINK)
 	atlasLinkStartBackground(linkLog);
 	// New builds can come down the same link (switch-port/update.py on the laptop): see switch_update.cpp.
 	startUpdateListener();
@@ -179,12 +196,71 @@ extern "C" int __wrap_main(int argc, char** argv)
 	// still between tests). The system restores both when the app exits.
 	appletSetMediaPlaybackState(true);
 	appletSetAutoSleepDisabled(true);
+#endif
 	bool link = false;
 	devoptab_list[STD_OUT] = &g_teeDevoptab;
 	devoptab_list[STD_ERR] = &g_teeDevoptab;
 	setvbuf(stdout, nullptr, _IOLBF, 0);
 	setvbuf(stderr, nullptr, _IONBF, 0);
+#if defined(OPENBLACK_SWITCH_DEV_LINK)
 	printf("openblack for Switch: usb link connecting in the background, game path %s\n", k_GamePath);
+#else
+	printf("openblack for Switch, game path %s\n", k_GamePath);
+#endif
+	// The last crash's report (atlas_crash.c saves it to the SD card as the app dies; the cable is often gone by then):
+	// into this run's log, then kept aside so it is reported once.
+	if (FILE* crash = fopen("sdmc:/atlas-crash.log", "r"); crash != nullptr)
+	{
+		printf("=== the last crash (sdmc:/atlas-crash.log) ===\n");
+		char line[256];
+		while (fgets(line, sizeof(line), crash) != nullptr)
+		{
+			fputs(line, stdout);
+		}
+		fclose(crash);
+		printf("=== end of the last crash ===\n");
+		remove("sdmc:/atlas-crash-reported.log");
+		rename("sdmc:/atlas-crash.log", "sdmc:/atlas-crash-reported.log");
+	}
+	// A C++ exception nobody caught, or std::terminate: what it was, before the app goes (the crash handler only
+	// sees hardware faults).
+	std::set_terminate([] {
+		const char* what = "no exception";
+		try
+		{
+			if (const auto current = std::current_exception())
+			{
+				std::rethrow_exception(current);
+			}
+		}
+		catch (const std::exception& e)
+		{
+			what = e.what();
+		}
+		catch (...)
+		{
+			what = "an exception that is not a std::exception";
+		}
+		printf("[terminate] std::terminate: %s\n", what);
+		// Where it was thrown: an uncaught exception is not unwound before terminate, so the frames are still here.
+		// Each frame record is {previous fp, return address}. Addresses printed with this handler's own, to work out
+		// the code offsets against the .elf afterwards (nm: the terminate lambda's address there).
+		printf("[terminate] main at %p\n", reinterpret_cast<void*>(&__wrap_main));
+		auto** fp = static_cast<void**>(__builtin_frame_address(0));
+		for (int i = 0; i < 24 && fp != nullptr; ++i)
+		{
+			void* returnTo = fp[1];
+			printf("[terminate]   #%d %p\n", i, returnTo);
+			auto** next = static_cast<void**>(fp[0]);
+			if (next <= fp)
+			{
+				break;
+			}
+			fp = next;
+		}
+		fflush(stdout);
+		std::abort();
+	});
 	(void)link;
 	u64 used, total;
 	memoryMiB(used, total);
@@ -200,8 +276,10 @@ extern "C" int __wrap_main(int argc, char** argv)
 	// write (2026-10-16, ShotWriter::Run -> fwrite -> _write_r, fault at 0x20) - set OPENBLACK_SHOT_EVERY to bring
 	// them back.
 	setenv("OPENBLACK_SAVEPOINT_DIR", "sdmc:/switch/openblack/savepoints", 0); // D-pad test save points
+#if defined(OPENBLACK_SWITCH_DEV_LINK)
 	// Every 5 s: the camera and each script's position (what scripts are waiting on), into the log.
 	setenv("OPENBLACK_TRACE_VM", "1", 0);
+#endif
 
 	std::vector<char*> args(argv, argv + argc);
 	const char* extra[] = {"--game-path", k_GamePath, "--log-file", "stdout", "--width", "1280", "--height", "720"};
@@ -218,6 +296,7 @@ extern "C" int __wrap_main(int argc, char** argv)
 	threadClose(&g_memThread);
 	// The update listener must be off the link before it closes (see switch_update.cpp). If it is still blocked,
 	// the link is left open rather than hang or crash the exit - the loader can still start the next build.
+#if defined(OPENBLACK_SWITCH_DEV_LINK)
 	if (stopUpdateListener(5000))
 	{
 		atlasLinkExit();
@@ -226,6 +305,7 @@ extern "C" int __wrap_main(int argc, char** argv)
 	{
 		printf("[update] the listener is still waiting on the link: leaving the link open\n");
 	}
+#endif
 	if (g_logFile != nullptr)
 	{
 		fclose(g_logFile);
