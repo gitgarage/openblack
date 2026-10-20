@@ -62,7 +62,7 @@ ssize_t teeWrite(struct _reent*, void*, const char* ptr, size_t len)
 
 devoptab_t g_teeDevoptab = [] {
 	devoptab_t d {};
-	d.name = "atlastee";
+	d.name = "openblacktee";
 	d.write_r = teeWrite;
 	return d;
 }();
@@ -207,8 +207,9 @@ extern "C" int __wrap_main(int argc, char** argv)
 #else
 	printf("openblack for Switch, game path %s\n", k_GamePath);
 #endif
-	// The last crash's report (atlas_crash.c saves it to the SD card as the app dies; the cable is often gone by then):
-	// into this run's log, then kept aside so it is reported once.
+#if defined(OPENBLACK_SWITCH_DEV_LINK)
+	// The last crash's report (the development link's crash handler saves it to the SD card as the app dies; the cable
+	// is often gone by then): into this run's log, then kept aside so it is reported once.
 	if (FILE* crash = fopen("sdmc:/atlas-crash.log", "r"); crash != nullptr)
 	{
 		printf("=== the last crash (sdmc:/atlas-crash.log) ===\n");
@@ -222,6 +223,7 @@ extern "C" int __wrap_main(int argc, char** argv)
 		remove("sdmc:/atlas-crash-reported.log");
 		rename("sdmc:/atlas-crash.log", "sdmc:/atlas-crash-reported.log");
 	}
+#endif
 	// A C++ exception nobody caught, or std::terminate: what it was, before the app goes (the crash handler only
 	// sees hardware faults).
 	std::set_terminate([] {

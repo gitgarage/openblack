@@ -227,7 +227,24 @@ struct RewardChest
 	uint32_t town = 0;
 	bool opened = false;
 	float falling = 0.0f; // still to fall, from the sky (rewardfromsky)
+	float openFor = 0.0f; // seconds since it was opened
 };
+// The original's reward chest (Reward::CallVirtualFunctionsForCreation): Data/Misc/coffre.l3d, opened by coffre.anm
+// ("reward chest_open4", 22 frames over 2.166 s, its header's word 0x20). Its bones `opened` of the way open (0-1).
+constexpr float k_ChestOpenSeconds = 2.166f;
+constexpr float k_ChestStaysOpenSeconds = 3.0f;
+std::vector<glm::mat4> ChestPose(float opened)
+{
+	const auto& animations = Locator::resources::value().GetAnimations();
+	const auto id = entt::hashed_string("coffre").value();
+	if (!animations.Contains(id) || animations.Handle(id)->GetFrames().empty())
+	{
+		return {};
+	}
+	const auto& anim = *animations.Handle(id);
+	const float last = static_cast<float>(anim.GetFrames().back().time);
+	return anim.GetBoneMatrices(static_cast<uint32_t>(std::clamp(opened, 0.0f, 1.0f) * last));
+}
 std::unordered_map<uint32_t, RewardChest> g_rewards;
 void OpenReward(uint32_t chest); // below, with the miracles
 // A miracle bubble's radius, the original's: its sphere O_Bibble_up.l3d's (2.19 round its centre, at scale 1 for every
@@ -476,13 +493,22 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		const float size = info != nullptr && info->startScale > 0.0f ? info->startScale : 1.0f;
 		registry.Assign<Transform>(entity, glm::vec3(position.x, ground, position.z), glm::mat3(glm::eulerAngleY(yAngleRadians)),
 		                           glm::vec3(size * scale));
-		auto mesh = resources::HashIdentifier(MeshId::U_Chest);
-		if (info != nullptr && Locator::resources::value().GetMeshes().Contains(resources::HashIdentifier(info->meshId)))
-		{
-			mesh = resources::HashIdentifier(info->meshId);
-		}
+		// The original's chest whatever the reward (its info's model gave a cube with a baby's face on each side - Mike,
+		// 2026-10-19), shut.
+		const auto chestMesh = entt::hashed_string("coffre").value();
+		auto mesh = Locator::resources::value().GetMeshes().Contains(chestMesh) ? chestMesh : resources::HashIdentifier(MeshId::U_Chest);
 		registry.Assign<ecs::components::Mesh>(entity, mesh, static_cast<int8_t>(0), static_cast<int8_t>(0));
+		if (auto shut = ChestPose(0.0f); !shut.empty() && mesh == chestMesh)
+		{
+			registry.Assign<ecs::components::Animated>(entity, 0u, 0.0f, std::move(shut));
+		}
 		g_rewards[static_cast<uint32_t>(entity)] = {static_cast<int>(subtype), 0, false, 0.0f};
+		if (Locator::resources::value().GetMeshes().Contains(mesh))
+		{
+			const auto box = Locator::resources::value().GetMeshes().Handle(mesh)->GetBoundingBox();
+			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Reward chest model {:.2f} x {:.2f} x {:.2f}, scale {:.2f} (startScale {:.2f})",
+			                   box.Size().x, box.Size().y, box.Size().z, size * scale, info != nullptr ? info->startScale : 0.0f);
+		}
 		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Reward chest {} (reward {}: food {:.0f}, wood {}, seed {}) at ({:.1f}, {:.1f}, {:.1f})",
 		                   static_cast<uint32_t>(entity), subtype, info != nullptr ? info->foodValue : 0.0f, info != nullptr ? info->woodValue : 0u,
 		                   info != nullptr ? static_cast<int>(info->seed) : -1, position.x, ground, position.z);
@@ -4632,9 +4658,11 @@ void OpenReward(uint32_t chest)
 	auto& reward = found->second;
 	reward.opened = true;
 	const auto at = registry.Get<Transform>(entity).position;
-	PlayBankSound(1, 173, &at); // G_ClickSignpost: the tap
-	PlayBankSound(1, 40, &at);  // G_RewardSting
-	PlayBankSound(1, 41, &at);  // G_OpenChest
+	// As the original's (Reward::InterfaceTap): heard as the interface's sounds, not from out on the land, where they were
+	// too far off to hear (Mike, 2026-10-19).
+	PlayBankSound(1, 173, nullptr); // G_ClickSignpost: the tap
+	PlayBankSound(1, 40, nullptr);  // G_RewardSting
+	PlayBankSound(1, 41, nullptr);  // G_OpenChest
 	const auto& infos = Locator::infoConstants::value().reward;
 	if (static_cast<size_t>(reward.type) >= infos.size())
 	{
@@ -4685,8 +4713,8 @@ void OpenReward(uint32_t chest)
 	}
 	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Reward chest {} (reward {}) opened: {}; belief +{:.3f} in town {}", chest, reward.type, what,
 	                   info.beliefValue, town);
-	ForgetObject(chest);
-	registry.Destroy(entity);
+	// Its lid opens (coffre.anm), it stays open a while, then it goes (UpdateScriptFrame).
+	reward.openFor = 0.0f;
 }
 // scaled down for a town bigger than populationForUnmodifiedBelief, by the land's beliefSpeedScaleStory.
 void ImpressTowns(MagicType magic, const glm::vec3& at, int player)
@@ -4885,8 +4913,23 @@ void UpdateDispensers()
 		{
 			continue;
 		}
-		// Its sphere still on the pedestal: nothing more until it is taken off (into the hand, or moved away) or used.
-		const auto over = registry.Get<Transform>(entity).position + glm::vec3(0.0f, 10.0f, 0.0f);
+		// Its sphere resting on its top (Mike, 2026-10-19: at 10 over it, it hung about a sphere's height too high): the
+		// top of its model, and the bubble's radius above that.
+		const auto& at = registry.Get<Transform>(entity);
+		float top = 10.0f - 2.0f * k_BubbleRadius;
+		if (const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(entity);
+		    mesh != nullptr && Locator::resources::value().GetMeshes().Contains(mesh->id))
+		{
+			const auto box = Locator::resources::value().GetMeshes().Handle(mesh->id)->GetBoundingBox();
+			top = (box.Center().y + 0.5f * box.Size().y) * at.scale.y;
+		}
+		const auto over = at.position + glm::vec3(0.0f, top + k_BubbleRadius, 0.0f);
+		static std::set<uint32_t> s_reported;
+		if (s_reported.insert(id).second)
+		{
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Dispenser {}: its top {:.2f} above it, so its sphere's centre {:.2f}", id, top,
+			                   top + k_BubbleRadius);
+		}
 		if (dispenser.sphere != 0)
 		{
 			const auto sphere = static_cast<entt::entity>(dispenser.sphere);
@@ -11690,6 +11733,33 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	UpdateBuilders(seconds);
 	UpdateForesters(seconds);
 	UpdateFarmers(seconds);
+	// Opened chests: the lid opening over coffre.anm's length, open a while, then gone.
+	for (auto it = g_rewards.begin(); it != g_rewards.end();)
+	{
+		auto& chest = it->second;
+		const auto entity = static_cast<entt::entity>(it->first);
+		if (!chest.opened)
+		{
+			++it;
+			continue;
+		}
+		chest.openFor += seconds;
+		if (!registry.Valid(entity) || chest.openFor > k_ChestOpenSeconds + k_ChestStaysOpenSeconds)
+		{
+			ForgetObject(it->first);
+			if (registry.Valid(entity))
+			{
+				registry.Destroy(entity);
+			}
+			it = g_rewards.erase(it);
+			continue;
+		}
+		if (auto* animated = registry.TryGet<openblack::ecs::components::Animated>(entity))
+		{
+			animated->localPose = ChestPose(chest.openFor / k_ChestOpenSeconds);
+		}
+		++it;
+	}
 	// Reward chests from the sky (rewardfromsky): down to the ground, then there to be opened.
 	for (auto& [id, chest] : g_rewards)
 	{
@@ -11920,6 +11990,9 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	{
 		static const char* s_testSpheres = std::getenv("OPENBLACK_TEST_SPHERES");
 		static std::vector<std::pair<uint32_t, glm::vec2>> s_placed; // sphere, its place across and up
+		static uint32_t s_testChest = 0;
+		static uint32_t s_chestShown = 0;
+		static uint32_t s_testDispenser = 0;
 		if (s_testSpheres != nullptr)
 		{
 			static float s_since = 0.0f;
@@ -11944,6 +12017,45 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 					}
 				}
 				SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test spheres: {} placed", s_placed.size());
+				// ...and on the ground ahead, a reward chest (opened 8 s later) and a dispenser keeping a food sphere.
+				const auto ahead = eye + glm::normalize(glm::vec3(forward.x, 0.0f, forward.z)) * 18.0f;
+				s_testChest = static_cast<uint32_t>(CreateScriptObject(ObjectType::Reward, 5, ahead - right * 6.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f));
+				s_chestShown = s_testChest;
+				s_testDispenser = static_cast<uint32_t>(
+				    CreateScriptObject(ObjectType::SpellDispenser, 126, ahead + right * 6.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f));
+				g_dispensers[s_testDispenser].seed = 3;
+			}
+			// The chest and the dispenser (with its sphere) kept on the ground ahead too.
+			const auto ahead = eye + glm::normalize(glm::vec3(forward.x, 0.0f, forward.z)) * 18.0f;
+			auto onGround = [](glm::vec3 at) {
+				at.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(at.x, at.z));
+				return at;
+			};
+			if (const auto chest = static_cast<entt::entity>(s_chestShown);
+			    s_chestShown != 0 && registry.Valid(chest) && registry.AllOf<Transform>(chest))
+			{
+				registry.Get<Transform>(chest).position = onGround(eye + glm::normalize(glm::vec3(forward.x, 0.0f, forward.z)) * 7.0f);
+				if (std::getenv("OPENBLACK_TEST_CHEST_REST") != nullptr)
+				{
+					registry.Remove<openblack::ecs::components::Animated>(chest);
+				}
+			}
+			if (const auto dispenser = static_cast<entt::entity>(s_testDispenser);
+			    s_testDispenser != 0 && registry.Valid(dispenser) && registry.AllOf<Transform>(dispenser))
+			{
+				auto& at = registry.Get<Transform>(dispenser).position;
+				const auto moved = onGround(ahead + right * 6.0f) - at;
+				at += moved;
+				const auto sphere = static_cast<entt::entity>(g_dispensers[s_testDispenser].sphere);
+				if (g_dispensers[s_testDispenser].sphere != 0 && registry.Valid(sphere) && registry.AllOf<Transform>(sphere))
+				{
+					registry.Get<Transform>(sphere).position += moved;
+				}
+			}
+			if (s_testChest != 0 && s_since >= static_cast<float>(std::atof(s_testSpheres)) + 8.0f)
+			{
+				OpenReward(s_testChest);
+				s_testChest = 0;
 			}
 			for (const auto& [id, place] : s_placed)
 			{

@@ -172,10 +172,11 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
 - Farmers sow and harvest the grain fields; villagers build: they fetch wood from the store, carry it to the site
   and build the Temple and other buildings.
 - People dance around the statue at the start, to the original's own choreography.
-- Reward chests: the scripts' chests fall from the sky and open when clicked, giving food, wood or a miracle.
+- Reward chests: the original's treasure chest falls from the sky where the scripts give one; click it and its lid
+  swings open with the original's sounds, giving food, wood or a miracle.
 - Towns believe in you from what they see (the original's belief numbers), and can be won with miracles.
 - Animals stand in their flocks (a lost one joins a flock of its kind), and can be picked up and thrown.
-- Miracles: food, wood, heal, shield and more, from spheres and dispensers. A sphere looks as in the original:
+- Miracles: food, wood, heal, shield and more, from spheres and dispensers (each sphere resting on its dispenser). A sphere looks as in the original:
   its animated glassy bubble with the miracle's icon turning upright inside, and, for water and fire, the
   original's own particle effects (the water's mist, the fire's glow and flame), run from the game's effect files.
 - Grain fields hold grain you can collect, empty to nothing, and grow back over a game day.
