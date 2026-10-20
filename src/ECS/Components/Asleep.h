@@ -11,12 +11,8 @@
 
 namespace openblack::ecs::components
 {
-// A villager walking home for the night (LivingActionSystem): asleep once there.
-struct GoingHome
-{
-};
-
-// A villager asleep in its house for the night: not drawn, and nothing of it to be seen or picked up till morning.
+// A villager inside its house (LivingActionSystem: at home, in bed, asleep - the original's Flags & 4): not drawn, and
+// nothing of it to be seen or picked up till it comes out.
 struct Asleep
 {
 };

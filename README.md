@@ -80,7 +80,7 @@ are.
 | **Left stick** | Move the camera across the land |
 | **Right stick** | Turn the view left and right, tilt it up and down |
 | **R / L** | Zoom in / zoom out (held) |
-| **ZL** | The **Action Button**: pick up, collect, give, let go, throw (see below) |
+| **ZL** | The **Action Button**: pick up, collect, give, let go, throw (see below). With the hand on or near the Temple's door: go in |
 | **ZR** | While holding something: the Action Button too, as ZL |
 | **Long press on an area of the ground, then drag** | Drags the user in that direction |
 | **A** | Your creature's leash: none, regular, reward (good), punishment (evil), one step each press |
@@ -92,6 +92,8 @@ are.
 | **D-pad down / right** | Load save point 1 / 2 |
 | **Right stick press** | Play faster (twice as fast each press, up to ×8) |
 | **Left stick press** | Play slower (half as fast each press, down to ×1/8) |
+
+Normal speed (shown as ×1) is paced to match the original game.
 | **Any button** | Skip the intro movie |
 
 ### Touchscreen
@@ -109,7 +111,8 @@ Your hand follows your finger. What a touch does depends on how it starts:
 - **Pick something up:** press ZL on or near it. If you are not quite on it, the nearest thing you can pick up
   close to where you pressed is taken. People, animals, rocks, logs, trees and fences can all be picked up.
 - **Throw:** while holding something, swipe and let go of the button. The faster the swipe, the further it flies.
-  Let go with your hand still to put it down gently.
+  Let go with your hand still to put it down gently. Things fly as in the original: rocks fly far, while trees,
+  people and miracles slow in the air and land shorter.
 - **Collect wood or grain:** hold ZL (or long-press) over a wood pile, a grain field, or the wood or grain half of
   a village store. The amount grows the longer you hold, up to what the hand can carry.
 - **Give wood or grain:** press ZL holding it over the village store to put it straight into the store, or let
@@ -153,14 +156,28 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
 **Your creature**
 - Choose the Ape, Cow or Tiger in the glade. Your creature walks, eats, sleeps, poos and wanders on its own.
 - Stroke and slap it, lead it on the leash, tie it up, feed it, and teach it to fight.
+- It moves as the original's does: each animation plays over its own length, its bones are posed with the
+  original's maths, it eases between standing and walking as it speeds up and slows down, and its feet keep to the
+  ground as it walks.
+
+**Your hand**
+- The hand's poses are the original's, posed the original's way: its fingers wiggle when idle and get ready over
+  something it can take. It holds things beside it, between thumb and forefinger, closing round them by their
+  size. Its fingers trail behind it as it moves.
 
 **The world**
-- Villagers walk about, go home and sleep in their houses at night, and come out in the morning.
-- Villagers build: given wood, they fetch it from the store, carry it to the site and build the Temple and other
-  buildings.
+- Villagers live their days as in the original: they work, rest and chill out, get hungry and eat from the
+  village store, housewives fetch food home for dinner, and they go home to sleep at night and come out in the
+  morning. They walk at the original's pace.
+- Farmers sow and harvest the grain fields; villagers build: they fetch wood from the store, carry it to the site
+  and build the Temple and other buildings.
+- People dance around the statue at the start, to the original's own choreography.
+- Reward chests: the scripts' chests fall from the sky and open when clicked, giving food, wood or a miracle.
 - Towns believe in you from what they see (the original's belief numbers), and can be won with miracles.
 - Animals stand in their flocks (a lost one joins a flock of its kind), and can be picked up and thrown.
-- Miracles: food, wood, heal, shield and more, from spheres and dispensers, each shown as its icon in a bubble.
+- Miracles: food, wood, heal, shield and more, from spheres and dispensers. A sphere looks as in the original:
+  its animated glassy bubble with the miracle's icon turning upright inside, and, for water and fire, the
+  original's own particle effects (the water's mist, the fire's glow and flame), run from the game's effect files.
 - Grain fields hold grain you can collect, empty to nothing, and grow back over a game day.
 - Trees can be uprooted, replanted, thrown, and shredded into wood.
 - Thrown people and animals can be hurt or killed; the dead lie where they fell and later become skeletons.
@@ -173,6 +190,8 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
 - **The missionaries' ship** does not sail away at the end of their quest; in the original the engine itself does
   this.
 - **Gestures** are not used for casting miracles yet. Miracles are cast from spheres.
+- **Particle effects:** the original's effect system is being ported a piece at a time. The water and fire
+  spheres use it; the heal, lightning, shield and teleport spheres show their icon without their effect so far.
 - Some objects do not topple when hit, and thrown things pass through trees.
 - Saving uses two test save points on the D-pad, not the original's save menu.
 
@@ -221,5 +240,8 @@ MIT), and libnx (ISC).
 ## Credits
 
 - The [openblack developers](contributors.md), whose engine this is.
+- The [bw1-decomp](https://github.com/openblack/bw1-decomp) project, whose decompilation of the original game
+  made the villagers' lives, the dances, creature and hand animation, throwing and the miracle spheres match the
+  original.
 - Lionhead Studios, for Black & White.
 - The devkitPro, libnx and Atmosphère projects, which make Switch homebrew possible.

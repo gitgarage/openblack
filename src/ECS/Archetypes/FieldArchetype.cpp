@@ -32,7 +32,8 @@ entt::entity FieldArchetype::Create(int townId, const glm::vec3& position, Field
 
 	auto entity = AbodeArchetype::Create(townId, position, abodeInfo, yAngleRadians, 1.0f, 0, 0);
 	// Full of grain to begin with (Land 1's fields hold 350 each).
-	registry.Assign<Field>(entity, townId, info.totalFoodInField, info.totalFoodInField);
+	registry.Assign<Field>(entity, townId, info.totalFoodInField, info.totalFoodInField, static_cast<uint32_t>(type),
+	                       static_cast<uint8_t>(std::max(info.timesToSow, 0.0f)), info.ageRecolt);
 
 	return entity;
 }

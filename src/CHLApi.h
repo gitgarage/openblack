@@ -47,6 +47,23 @@ private:
 void NotifyGameThingClicked(uint32_t entity);
 // After the scripts' turn: what was clicked before it has been seen by all of them.
 void EndScriptTurn();
+// The food (or wood) in a town's village store, for the villagers' town desires (LivingActionSystem).
+float TownStoreAmount(uint32_t town, bool wood);
+// A villager goes for wood for its town (its wood desire): false if there is no tree or wood for it to get.
+bool StartForester(uint32_t villager, float metresPerSecond);
+// How many of a town's villagers are getting wood now.
+uint32_t ForesterCount(uint32_t town);
+// A villager goes to farm for its town (its food desire): sowing or harvesting its best field; false if none wants it.
+bool StartFarmer(uint32_t villager, float metresPerSecond);
+// How many of a town's villagers are farming now.
+uint32_t FarmerCount(uint32_t town);
+// A town's desire to build (its building sites' want of builders), and a villager taking up its best site.
+float TownBuildDesire(uint32_t town);
+bool StartBuilder(uint32_t villager, float metresPerSecond);
+// Takes up to `amount` food (or wood) from a town's village store; what was taken.
+float TakeFromTownStore(uint32_t town, bool wood, float amount);
+// A villager dead where it stands, of `why` (starved): it falls in the death throes and lies there.
+void VillagerDiesOf(uint32_t villager, const char* why);
 uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction);
 // The creature the ray passes over, nearest first (0 if none).
 uint32_t CreatureOnRay(const glm::vec3& origin, const glm::vec3& direction);
@@ -67,6 +84,8 @@ void UpdateScriptFrame(std::chrono::microseconds dt);
 // object, carried with the hand until the button is pressed again, let go (dropped or thrown) on that release.
 bool HandPickUp(uint32_t entity);
 bool HandHolding();
+// How far open the hand holds what it holds, 0 (closed) to 1: half of k_HandHoldPose's length at 1.
+float HandHoldOpenness();
 // What the hand is over that it could pick up (0 for nothing, or while it holds something).
 uint32_t HandObjectUnder();
 // Wood: piles (the Village Store's, and wood put down) are collected from rather than picked up whole. While
@@ -139,7 +158,9 @@ void ExitTemple();
 void UpdateTemple(std::chrono::microseconds dt);
 void TempleLongPress(glm::vec2 screen);
 // The hand's pose while holding something (a name in Data/hndspec5.txt).
-constexpr const char* k_HandHoldPose = "hold_above";
+// What the hand holds things with: the original's, read from its hand while playing (2026-10-19) - hold_side
+// throughout, closed further or less far by what is held (HandHoldFrame).
+constexpr const char* k_HandHoldPose = "hold_side";
 void HandCarry(const glm::vec3& handPosition);
 void HandDrop(const glm::vec3& handPosition);
 // When the hand last picked something up (a press that picked it up doesn't let go of it on its release).

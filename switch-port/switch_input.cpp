@@ -13,7 +13,7 @@
 //                              move straight away              -> no button (hover: drawing a gesture)
 //                              quick tap without moving        -> left click
 //   ZR (hold)             -> left mouse button at the cursor (also turns any touch into a grab at once)
-//   ZL                    -> right mouse button (action)
+//   ZL                    -> right mouse button (action); pressed on the finished Temple's door, go in
 //   Left stick            -> arrow keys (move the camera)
 //   Right stick           -> Z / U (rotate left/right), A / Q (tilt up/down)
 //   R / L                 -> zoom in / out, continuously while held (straight into the camera's held zoom:
@@ -292,8 +292,23 @@ void switchInputFrame()
 	}
 	const bool touchLeft = touchFrame(now, zr);
 	setMouseButton(g_leftDown, SDL_BUTTON_LEFT, zr || touchLeft);
+	// ZL pressed with the hand on (or right by) the finished Temple's door goes in, as a long press there does (Mike,
+	// 2026-10-19); held, it is the action button as ever - not while it went in.
+	static bool s_zlWas = false;
+	static bool s_zlEntered = false;
+	const bool zl = (held & HidNpadButton_ZL) != 0;
+	if (zl && !s_zlWas && !holding && !openblack::chlapi::InTemple() && openblack::chlapi::HandAtTempleDoor())
+	{
+		openblack::chlapi::EnterTemple();
+		s_zlEntered = true;
+	}
+	if (!zl)
+	{
+		s_zlEntered = false;
+	}
+	s_zlWas = zl;
 	setMouseButton(g_rightDown, SDL_BUTTON_RIGHT,
-	               (held & HidNpadButton_ZL) != 0 || (holding && (held & HidNpadButton_ZR) != 0) || g_touch == Touch::Collect);
+	               (zl && !s_zlEntered) || (holding && (held & HidNpadButton_ZR) != 0) || g_touch == Touch::Collect);
 
 
 }

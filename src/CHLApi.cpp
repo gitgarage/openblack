@@ -15,6 +15,7 @@
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <cctype>
 #include <deque>
@@ -45,6 +46,7 @@
 #include <spdlog/spdlog.h>
 
 #include "3D/L3DMesh.h"
+#include "PSys/PSys.h"
 #include "3D/LandIslandInterface.h"
 #include <LNDFile.h>
 #include "3D/SkyInterface.h"
@@ -216,8 +218,22 @@ struct Sparkler
 std::unordered_map<uint32_t, Sparkler> g_sparklers;
 // Miracle spheres (script type 30 ONE_SHOT_SPELL, 31 in the hand), by object: their SpellSeedType (3 food, 8 wood...).
 std::unordered_map<uint32_t, int> g_oneShotSpells;
-// A miracle bubble's radius: its picture (made from ATMOS), its icon and its piling all go by it.
-constexpr float k_BubbleRadius = 1.4f;
+// Reward chests (script type Reward: CREATE_REWARD / CREATE_REWARD_IN_TOWN), by object: their REWARD_OBJECT_INFO
+// (info.dat's reward table: 5 a large food chest), the town they are for, and whether opened (bw1-decomp's Reward;
+// opening is runblack.exe 1.20's Reward::InterfaceTap). Kept once opened, for GET_HELP.
+struct RewardChest
+{
+	int type = 0;
+	uint32_t town = 0;
+	bool opened = false;
+	float falling = 0.0f; // still to fall, from the sky (rewardfromsky)
+};
+std::unordered_map<uint32_t, RewardChest> g_rewards;
+void OpenReward(uint32_t chest); // below, with the miracles
+// A miracle bubble's radius, the original's: its sphere O_Bibble_up.l3d's (2.19 round its centre, at scale 1 for every
+// seed - OneOffSpellSeed's MobileObject is made at 1). Its drawn disc is 2.28 (k_BubbleDiscRadius); piling goes by this.
+constexpr float k_BubbleRadius = 2.19f;
+constexpr float k_BubbleDiscRadius = 2.28f;
 // Portals (script type 23): what is let go of over one spirals in and is sent on to the next land.
 std::unordered_set<uint32_t> g_vortices;
 struct VortexSpiral
@@ -447,6 +463,29 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		}
 		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Miracle sphere {} (spell seed {}){} at ({:.1f}, {:.1f}, {:.1f})", id, subtype,
 		                   type == ObjectType::OneShotSpellInHand ? " in the hand" : "", position.x, position.y, position.z);
+		return entity;
+	}
+	case ObjectType::Reward:
+	{
+		// A reward chest, on the ground (or above it, to fall): its reward info's model, else the chest.
+		auto& registry = Locator::entitiesRegistry::value();
+		const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
+		const auto& infos = Locator::infoConstants::value().reward;
+		const auto* info = subtype < infos.size() ? &infos.at(subtype) : nullptr;
+		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		const float size = info != nullptr && info->startScale > 0.0f ? info->startScale : 1.0f;
+		registry.Assign<Transform>(entity, glm::vec3(position.x, ground, position.z), glm::mat3(glm::eulerAngleY(yAngleRadians)),
+		                           glm::vec3(size * scale));
+		auto mesh = resources::HashIdentifier(MeshId::U_Chest);
+		if (info != nullptr && Locator::resources::value().GetMeshes().Contains(resources::HashIdentifier(info->meshId)))
+		{
+			mesh = resources::HashIdentifier(info->meshId);
+		}
+		registry.Assign<ecs::components::Mesh>(entity, mesh, static_cast<int8_t>(0), static_cast<int8_t>(0));
+		g_rewards[static_cast<uint32_t>(entity)] = {static_cast<int>(subtype), 0, false, 0.0f};
+		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Reward chest {} (reward {}: food {:.0f}, wood {}, seed {}) at ({:.1f}, {:.1f}, {:.1f})",
+		                   static_cast<uint32_t>(entity), subtype, info != nullptr ? info->foodValue : 0.0f, info != nullptr ? info->woodValue : 0u,
+		                   info != nullptr ? static_cast<int>(info->seed) : -1, position.x, ground, position.z);
 		return entity;
 	}
 	case ObjectType::SpellDispenser:
@@ -727,9 +766,23 @@ void EndScriptTurn()
 	g_clickedThing = 0; // a click lasts one script turn
 }
 
+namespace
+{
+float ContainerResource(uint32_t container, int32_t resource); // below, with the resources
+} // namespace
+
+float TownStoreAmount(uint32_t town, bool wood)
+{
+	return ContainerResource(town, static_cast<int32_t>(wood ? ResourceType::Wood : ResourceType::Food));
+}
+
 void NotifyGameThingClicked(uint32_t entity)
 {
 	g_clickedThing = entity;
+	if (const auto chest = g_rewards.find(entity); chest != g_rewards.end() && !chest->second.opened)
+	{
+		OpenReward(entity); // Reward::InterfaceTap
+	}
 	// What it was, so a click that went to the wrong thing can be told from the log.
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto e = static_cast<entt::entity>(entity);
@@ -748,6 +801,10 @@ void NotifyGameThingClicked(uint32_t entity)
 		{
 			what = "scroll";
 		}
+	}
+	if (g_rewards.contains(entity))
+	{
+		what = "reward chest";
 	}
 	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Clicked {} ({})", entity, what);
 }
@@ -1034,7 +1091,19 @@ uint32_t HighlightOnRay(const glm::vec3& origin, const glm::vec3& direction)
 	const auto along = glm::normalize(direction);
 	uint32_t best = 0;
 	float bestDistance = std::numeric_limits<float>::max();
+	std::vector<uint32_t> clickable;
 	for (const auto& [id, type] : g_highlights)
+	{
+		clickable.push_back(id);
+	}
+	for (const auto& [id, chest] : g_rewards)
+	{
+		if (!chest.opened && chest.falling <= 0.0f)
+		{
+			clickable.push_back(id); // a reward chest is tapped open as a scroll is (Reward::InterfaceValidToTap)
+		}
+	}
+	for (const auto id : clickable)
 	{
 		const auto entity = static_cast<entt::entity>(id);
 		const auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
@@ -1121,9 +1190,11 @@ const std::unordered_set<uint32_t>* g_searchExcludes = nullptr;
 // excluding scripted ones, for the next - with this ignored it found the same rock for ever). A task just started
 // by RUN still has its arguments on its stack, not yet in its variables, so those count too: without them
 // SetupSculptor's loop, which never yields, found the rock handed to the newest KeepRockScripted again and again.
+void AddFlockMembers(std::unordered_set<uint32_t>& held); // below, with the flocks
 std::unordered_set<uint32_t> ScriptedObjects()
 {
 	std::unordered_set<uint32_t> held;
+	AddFlockMembers(held);
 	auto addValue = [&held](openblack::lhvm::DataType type, const openblack::lhvm::VMValue& value) {
 		if (type == openblack::lhvm::DataType::Float)
 		{
@@ -1635,7 +1706,7 @@ void GetProperty() // 021 GET_PROPERTY
 		// house under 0.75 for broken into).
 		if (villager != nullptr)
 		{
-			value = static_cast<float>(villager->health) / 100.0f;
+			value = villager->life;
 		}
 		else if (g_objectProperties.find(PropertyKey(object, prop)) == g_objectProperties.end())
 		{
@@ -1722,7 +1793,7 @@ void SetProperty() // 022 SET_PROPERTY
 	case Prop::Health:
 		if (villager != nullptr)
 		{
-			villager->health = static_cast<uint32_t>(std::clamp(value, 0.0f, 1.0f) * 100.0f);
+			villager->life = std::clamp(value, 0.0f, 1.0f);
 		}
 		break;
 	case Prop::Angle:
@@ -1959,6 +2030,237 @@ struct Flock
 	uint32_t leader = 0;
 };
 std::unordered_map<uint32_t, Flock> g_flocks;
+
+// DANCE_CREATE's dances, as the original plays them (bw1-decomp's Dance/GroupBehaviour/DanceGroup, and what it has not
+// decompiled yet - LoadDance, UpdateGroupBasedOnAction, UpdateGroupBasedOnDancerAction, Villager::DanceAnimation - read
+// from runblack.exe 1.20 at the addresses its symbols give). A dance is a container like a flock (the script
+// FLOCK_ATTACHes the dancers to it and counts them with ID_SIZE). Its choreography is Scripts/Dance/<info.dat file name>:
+// keyframes of actions on groups of dancers - a shape, its size, where in it, and what the dancers do - played a game
+// turn (100 ms) at a time and looped every Length minutes. Land 1's opening (FollowUs) has the Norse welcome crowd dance
+// NewDanceAroundPerson by the statue: men and women in two rings, facing in and out, dancing and praying.
+namespace dance
+{
+// DANCE_GROUP_ACTION_TYPE
+enum class Action : uint32_t
+{
+	SetShape = 0,
+	SetPos = 1,
+	SetSize = 2,
+	SetAction = 3,
+	Proportion = 6,
+	SetAngle = 11,
+	SetPath = 14,
+};
+// DANCE_GROUP_MOVEMENT_KIND (only those the port does something with)
+enum class Kind : uint32_t
+{
+	StandStill = 0,
+	RotateDancers = 1,
+	RandomDance = 4,
+	Pray = 5,
+	Funky = 6,
+	FaceIn = 7,
+	FaceOut = 8,
+	RotateShape = 9,
+	PlayAnim = 10,
+	ChangeSize = 11,
+	MoveToPos = 12,
+	Sad = 15,
+	Happy = 16,
+	LookingForSomething = 17,
+	Sex = 18,
+	Mourning = 19,
+	Talk = 20,
+	TalkAndPoint = 21,
+	WorshipCreature = 22,
+	DanceX = 23,
+	DanceXPartner = 24,
+	FemaleA = 25,
+	FemaleC = 27,
+	MaleA = 28,
+	MaleC = 30,
+};
+constexpr float k_TurnSeconds = 0.1f;   // MillisecondsPerGameTurn
+constexpr int k_TurnsPerKeyBucket = 5;  // DanceKeyFrame::IsTimeEqualTo: key frames are half a second apart at most
+constexpr float k_DancerFullTurn = 256.0f;
+constexpr float k_ShapeFullTurn = 2048.0f;
+constexpr float k_Speed = 0.8f; // SetWorshipSpeed(DANCE_DEFAULT_WORSHIP_SPEED 0.25): floor(2.5) / 10 * MaxDanceSpeed 4
+
+struct DancerAction
+{
+	Kind kind = Kind::StandStill;
+	uint32_t param1 = 0; // a float or an int (PLAY_ANIM's animation), as the union in the original
+	float param2 = 0.0f;
+	int32_t endTime = 10000;
+	float Param1Float() const
+	{
+		float value;
+		std::memcpy(&value, &param1, sizeof(value));
+		return value;
+	}
+};
+struct KeyAction
+{
+	std::vector<uint32_t> groups;
+	Action type;
+	std::array<uint32_t, 4> value; // Value, Value2, Value3, Unused
+	DancerAction action;
+	float Float(size_t i) const
+	{
+		float f;
+		std::memcpy(&f, &value.at(i), sizeof(f));
+		return f;
+	}
+};
+struct KeyFrame
+{
+	float time;
+	std::vector<KeyAction> actions;
+};
+struct Choreography
+{
+	std::vector<KeyFrame> keyFrames; // in time order
+	uint32_t numGroups = 1;
+	uint32_t lengthMinutes = 5;
+};
+
+// GroupBehaviour::LoadDance: version, key frames (time, edit flags, actions: groups, type, a 0x38-byte argument), then
+// the start time, number of groups, two editor values, the length in minutes, a camera angle (version 2 on) and each
+// group's name.
+std::optional<Choreography> Load(const std::string& fileName)
+{
+	std::vector<uint8_t> data;
+	try
+	{
+		auto& fileSystem = Locator::filesystem::value();
+		data = fileSystem.ReadAll(fileSystem.GetPath<openblack::filesystem::Path::Scripts>() / "Dance" / fileName);
+	}
+	catch (const std::exception& e)
+	{
+		SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "Dance {}: could not read Scripts/Dance/{}: {}", fileName, fileName, e.what());
+		return std::nullopt;
+	}
+	size_t at = 0;
+	bool ok = true;
+	auto u32 = [&]() -> uint32_t {
+		uint32_t value = 0;
+		if (at + 4 > data.size())
+		{
+			ok = false;
+			return 0;
+		}
+		std::memcpy(&value, data.data() + at, 4);
+		at += 4;
+		return value;
+	};
+	auto f32 = [&]() {
+		const auto bits = u32();
+		float value;
+		std::memcpy(&value, &bits, sizeof(value));
+		return value;
+	};
+	Choreography dance;
+	const auto version = u32();
+	const auto numKeyFrames = u32();
+	for (uint32_t k = 0; ok && k < numKeyFrames && k < 10000; k++)
+	{
+		KeyFrame frame;
+		frame.time = f32();
+		u32(); // edit flags
+		const auto numActions = u32();
+		for (uint32_t a = 0; ok && a < numActions && a < 1000; a++)
+		{
+			KeyAction action;
+			const auto numGroups = u32();
+			for (uint32_t g = 0; ok && g < numGroups && g < 64; g++)
+			{
+				action.groups.push_back(u32());
+			}
+			action.type = static_cast<Action>(u32());
+			for (auto& value : action.value)
+			{
+				value = u32();
+			}
+			action.action.kind = static_cast<Kind>(u32());
+			action.action.param1 = u32();
+			action.action.param2 = f32();
+			action.action.endTime = static_cast<int32_t>(u32());
+			at += 6 * sizeof(float); // camera points
+			frame.actions.push_back(std::move(action));
+		}
+		dance.keyFrames.push_back(std::move(frame));
+	}
+	f32(); // start time
+	dance.numGroups = std::max(u32(), 1u);
+	u32(); // editor values
+	u32();
+	dance.lengthMinutes = std::max(u32(), 1u);
+	if (!ok || at > data.size())
+	{
+		SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "Dance {}: Scripts/Dance/{} ends early (version {})", fileName, fileName, version);
+		return std::nullopt;
+	}
+	std::stable_sort(dance.keyFrames.begin(), dance.keyFrames.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Dance {}: {} key frames, {} groups, {} min loop", fileName, dance.keyFrames.size(),
+	                   dance.numGroups, dance.lengthMinutes);
+	return dance;
+}
+
+// DanceGroup, what the port needs of it.
+struct Group
+{
+	uint32_t shape = 0; // DANCE_SHAPE_CIRCLE
+	bool isPath = false;
+	glm::vec2 pos {0.0f};
+	float size = 20.0f; // across, in metres
+	float angle = 0.0f; // of the shape, a 2048th of a turn
+	DancerAction action;
+	float dancerAngle = 0.0f; // where round the shape the first dancer is, a 256th of a turn
+	float changeSize = 0.0f;
+	glm::vec2 changeMove {0.0f};
+	float changeDancerRotation = 0.0f;
+	float changeShapeRotation = 0.0f;
+	bool fixed = false;
+	uint32_t proportion = 100;
+	bool facingOut = false; // FACE_OUT's, kept while the dancers dance; FACE_IN's otherwise
+	uint32_t actionSerial = 0; // a new action restarts the dancers' animations
+	std::vector<uint32_t> dancers;
+};
+} // namespace dance
+
+struct Dance
+{
+	glm::vec3 centre;
+	float secondsLeft;
+	std::shared_ptr<const dance::Choreography> choreography; // null: the file could not be read - the dancers stand round
+	std::vector<dance::Group> groups;
+	float time = 0.0f; // in game turns
+	float turnClock = 0.0f;
+	size_t nextKeyFrame = 0;
+	std::unordered_map<uint32_t, uint32_t> dancerSerial; // the action each dancer's animation is for
+};
+std::unordered_map<uint32_t, Dance> g_dances;
+
+// A script's flock is the script's: its members are scripted (a town, kept here for its count, is not). Land 1's FollowUs
+// gathers the citadel builders by asking CALL_IN for a Norse villager no script has, then putting him in the builders'
+// flock, until none is left - without this it got the same villager back for ever (2026-10-19).
+void AddFlockMembers(std::unordered_set<uint32_t>& held)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	for (const auto& [id, flock] : g_flocks)
+	{
+		const auto entity = static_cast<entt::entity>(id);
+		if (registry.Valid(entity) && registry.AllOf<openblack::ecs::components::Town>(entity))
+		{
+			continue;
+		}
+		held.insert(flock.members.begin(), flock.members.end());
+		if (flock.leader != 0)
+		{
+			held.insert(flock.leader);
+		}
+	}
+}
 
 constexpr int32_t k_SpeedProperty = 11; // what scripts set to make livings run (0.9), walk (0.4) or stop (0)
 // A living's full speed, which the script's speed property scales: a villager's fleeing speed from its
@@ -2721,24 +3023,107 @@ void SpecialEffectObject() // 053 SPECIAL_EFFECT_OBJECT
 
 void DanceCreate() // 054 DANCE_CREATE
 {
-	[[maybe_unused]] const auto duration = Popf();
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto type = Pop().intVal;
-	[[maybe_unused]] const auto obj = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto duration = Popf();
+	const auto position = PopVec();
+	const auto type = Pop().intVal; // DanceInfo: the welcome crowd's is 14, NewDanceAroundPerson
+	const auto obj = Pop().uintVal; // who it is danced around (or for)
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = registry.Create();
+	registry.Assign<Transform>(entity, position, glm::mat3(1.0f), glm::vec3(1.0f));
+	const auto id = static_cast<uint32_t>(entity);
+	g_flocks[id] = {};
+	g_scriptEntities[id] = {static_cast<int32_t>(ObjectType::Marker), 0, 0}; // a point, as a flock
+	auto& made = g_dances[id];
+	made = {position, duration > 0.0f ? duration : 30.0f};
+	// Its choreography, by info.dat's file name for the type; read once.
+	static std::unordered_map<std::string, std::shared_ptr<const dance::Choreography>> s_loaded;
+	const auto& infos = Locator::infoConstants::value().dance;
+	std::string fileName;
+	if (type >= 0 && static_cast<size_t>(type) < infos.size())
+	{
+		fileName = std::string(infos.at(static_cast<size_t>(type)).fileName.data());
+	}
+	if (!fileName.empty())
+	{
+		auto [it, fresh] = s_loaded.try_emplace(fileName);
+		if (fresh)
+		{
+			if (auto loaded = dance::Load(fileName))
+			{
+				it->second = std::make_shared<const dance::Choreography>(std::move(*loaded));
+			}
+		}
+		made.choreography = it->second;
+	}
+	made.groups.resize(made.choreography != nullptr ? made.choreography->numGroups : 1);
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "DANCE_CREATE {}: type {} ({}) round {} at ({:.1f}, {:.1f}, {:.1f}) for {:.0f} s", id, type,
+	                   fileName.empty() ? "no file" : fileName, obj, position.x, position.y, position.z, made.secondsLeft);
+	Pusho(id);
 }
 
 void CallIn() // 055 CALL_IN
 {
-	[[maybe_unused]] const auto excludingScripted = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto container = Pop().uintVal;
-	[[maybe_unused]] const auto subtype = Pop().intVal;
-	[[maybe_unused]] const auto type = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto excludingScripted = static_cast<bool>(Pop().intVal);
+	const auto container = Pop().uintVal;
+	const auto subtype = Pop().intVal;
+	const auto type = Pop().intVal;
+	// The first of `type` in a flock or a town: Land 1's lost flock gets its shepherd this way ("get VILLAGER in
+	// ShepherdFlock"). Always 0 before, and the five-sheep reward waited for ever for "nobody" to reach the soapbox.
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto scripted = excludingScripted ? ScriptedObjects() : std::unordered_set<uint32_t> {};
+	auto matches = [&](uint32_t id) {
+		const auto entity = static_cast<entt::entity>(id);
+		if (id == 0 || !registry.Valid(entity) || scripted.contains(id))
+		{
+			return false;
+		}
+		switch (static_cast<ObjectType>(type))
+		{
+		case ObjectType::Villager:
+		{
+			const auto* villager = registry.TryGet<ecs::components::Villager>(entity);
+			return villager != nullptr && SubtypeMatches(subtype, static_cast<int>(villager->number));
+		}
+		case ObjectType::Animal:
+		{
+			const auto* animal = registry.TryGet<ecs::components::Animal>(entity);
+			return animal != nullptr && SubtypeMatches(subtype, static_cast<int>(animal->type));
+		}
+		default:
+		{
+			const auto record = g_scriptEntities.find(id);
+			return record != g_scriptEntities.end() && record->second.type == type && SubtypeMatches(subtype, static_cast<int>(record->second.subtype));
+		}
+		}
+	};
+	uint32_t found = 0;
+	if (const auto flock = g_flocks.find(container); flock != g_flocks.end())
+	{
+		if (matches(flock->second.leader))
+		{
+			found = flock->second.leader;
+		}
+		for (const auto member : flock->second.members)
+		{
+			if (found == 0 && matches(member))
+			{
+				found = member;
+			}
+		}
+	}
+	else if (container != 0 && registry.Valid(static_cast<entt::entity>(container)) &&
+	         registry.AllOf<ecs::components::Town>(static_cast<entt::entity>(container)))
+	{
+		registry.Each<const ecs::components::Villager>([&](entt::entity entity, const ecs::components::Villager& villager) {
+			if (found == 0 && villager.town == static_cast<entt::entity>(container) && matches(static_cast<uint32_t>(entity)))
+			{
+				found = static_cast<uint32_t>(entity);
+			}
+		});
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "CALL_IN type {} subtype {} in {}{}: {}", type, subtype, container,
+	                   excludingScripted ? ", not scripted" : "", found);
+	Pusho(found);
 }
 
 void ChangeInnerOuterProperties() // 056 CHANGE_INNER_OUTER_PROPERTIES
@@ -4231,6 +4616,78 @@ void SetTownBelief(uint32_t town, int player, float value)
 }
 
 // A miracle impresses the towns whose people see it: its info.dat impressiveValue for each villager within sight,
+
+// Reward::InterfaceTap: the chest opened - its sting and the chest's own sound, belief in the player for it
+// (beliefValue) in its town, and what is in it: food or wood (foodValue / woodValue) left in a pile where it stood,
+// or a miracle (its spell seed) to take; then it is gone.
+void OpenReward(uint32_t chest)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	auto found = g_rewards.find(chest);
+	const auto entity = static_cast<entt::entity>(chest);
+	if (found == g_rewards.end() || found->second.opened || !registry.Valid(entity) || !registry.AllOf<Transform>(entity))
+	{
+		return;
+	}
+	auto& reward = found->second;
+	reward.opened = true;
+	const auto at = registry.Get<Transform>(entity).position;
+	PlayBankSound(1, 173, &at); // G_ClickSignpost: the tap
+	PlayBankSound(1, 40, &at);  // G_RewardSting
+	PlayBankSound(1, 41, &at);  // G_OpenChest
+	const auto& infos = Locator::infoConstants::value().reward;
+	if (static_cast<size_t>(reward.type) >= infos.size())
+	{
+		registry.Destroy(entity);
+		return;
+	}
+	const auto& info = infos.at(static_cast<size_t>(reward.type));
+	// Its town: the one it was made for, else the nearest.
+	uint32_t town = reward.town;
+	if (town == 0)
+	{
+		float best = std::numeric_limits<float>::max();
+		registry.Each<const openblack::ecs::components::Town, const Transform>(
+		    [&](entt::entity t, const openblack::ecs::components::Town&, const Transform& where) {
+			    const float d = glm::distance(glm::vec2(where.position.x, where.position.z), glm::vec2(at.x, at.z));
+			    if (d < best)
+			    {
+				    best = d;
+				    town = static_cast<uint32_t>(t);
+			    }
+		    });
+	}
+	if (town != 0 && info.beliefValue != 0.0f)
+	{
+		SetTownBelief(town, 1, TownBelief(town, 1) + info.beliefValue);
+	}
+	std::string what = "nothing";
+	const auto ground = glm::vec3(at.x, Locator::terrainSystem::value().GetHeightAt(glm::vec2(at.x, at.z)), at.z);
+	if (info.foodValue > 0.0f)
+	{
+		openblack::ecs::archetypes::PotArchetype::Create(ground, 0.0f, PotInfo::MagicFood, static_cast<int32_t>(info.foodValue));
+		what = fmt::format("{:.0f} food", info.foodValue);
+	}
+	else if (info.woodValue > 0)
+	{
+		openblack::ecs::archetypes::PotArchetype::Create(ground, 0.0f, PotInfo::MagicWood, static_cast<int32_t>(info.woodValue));
+		what = fmt::format("{} wood", info.woodValue);
+	}
+	else if (info.seed != SpellSeedType::None)
+	{
+		CreateScriptObject(ObjectType::OneShotSpell, static_cast<uint32_t>(info.seed), ground + glm::vec3(0.0f, 3.0f, 0.0f), 0.0f, 0.0f,
+		                   0.0f, 0.0f, 1.0f);
+		what = fmt::format("a miracle (spell seed {})", static_cast<int>(info.seed));
+	}
+	else
+	{
+		what = fmt::format("something not in yet (power-up {}, scaffold {})", static_cast<int>(info.powerUp), info.scaffold);
+	}
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Reward chest {} (reward {}) opened: {}; belief +{:.3f} in town {}", chest, reward.type, what,
+	                   info.beliefValue, town);
+	ForgetObject(chest);
+	registry.Destroy(entity);
+}
 // scaled down for a town bigger than populationForUnmodifiedBelief, by the land's beliefSpeedScaleStory.
 void ImpressTowns(MagicType magic, const glm::vec3& at, int player)
 {
@@ -4360,7 +4817,7 @@ void CastMiracle(int spellSeed, const glm::vec3& at)
 		registry.Each<Villager, const Transform>([&](entt::entity, Villager& villager, const Transform& transform) {
 			if (glm::distance(glm::vec2(transform.position.x, transform.position.z), glm::vec2(ground.x, ground.z)) < k_HealRadius)
 			{
-				villager.health = 100;
+				villager.life = 1.0f;
 				++healed;
 			}
 		});
@@ -5232,9 +5689,10 @@ void PlaceMover(entt::entity entity, Transform& transform, glm::vec3 position, c
 
 namespace
 {
-// Animation clock: 10 keyframes a second, one a game turn (15 looked fast forward, Mike 2026-10-17; the files
-// keep no rate). See k_LivingPace in Enums.h.
-constexpr float k_AnimationFramesPerSecond = 15.0f * k_LivingPace;
+// Animation clock: 10 keyframes a second - the animations' own timing (their header's duration at 0x20, in ms: 1000
+// for the 10-frame walk, 4000 for a 40-frame dance; bw1-decomp's LH3DAnim::Duration). Not walks and runs, which play
+// by the ground covered (below).
+constexpr float k_AnimationFramesPerSecond = 10.0f;
 std::unordered_map<uint32_t, glm::vec3> g_lastPositions;
 struct VillagerGlide
 {
@@ -5317,6 +5775,16 @@ struct CreaturePlaying
 	float frame;
 };
 std::unordered_map<uint32_t, CreaturePlaying> g_creaturePlaying;
+std::unordered_map<uint32_t, glm::vec3> g_creatureLastPosition; // where its walk/run cycle last measured it
+// How it is going between standing and walking (LH3DCreature's CurrentSpeed and cycle times): its speed, eased
+// toward how fast it is really moving, and where it is in each of the two cycles.
+struct CreatureGait
+{
+	float speed = 0.0f;
+	float walkFrame = 0.0f;
+	float standFrame = 0.0f;
+};
+std::unordered_map<uint32_t, CreatureGait> g_creatureGait;
 std::unordered_map<uint32_t, glm::vec3> g_creatureHomes; // SET_CREATURE_HOME
 
 // The creature actions acted out so far, by their place in the table.
@@ -5810,8 +6278,48 @@ std::string ActOutCreatureOrder(entt::entity entity, const CreatureOrder& order,
 		return "stand";
 	}
 }
-// A guess, not yet checked against the original: the CBN headers' timing fields aren't decoded. 15 looked fast.
+// For a pose whose CBN header gives no length: the old guess.
 constexpr float k_CreatureFramesPerSecond = 15.0f * k_LivingPace;
+// A creature's walking pace here (ActOutCreatureOrder's and WalkCreatureTo's), units a second, and how quickly
+// its speed changes: the original's Acceleration of 12 against its WalkSpeed of 9 at size 1 (LH3DCreature::SetSize)
+// takes it from standing to walking pace in three quarters of a second.
+constexpr float k_CreatureWalkSpeed = 3.0f;
+constexpr float k_CreatureAcceleration = k_CreatureWalkSpeed * 12.0f / 9.0f;
+
+// The creature's size as the original's Size1 (LH3DCreature::SetSize keeps it in 0.05..4): its SCALE property.
+float CreatureSize(uint32_t creature)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(creature);
+	const auto base = g_creatureBaseScale.find(creature);
+	if (!registry.Valid(entity) || !registry.AllOf<Transform>(entity) || base == g_creatureBaseScale.end() || base->second <= 0.0f)
+	{
+		return 1.0f;
+	}
+	return std::clamp(registry.Get<Transform>(entity).scale.x / base->second, 0.05f, 4.0f);
+}
+
+// Keyframes per second of a creature pose. The original plays each animation over its header's Duration (CAnim,
+// ms), on a clock LH3DCreature::UpdateTime runs at (1.6 - Size1 * 0.5 * 0.85) of game time: small creatures
+// move quicker. Logged once per pose.
+float CreatureFramesPerSecond(const std::string& name, const openblack::morph::Animation& pose, float size)
+{
+	const auto durationMs = static_cast<float>(pose.header.unknown0x0);
+	static std::set<std::string> s_reported;
+	if (s_reported.emplace(name).second)
+	{
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Creature pose {}: {} ms over {} keyframes (header frames {})", name,
+		                   pose.header.unknown0x0, pose.keyframes.size(), pose.header.frameCount);
+	}
+	if (durationMs <= 0.0f || pose.keyframes.empty())
+	{
+		return k_CreatureFramesPerSecond;
+	}
+	const float pace = std::max(1.6f - size * 0.5f * 0.85f, 0.05f);
+	// A cyclic pose's frames take its duration in all; one played once reaches its last frame at the end.
+	const auto steps = pose.header.unknown0x4 != 0 ? pose.keyframes.size() : std::max<size_t>(pose.keyframes.size() - 1, 1);
+	return static_cast<float>(steps) * 1000.0f / durationMs * pace;
+}
 
 // Animation units (keyframe time) per second of play, and one play's length in those units.
 std::pair<float, float> AnimationRate(uint32_t animation)
@@ -6082,9 +6590,11 @@ std::optional<std::string> ActOutCreatureLife(entt::entity entity, const openbla
 	life.curiosity = std::min(life.curiosity + seconds / 90.0f, 1.0f);
 	life.wanderlust = std::min(life.wanderlust + seconds / 60.0f, 1.0f);
 	auto has = [&poses](const char* name) { return poses.contains(name); };
-	auto lasts = [&poses](const char* name) {
+	auto lasts = [&poses, entity](const char* name) {
 		const auto pose = poses.find(name);
-		return pose == poses.end() ? 0.0f : static_cast<float>(pose->second.keyframes.size()) / k_CreatureFramesPerSecond;
+		return pose == poses.end() ? 0.0f
+		                           : static_cast<float>(pose->second.keyframes.size()) /
+		                                 CreatureFramesPerSecond(pose->first, pose->second, CreatureSize(static_cast<uint32_t>(entity)));
 	};
 	auto random = [](float lo, float hi) { return Locator::rng::value().NextValue(lo, hi); };
 	auto near = [&](const glm::vec3& at) {
@@ -6478,9 +6988,8 @@ bool HurtByImpact(entt::entity entity, float speed)
 	}
 	if (auto* villager = registry.TryGet<openblack::ecs::components::Villager>(entity))
 	{
-		const auto damage = static_cast<uint32_t>(hurt * 100.0f + 0.5f);
-		villager->health = villager->health > damage ? villager->health - damage : 0;
-		return villager->health == 0;
+		villager->life = std::max(villager->life - hurt, 0.0f);
+		return villager->life <= 0.0f;
 	}
 	if (registry.AllOf<openblack::ecs::components::Animal>(entity))
 	{
@@ -6522,9 +7031,8 @@ void ShowThrown(entt::entity entity, bool flying, float impactSpeed)
 	bool dead = false;
 	if (auto* villager = registry.TryGet<openblack::ecs::components::Villager>(entity))
 	{
-		const auto damage = static_cast<uint32_t>(hurt * 100.0f + 0.5f);
-		villager->health = villager->health > damage ? villager->health - damage : 0;
-		dead = villager->health == 0;
+		villager->life = std::max(villager->life - hurt, 0.0f);
+		dead = villager->life <= 0.0f;
 		// Killed: the death throes on the ground, PDying, held on its last frame (lying still). Not PThrownDead, which is
 		// upright from start to end - the killed stood (Mike, 2026-10-18; measured: its top bone stays at standing
 		// height, 1.24, where PDying ends at 0.23).
@@ -6876,7 +7384,7 @@ void UpdateAnimations(float seconds)
 				    s_paceClock = 0.0f;
 				    std::nth_element(s_paces.begin(), s_paces.begin() + static_cast<long>(s_paces.size() / 2), s_paces.end());
 				    SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villagers on their own walk at {:.2f} units/s (median of {} samples); builders' walk {:.2f}",
-				                       s_paces[s_paces.size() / 2], s_paces.size(), FullSpeed(id) * 0.3f); // 0.3: k_BuilderWalk, below
+				                       s_paces[s_paces.size() / 2], s_paces.size(), 0.0f); // builders: their state's speed now (Villager::SetStateSpeed)
 				    s_paces.clear();
 			    }
 		    }
@@ -6884,10 +7392,11 @@ void UpdateAnimations(float seconds)
 		    const bool woman = villager.sex == Villager::Sex::FEMALE;
 		    uint32_t wanted;
 		    // Drowning only in the water: a drowning man put on the land stops (Mike, 2026-10-17: carried out, he
-		    // went on drowning there).
+		    // went on drowning there). Land is where the sea is shallower than the Drowning property's 0.5, not the
+		    // land's height: the sea's own cells are at 0-1, and the rescue quest's five men stood up in it (2026-10-19).
 		    if (const auto drowning = g_scriptAnimations.find(id);
 		        drowning != g_scriptAnimations.end() && drowning->second.animation == static_cast<uint32_t>(AnimId::PDrowning) &&
-		        Locator::terrainSystem::value().GetHeightAt(glm::vec2(transform.position.x, transform.position.z)) >= 0.0f)
+		        SeaDepthAt(glm::vec2(transform.position.x, transform.position.z)) <= 0.5f)
 		    {
 			    g_scriptAnimations.erase(drowning);
 		    }
@@ -6896,17 +7405,49 @@ void UpdateAnimations(float seconds)
 		    {
 			    wanted = scripted->second.animation;
 		    }
-		    else if (speed > 2.2f) // between a walk (~1.7 units/s) and a run (~2.8)
+		    else if (const auto* walking = registry.TryGet<LivingAction>(entity);
+		             speed > 0.2f && walking != nullptr &&
+		             static_cast<VillagerStates>(walking->states.at(static_cast<size_t>(LivingAction::Index::Final))) ==
+		                 VillagerStates::HousewifeReturnHomeWithFood)
 		    {
-			    wanted = static_cast<uint32_t>(woman ? AnimId::PRunWoman : AnimId::PRunMan);
+			    wanted = static_cast<uint32_t>(AnimId::PCarryingPot); // a housewife home with the dinner on her head
 		    }
 		    else if (speed > 0.2f)
 		    {
-			    wanted = static_cast<uint32_t>(woman ? AnimId::PWalkWoman : AnimId::PWalkMan);
+			    // Villager::MoveToPosAnimation: walk, run or sprint by info.dat's speed thresholds for a man
+			    // (SPEED_THRESHOLD_VILLAGER_MAN: walk to 3 m/s, run to 4) and anyone else (_NORMAL: 2, 3).
+			    const auto& threshold = Locator::infoConstants::value().speedThreshold.at(woman ? 0 : 1);
+			    const float walkMax = static_cast<float>(threshold.speedMaxWalk) * 100.0f / 65536.0f;
+			    const float runMax = static_cast<float>(threshold.speedMaxRun) * 100.0f / 65536.0f;
+			    wanted = static_cast<uint32_t>(speed <= walkMax ? (woman ? AnimId::PWalkWoman : AnimId::PWalkMan)
+			                                   : speed <= runMax ? (woman ? AnimId::PRunWoman : AnimId::PRunMan)
+			                                                     : (woman ? AnimId::PSprintRunWoman : AnimId::PSprintRunMan));
 		    }
 		    else
 		    {
+			    // Standing: what its state shows (Villager::SitDownAnimation picks one of two ways of sitting; a
+			    // homeless villager sleeps out on the ground).
 			    wanted = static_cast<uint32_t>(AnimId::PStand);
+			    if (const auto* action = registry.TryGet<LivingAction>(entity))
+			    {
+				    const auto state = static_cast<VillagerStates>(action->states.at(static_cast<size_t>(LivingAction::Index::Top)));
+				    if (state == VillagerStates::SitAndChillout)
+				    {
+					    wanted = static_cast<uint32_t>(id % 2 == 0 ? AnimId::PSittingDown1Sitting : AnimId::PSittingDown2Sitting);
+				    }
+				    else if (state == VillagerStates::HousewifePickupFromStoragePit)
+				    {
+					    wanted = static_cast<uint32_t>(AnimId::PPickUpPotOnHead);
+				    }
+				    else if (state == VillagerStates::EatFood)
+				    {
+					    wanted = static_cast<uint32_t>(AnimId::PEat); // Villager::EatFood (the state table's animation)
+				    }
+				    else if (state == VillagerStates::SleepInTent)
+				    {
+					    wanted = static_cast<uint32_t>(Locator::infoConstants::value().villagerStateTable.at(static_cast<size_t>(state)).field0x0);
+				    }
+			    }
 		    }
 
 		    auto* animated = registry.TryGet<Animated>(entity);
@@ -7044,8 +7585,28 @@ void UpdateAnimations(float seconds)
 		    {
 			    return;
 		    }
-		    const auto frames = static_cast<float>(pose->second.keyframes.size());
-		    playing.frame += seconds * k_CreatureFramesPerSecond;
+		    // One play's frames: a cyclic pose comes round to its first again, one played once ends on its last.
+		    const auto frames = pose->second.header.unknown0x4 != 0
+		                            ? static_cast<float>(pose->second.keyframes.size())
+		                            : std::max(static_cast<float>(pose->second.keyframes.size()) - 1.0f, 1.0f);
+		    // Walking and running go by ground covered, not time (LH3DCreature::AdvanceMovementAnimations): one play
+		    // per the animation's root movement times the creature's scale, so its feet keep to the land. Standing
+		    // still in either, or jumped somewhere, it goes by time.
+		    const auto& position = registry.Get<Transform>(entity).position;
+		    const auto last = g_creatureLastPosition.try_emplace(id, position).first;
+		    const float moved = glm::distance(glm::vec2(position.x, position.z), glm::vec2(last->second.x, last->second.z));
+		    last->second = position;
+		    const auto& header = pose->second.header;
+		    const float stride = glm::length(glm::vec3(header.unknown0x10, header.unknown0x14, header.unknown0x18)) *
+		                         registry.Get<Transform>(entity).scale.x;
+		    if ((playing.pose == "walk" || playing.pose == "run") && stride > 0.0f && moved > 0.0f && moved < stride)
+		    {
+			    playing.frame += moved / stride * frames;
+		    }
+		    else
+		    {
+			    playing.frame += seconds * CreatureFramesPerSecond(playing.pose, pose->second, CreatureSize(id));
+		    }
 		    if (dead)
 		    {
 			    playing.frame = std::min(playing.frame, frames - 1.0f); // fallen, it stays down
@@ -7059,14 +7620,55 @@ void UpdateAnimations(float seconds)
 				    playing = {"stand", 0.0f};
 			    }
 		    }
-		    auto bones = openblack::morphposes::LocalBones(*meshes.Handle(mesh.id), pose->second, playing.frame, true);
+		    const auto stand = poses.find("stand");
+		    const auto* standing = stand != poses.end() ? &stand->second : nullptr;
+		    auto bones = openblack::morphposes::CreatureBones(*meshes.Handle(mesh.id), pose->second, playing.frame, standing);
+		    // Standing and walking mix by speed, as the original's (LH3DCreature::AdvanceMovementAnimations and
+		    // UpdateBuffers): walking's weight is its speed over walking pace, the rest is standing's. Its speed eases
+		    // up and down, so it sets off and comes to a stop through the mix instead of snapping between the two.
+		    const auto walk = poses.find("walk");
+		    if (!dead && scripted == g_scriptAnimations.end() && !g_fighters.contains(id) && standing != nullptr &&
+		        !standing->keyframes.empty() && walk != poses.end() && !walk->second.keyframes.empty() &&
+		        (playing.pose == "stand" || playing.pose == "walk"))
+		    {
+			    auto& gait = g_creatureGait[id];
+			    // Faster than four times walking pace is a jump (put down, teleported), not a walk.
+			    const float measured = seconds > 0.0f && moved < 4.0f * k_CreatureWalkSpeed * seconds ? moved / seconds : 0.0f;
+			    const float change = k_CreatureAcceleration * seconds;
+			    gait.speed = std::clamp(measured, gait.speed - change, gait.speed + change);
+			    const float weight = std::clamp(gait.speed / k_CreatureWalkSpeed, 0.0f, 1.0f);
+			    // The walk goes round once for each stride covered, its stride shrunk by its weight: its feet keep
+			    // their pace through the mix.
+			    const auto& walkHeader = walk->second.header;
+			    const float walkStride = glm::length(glm::vec3(walkHeader.unknown0x10, walkHeader.unknown0x14, walkHeader.unknown0x18)) *
+			                             registry.Get<Transform>(entity).scale.x;
+			    const auto walkFrames = static_cast<float>(walk->second.keyframes.size());
+			    if (weight > 0.0f && walkStride > 0.0f && measured > 0.0f)
+			    {
+				    gait.walkFrame += std::min(moved / (walkStride * weight), 1.0f) * walkFrames;
+				    gait.walkFrame = std::fmod(gait.walkFrame, walkFrames);
+			    }
+			    const auto standFrames = static_cast<float>(standing->keyframes.size());
+			    gait.standFrame = std::fmod(gait.standFrame + seconds * CreatureFramesPerSecond("stand", *standing, CreatureSize(id)),
+			                                standFrames);
+			    if (weight > 0.0f)
+			    {
+				    bones = openblack::morphposes::BlendedCreatureBones(
+				        *meshes.Handle(mesh.id), {{standing, gait.standFrame, 1.0f - weight}, {&walk->second, gait.walkFrame, weight}},
+				        standing);
+			    }
+			    else
+			    {
+				    bones = openblack::morphposes::CreatureBones(*meshes.Handle(mesh.id), *standing, gait.standFrame, standing);
+			    }
+		    }
 		    // A fight pose kept on its feet: if its root sits lower than standing's, the creature is lifted by the
 		    // difference (Mike, 2026-10-17: in a fight both looked sunk in the ground). Logged once per pose.
 		    if (g_fighters.contains(id) && !bones.empty())
 		    {
-			    if (const auto stand = poses.find("stand"); stand != poses.end() && !stand->second.keyframes.empty())
+			    if (standing != nullptr && !standing->keyframes.empty())
 			    {
-				    const auto standBones = openblack::morphposes::LocalBones(*meshes.Handle(mesh.id), stand->second, 0.0f, true);
+				    const auto standBones = openblack::morphposes::CreatureBones(*meshes.Handle(mesh.id), *standing, 0.0f, standing);
 				    auto& transform = registry.Get<Transform>(entity);
 				    const float lift = standBones.empty() ? 0.0f : (standBones[0][3].y - bones[0][3].y) * transform.scale.y;
 				    static std::set<std::pair<int, std::string>> s_reported;
@@ -7180,6 +7782,64 @@ constexpr auto k_ThrowMemory = std::chrono::milliseconds(400);
 std::optional<std::pair<std::chrono::steady_clock::time_point, glm::vec3>> g_handLast;
 constexpr float k_HandVelocityLag = 0.1f; // seconds
 constexpr float k_Gravity = 9.81f; // world units are metres
+
+// The air's hold on a thrown thing, as the original's (its PhysOb, read from its memory in flight on 2026-10-19):
+// it slows by this times its speed times its velocity each second - its type's WindResist (PhysicsConstants.txt)
+// x 0.3 x its radius squared, over its mass. Measured: a rock 0.5731 / 2000, a tree 5.4066 / 721.7, a villager
+// 0.9163 / 72.5. Animals as villagers, and miracles as trees, until they are measured.
+// An effect's sprite sheet, Data/Textures/<name>.raw (256x256 RGB) with its alpha <name>a.raw, made once. Never
+// freed (see the miracle bubble's texture). Null if it cannot be read.
+openblack::graphics::Texture2D* SpriteSheet(const std::string& name)
+{
+	static std::unordered_map<std::string, openblack::graphics::Texture2D*> s_sheets;
+	if (const auto it = s_sheets.find(name); it != s_sheets.end())
+	{
+		return it->second;
+	}
+	auto& slot = s_sheets[name];
+	try
+	{
+		auto& fs = Locator::filesystem::value();
+		const auto textures = fs.GetPath<openblack::filesystem::Path::Data>() / "Textures";
+		const auto rgb = fs.ReadAll(textures / (name + ".raw"));
+		const auto alpha = fs.ReadAll(textures / (name + "a.raw"));
+		constexpr size_t k_Texels = 256 * 256;
+		if (rgb.size() >= k_Texels * 3)
+		{
+			std::vector<uint8_t> pixels(k_Texels * 4);
+			for (size_t t = 0; t < k_Texels; ++t)
+			{
+				pixels[t * 4 + 0] = rgb[t * 3 + 0];
+				pixels[t * 4 + 1] = rgb[t * 3 + 1];
+				pixels[t * 4 + 2] = rgb[t * 3 + 2];
+				pixels[t * 4 + 3] = alpha.size() >= k_Texels ? alpha[t] : 255;
+			}
+			slot = new openblack::graphics::Texture2D(name);
+			slot->Create(256, 256, 1, openblack::graphics::TextureFormat::RGBA8, openblack::graphics::Wrapping::ClampEdge,
+			             openblack::graphics::Filter::Linear, bgfx::copy(pixels.data(), static_cast<uint32_t>(pixels.size())));
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Sprite sheet {} loaded", name);
+		}
+	}
+	catch (const std::exception& e)
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("game"), "Sprite sheet {}: {}", name, e.what());
+	}
+	return slot;
+}
+
+float AirDrag(entt::entity entity)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	if (registry.AnyOf<openblack::ecs::components::Villager, openblack::ecs::components::Animal>(entity))
+	{
+		return 0.9163f / 72.54f;
+	}
+	if (registry.AllOf<openblack::ecs::components::Tree>(entity) || g_oneShotSpells.contains(static_cast<uint32_t>(entity)))
+	{
+		return 5.4066f / 721.73f;
+	}
+	return 0.5731f / 2000.0f;
+}
 std::deque<std::pair<std::chrono::steady_clock::time_point, glm::vec3>> g_handTrail;
 
 void MoveBody(entt::entity entity, const glm::vec3& position)
@@ -7229,6 +7889,13 @@ bool CanPickUp(uint32_t object)
 		{
 			return refuse("an animal info.dat keeps from the hand");
 		}
+	}
+	// A man the script has drowning (CreatureSavingPeople): the creature rescues him, not the hand (Mike, 2026-10-19).
+	// Not someone the player threw out of their depth (g_inDeepWater), who the hand may take out again.
+	if (const auto drowning = g_scriptAnimations.find(object); drowning != g_scriptAnimations.end() &&
+	    drowning->second.animation == static_cast<uint32_t>(AnimId::PDrowning) && !g_inDeepWater.contains(object))
+	{
+		return refuse("drowning, for the creature to rescue");
 	}
 	// The story's people (villager types 56 on: the Sculptor, the creature trainer, the Missionaries' sailors...) only
 	// when a script has said so - the scripts make them pickupable and not, scene by scene, 145 times on Land 1.
@@ -7337,6 +8004,13 @@ void AddToPile(entt::entity entity, int32_t amount)
 	if (auto* field = registry.TryGet<openblack::ecs::components::Field>(entity))
 	{
 		field->grain = std::clamp(field->grain + static_cast<float>(amount), 0.0f, field->capacity);
+		// Field::RemoveFood: a fully grown field emptied is bare - sown again from nothing.
+		const auto& type = Locator::infoConstants::value().fieldType.at(field->fieldType);
+		if (amount < 0 && field->grain <= 0.0f && field->growth >= type.ageRecolt)
+		{
+			field->crops = 0;
+			field->growth = 0.0f;
+		}
 	}
 	else if (auto* pot = registry.TryGet<openblack::ecs::components::Pot>(entity))
 	{
@@ -8265,6 +8939,49 @@ bool HandHolding()
 	return g_heldObject != 0;
 }
 
+float HandHoldOpenness()
+{
+	// The original's (ObtainRequiredHandPosition, BW1W120 005b3c70): what is held gives a hold radius, and the hand
+	// opens to it over 3.2 (the hand's size, fn_0046c040) - over 1.2 times that for an ordinary object - up to fully
+	// open; the hold pose then stands at that much of half its length. A tree's hold radius is a fifth of its size
+	// (DeadTree::GetHoldRadius); an object's is three quarters of its radius (Object::GetHoldRadius). Measured on
+	// the original's hand (2026-10-19): a tree 0.4 open, a miracle 0.27, a giant miracle 0.8.
+	if (g_heldObject == 0)
+	{
+		return 0.0f;
+	}
+	constexpr float k_HandSize = 3.2f;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto held = static_cast<entt::entity>(g_heldObject);
+	if (!registry.Valid(held) || !registry.AllOf<Transform>(held))
+	{
+		return 0.0f;
+	}
+	const auto& transform = registry.Get<Transform>(held);
+	if (g_oneShotSpells.contains(g_heldObject))
+	{
+		return 0.27f; // measured on the original's hand round a miracle (2026-10-19): 0.4 of hold_side's frames
+	}
+	const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(held);
+	const auto& meshes = Locator::resources::value().GetMeshes();
+	if (mesh == nullptr || !meshes.Contains(mesh->id))
+	{
+		return 0.0f;
+	}
+	const auto size = meshes.Handle(mesh->id)->GetBoundingBox().Size() * transform.scale;
+	const bool tree = registry.AllOf<openblack::ecs::components::Tree>(held);
+	const float openness = tree ? std::min(size.y * 0.2f / k_HandSize, 1.0f)
+	                            : std::min(0.5f * std::max(size.x, size.z) * 0.75f / (k_HandSize * 1.2f), 1.0f);
+	static uint32_t s_reported = 0;
+	if (s_reported != g_heldObject)
+	{
+		s_reported = g_heldObject;
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Hand holds {} ({}), {:.1f} x {:.1f} x {:.1f}: open {:.2f}", g_heldObject,
+		                   tree ? "tree" : "object", size.x, size.y, size.z, openness);
+	}
+	return openness;
+}
+
 void HandCarry(const glm::vec3& handPosition)
 {
 	auto& registry = Locator::entitiesRegistry::value();
@@ -8874,10 +9591,12 @@ void HandDrop(const glm::vec3& handPosition)
 			}
 		}
 		g_handVelocities.clear();
-		const float k_ThrowAngle = glm::radians(40.0f);
+		// Up at the original's: its throws read from its memory (2026-10-19) left the hand 12, 21 and 24 degrees up (its
+		// hand rises as it sweeps away from the camera; this one keeps to the ground, so the lift is given).
+		const float k_ThrowAngle = glm::radians(20.0f);
 		// Of the swipe's speed (Mike, 2026-10-17: at all of it, twice too strong; 2026-10-18: at 0.5, still twice as far
-		// as it should go). Range goes with speed squared, so half as far is 1/sqrt(2) of the speed.
-		constexpr float k_ThrowPower = 0.5f * 0.7071f;
+		// as it should go: 0.35 at 40 degrees). At 20 degrees, the same range for a rock: 0.35 x sqrt(sin 80 / sin 40).
+		constexpr float k_ThrowPower = 0.5f * 0.7071f * 1.2379f;
 		constexpr float k_MinThrowSpeed = 4.0f; // under it, it is let go of, not thrown
 		const float across = glm::length(glm::vec2(velocity.x, velocity.z));
 		if (across < k_MinThrowSpeed)
@@ -9255,6 +9974,9 @@ struct Builder
 	uint32_t pile = 0;
 	float carrying = 0.0f;
 	float timer = 0.0f;
+	float speed = 1.5f; // metres a second, its state's (Villager::SetStateSpeed)
+	uint32_t position = 0; // which of its places round the site it builds at (StandardBuildingSite::GetNextPosFromIndex)
+	bool working = false; // a build animation playing (one a cycle: Villager::Building)
 	// For the trace: where the builder was put last frame, the stage last logged, and when it was last reported.
 	std::optional<glm::vec3> placed;
 	int loggedStage = -1;
@@ -9262,10 +9984,60 @@ struct Builder
 };
 std::unordered_map<uint32_t, Builder> g_builders;
 
+// Villagers getting wood for their town (its wood desire: LivingActionSystem picks them, as the original's
+// Villager::CheckSatisfyWoodDesire): to a tree of the town's nearest forest, chopping it (PChoppingTree, once - the
+// original's PlayAnimThenSetState into ForesterChopsTree), the tree felled where it stood (FelledTree), up to
+// maxWoodCarried of its woodValue taken and the rest left lying as a pile, then to the village store
+// (GotoStoragePitForDropOff / ArrivesAtStoragePitForDropOff). A pile left by an earlier felling near the forest is
+// taken from first.
+struct Forester
+{
+	enum class Stage
+	{
+		ToTree,
+		Chopping,
+		Felled,
+		ToPile,
+		ToStore,
+	} stage = Stage::ToTree;
+	uint32_t tree = 0;
+	uint32_t pile = 0;
+	uint32_t town = 0;
+	float speed = 1.5f; // metres a second, the state's (Villager::SetStateSpeed)
+	float carrying = 0.0f;
+	float timer = 0.0f;
+};
+std::unordered_map<uint32_t, Forester> g_foresters;
+
+// Villagers getting food for their town (its food desire, the original's Villager::CheckSatisfyFoodDesire: the best
+// field by Town::FindBestField, then VillagerBecomesFarmer): to a field that wants farming - sowing it, crop by crop
+// at spots about it (FarmerArrivesAtFarm / FarmerPlantsCrop, PFarmerSowingSeeds), till its timesToSow are in; or, ripe,
+// harvesting it (FarmerDigsUpCrop, PFarmerHarvesting: Field::RemoveFood up to what it can carry) and carrying the grain
+// to the village store (GotoStoragePitForDropOff). Shepherds and fishermen, the other two ways, not yet.
+struct Farmer
+{
+	enum class Stage
+	{
+		ToField,
+		Sowing,
+		Harvesting,
+		ToStore,
+	} stage = Stage::ToField;
+	uint32_t field = 0;
+	uint32_t town = 0;
+	int activity = 1; // Field::GetFieldActivity: 1 sow, 2 harvest
+	float speed = 1.5f;
+	float carrying = 0.0f;
+	float timer = 0.0f;
+	glm::vec3 spot {0.0f};
+	bool working = false;
+};
+std::unordered_map<uint32_t, Farmer> g_farmers;
+
 // The plank a builder carries to the site: the original's ObjectWoodInHand (a 1.8 tall board), at 0.6, lying along
 // the right shoulder, pointing the way it walks.
 std::unordered_map<uint32_t, entt::entity> g_builderPlanks;
-void CarryPlank(uint32_t builder, bool carrying)
+void CarryPlank(uint32_t builder, bool carrying, MeshId carried = MeshId::ObjectWoodInHand)
 {
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto it = g_builderPlanks.find(builder);
@@ -9282,7 +10054,7 @@ void CarryPlank(uint32_t builder, bool carrying)
 		}
 		return;
 	}
-	const auto mesh = resources::HashIdentifier(MeshId::ObjectWoodInHand);
+	const auto mesh = resources::HashIdentifier(carried);
 	auto plank = it != g_builderPlanks.end() ? it->second : entt::null;
 	if (plank == entt::null || !registry.Valid(plank))
 	{
@@ -9290,6 +10062,10 @@ void CarryPlank(uint32_t builder, bool carrying)
 		registry.Assign<Transform>(plank, glm::vec3(0.0f), glm::mat3(1.0f), glm::vec3(1.0f));
 		registry.Assign<openblack::ecs::components::Mesh>(plank, mesh, static_cast<int8_t>(0), static_cast<int8_t>(0));
 		g_builderPlanks[builder] = plank;
+	}
+	else if (auto& shown = registry.Get<openblack::ecs::components::Mesh>(plank); shown.id != mesh)
+	{
+		shown.id = mesh; // the plank for wood, the sheaf for grain
 	}
 	constexpr float k_PlankScale = 0.6f;
 	const auto& body = registry.Get<Transform>(who);
@@ -9344,17 +10120,25 @@ const char* NotFreeToBuild(entt::entity entity, const openblack::ecs::components
 	{
 		return "animated by a script";
 	}
+	if (g_foresters.contains(id))
+	{
+		return "getting wood";
+	}
+	if (g_farmers.contains(id))
+	{
+		return "farming";
+	}
 	// The lazy ones: a fixed share of the villagers, by who they are.
 	const auto hash = (id * 2654435761u) % 100u;
 	return static_cast<float>(hash) < VillagerInfoOf(villager).percentLazy * 100.0f ? "lazy" : nullptr;
 }
 
 // Step a builder towards a point at a walk; true once there.
-bool WalkBuilder(entt::entity entity, Transform& transform, const glm::vec3& target, float seconds)
+bool WalkBuilder(entt::entity entity, Transform& transform, const glm::vec3& target, float seconds, float speed)
 {
 	const auto toTarget = glm::vec2(target.x - transform.position.x, target.z - transform.position.z);
 	const float distance = glm::length(toTarget);
-	const float step = FullSpeed(static_cast<uint32_t>(entity)) * k_BuilderWalk * seconds;
+	const float step = speed * seconds;
 	if (distance <= std::max(step, 0.5f))
 	{
 		return true;
@@ -9381,7 +10165,7 @@ void SetBuilderAnimation(uint32_t id, std::optional<AnimId> animation)
 	}
 }
 
-void CarryPlank(uint32_t builder, bool carrying);
+void CarryPlank(uint32_t builder, bool carrying, MeshId carried);
 void ReleaseBuilder(uint32_t id)
 {
 	auto& registry = Locator::entitiesRegistry::value();
@@ -9423,32 +10207,9 @@ void UpdateBuilders(float seconds)
 			                            })
 			                                ? 1
 			                                : 0;
-			    registry.Each<const Villager, const Transform>(
-			        [&](entt::entity entity, const Villager& villager, const Transform& transform) {
-				        const auto id = static_cast<uint32_t>(entity);
-				        const auto offset = glm::vec2(transform.position.x - siteTransform.position.x,
-				                                      transform.position.z - siteTransform.position.z);
-				        if (g_builders.contains(id))
-				        {
-					        return;
-				        }
-				        if (glm::dot(offset, offset) > k_BuilderRecruitRadius * k_BuilderRecruitRadius)
-				        {
-					        ++passedOver["too far"];
-					        return;
-				        }
-				        if (const auto* why = NotFreeToBuild(entity, villager))
-				        {
-					        ++passedOver[why];
-					        return;
-				        }
-				        HoldForScript(entity, transform.position);
-				        // Wood already at the site (the hand gave it): straight there to build, not to the store first.
-				        const bool stocked = construction.woodStock >= VillagerInfoOf(villager).woodUsedPerBuildCycle;
-				        g_builders[id] = {stocked ? Builder::Stage::ToSite : Builder::Stage::ToStore, static_cast<uint32_t>(site)};
-				        SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} takes up building {}", id,
-				                           static_cast<uint32_t>(site));
-			        });
+			    // Its builders come of the town's desire to build (StartBuilder, from LivingActionSystem): not any free
+			    // villager near it, as before the original's (2026-10-19).
+			    static_cast<void>(siteTransform);
 		    });
 		// A started site nobody has taken up: say why, now and then.
 		if (sitesWithoutBuilders > 0 && s_reportTimer <= 0.0f)
@@ -9459,8 +10220,8 @@ void UpdateBuilders(float seconds)
 			{
 				why += fmt::format("{}{} {}", why.empty() ? "" : ", ", count, reason);
 			}
-			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building site without builders: villagers passed over: {}",
-			                   why.empty() ? "none at all" : why);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building site without builders (waiting on the town's building desire): {}",
+			                   why.empty() ? "none turned down" : why);
 		}
 	}
 
@@ -9510,8 +10271,8 @@ void UpdateBuilders(float seconds)
 			                       : -1,
 			                   registry.AllOf<ScriptMove>(entity), g_scriptAnimations.contains(id) ? static_cast<int>(g_scriptAnimations[id].animation) : -1);
 		}
-		// Each builder has a spot of its own round the site.
-		const float angle = static_cast<float>((id * 2654435761u) % 360u) * glm::pi<float>() / 180.0f;
+		// Each builder has a place of its own round the site, and moves on to the next after each go at it.
+		const float angle = static_cast<float>((id * 2654435761u + builder.position * 47u) % 360u) * glm::pi<float>() / 180.0f;
 		const auto spot = site + glm::vec3(std::cos(angle), 0.0f, std::sin(angle)) * k_BuildingSiteRadius;
 
 		switch (builder.stage)
@@ -9532,7 +10293,7 @@ void UpdateBuilders(float seconds)
 				}
 				pile = &registry.Get<Pot>(static_cast<entt::entity>(builder.pile));
 			}
-			if (WalkBuilder(entity, transform, registry.Get<Transform>(static_cast<entt::entity>(builder.pile)).position, seconds))
+			if (WalkBuilder(entity, transform, registry.Get<Transform>(static_cast<entt::entity>(builder.pile)).position, seconds, builder.speed))
 			{
 				// TakeWoodFromPotForBuilding
 				const auto take = std::min<uint32_t>(info.maxWoodCarried, pile->amount);
@@ -9546,57 +10307,66 @@ void UpdateBuilders(float seconds)
 			// Walking (by the ground covered) with a plank on the shoulder: M_P_Carrying_Sticks is no walk - its feet
 			// stay put, and played along the way the builder was dragged, arms and head swaying (Mike, 2026-10-17).
 			SetBuilderAnimation(id, std::nullopt);
-			if (WalkBuilder(entity, transform, spot, seconds))
+			if (WalkBuilder(entity, transform, spot, seconds, builder.speed))
 			{
 				construction->woodStock += builder.carrying; // ArrivesAtBuildingSite
 				builder.carrying = 0.0f;
 				builder.stage = Builder::Stage::Building;
-				// Each starts its first cycle at its own point in it, so a crowd arriving together doesn't build in one go.
-				builder.timer = Locator::rng::value().NextValue(0.0f, static_cast<float>(info.jobSpeed) / 1000.0f);
+				builder.working = false;
 			}
 			break;
 		case Builder::Stage::Building:
-			if (construction->woodStock < info.woodUsedPerBuildCycle)
-			{
-				builder.stage = Builder::Stage::ToStore; // out of wood: fetch more
-				break;
-			}
-			// Only at its spot by the site (Mike, 2026-10-18: eleven builders at the store, 140 away, built the Temple
-			// in three seconds without ever going to it).
+		{
+			// Villager::Building, each time its build animation has played (BuildingAnimation: one of the three at
+			// random each go): the wood it uses - woodUsedPerBuildCycle, or what the site has left - builds it by
+			// that share of its wood value; then on to its next place, or for more wood.
 			if (glm::distance(glm::vec2(transform.position.x, transform.position.z), glm::vec2(spot.x, spot.z)) > 3.0f)
 			{
 				builder.stage = Builder::Stage::ToSite;
 				break;
 			}
 			FaceTowards(transform, site);
+			if (!builder.working)
 			{
-				// Hammering, sawing or the sledgehammer: each builder keeps to one.
+				if (construction->woodStock <= 0.0f)
+				{
+					builder.stage = Builder::Stage::ToStore; // out of wood: fetch more (SetupGetBuildingSupplies)
+					break;
+				}
 				constexpr std::array k_Work = {AnimId::PHammering, AnimId::PSawWood, AnimId::PSledgehammer};
-				SetBuilderAnimation(id, k_Work.at(id % k_Work.size()));
+				const auto animation = k_Work.at(static_cast<size_t>(Locator::rng::value().NextValue(0.0f, 2.99f)));
+				const auto [rate, duration] = AnimationRate(static_cast<uint32_t>(animation));
+				builder.timer = rate > 0.0f ? duration / rate : 2.0f;
+				builder.working = true;
+				g_scriptAnimations[id] = {static_cast<uint32_t>(animation), 1.0f};
+				break;
 			}
-			builder.timer += seconds;
-			if (builder.timer >= static_cast<float>(info.jobSpeed) / 1000.0f)
+			builder.timer -= seconds;
+			if (builder.timer > 0.0f && g_scriptAnimations.contains(id))
 			{
-				builder.timer = 0.0f;
-				construction->woodStock -= info.woodUsedPerBuildCycle;
-				const float before = construction->built;
-				construction->built = std::min(
-				    construction->built + info.woodUsedPerBuildCycle / (construction->woodPerStep * construction->steps), 1.0f);
-				if (std::floor(construction->built * 10.0f) > std::floor(before * 10.0f) && construction->built < 1.0f)
-				{
-					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building {} {:.0f}% built ({:.0f} wood in stock)", builder.site,
-					                   construction->built * 100.0f, construction->woodStock);
-				}
-				if (construction->built >= 1.0f)
-				{
-					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building {} built ({:.0f} wood left over)", builder.site,
-					                   construction->woodStock);
-				}
+				break;
 			}
+			builder.working = false;
+			const float use = std::min(construction->woodStock, static_cast<float>(info.woodUsedPerBuildCycle));
+			construction->woodStock -= use;
+			const float before = construction->built;
+			construction->built = std::min(construction->built + use / (construction->woodPerStep * construction->steps), 1.0f);
+			if (std::floor(construction->built * 10.0f) > std::floor(before * 10.0f) && construction->built < 1.0f)
+			{
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building {} {:.0f}% built ({:.0f} wood in stock)", builder.site,
+				                   construction->built * 100.0f, construction->woodStock);
+			}
+			if (construction->built >= 1.0f)
+			{
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "Building {} built ({:.0f} wood left over)", builder.site, construction->woodStock);
+			}
+			++builder.position;
+			builder.stage = construction->woodStock > 0.0f ? Builder::Stage::ToSite : Builder::Stage::ToStore;
 			break;
+		}
 		case Builder::Stage::Waiting:
 			SetBuilderAnimation(id, std::nullopt);
-			WalkBuilder(entity, transform, spot, seconds);
+			WalkBuilder(entity, transform, spot, seconds, builder.speed);
 			builder.timer += seconds;
 			if (builder.timer >= 2.0f)
 			{
@@ -9613,6 +10383,775 @@ void UpdateBuilders(float seconds)
 	}
 }
 } // namespace
+
+
+namespace
+{
+// The town a building site is its: the nearest town to it.
+uint32_t SiteTown(entt::entity site)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto& at = registry.Get<Transform>(site).position;
+	uint32_t best = 0;
+	float bestDistance = std::numeric_limits<float>::max();
+	registry.Each<const openblack::ecs::components::Town, const Transform>(
+	    [&](entt::entity town, const openblack::ecs::components::Town&, const Transform& where) {
+		    const float d = glm::distance(glm::vec2(where.position.x, where.position.z), glm::vec2(at.x, at.z));
+		    if (d < bestDistance)
+		    {
+			    bestDistance = d;
+			    best = static_cast<uint32_t>(town);
+		    }
+	    });
+	return best;
+}
+
+// BuildingSite::GetBuildersNeeded / GetDesireForVillagers: the builders it still wants of its building's
+// maxVillagerNeededToBuild (the Citadel heart's for a planned Citadel), as a share of them.
+std::pair<int, float> SiteBuilderDesire(entt::entity site, const openblack::ecs::components::Construction& construction)
+{
+	if (!construction.started || construction.built >= 1.0f)
+	{
+		return {0, 0.0f};
+	}
+	const auto most = static_cast<int>(std::max(Locator::infoConstants::value().citadelHeart.maxVillagerNeededToBuild, 1u));
+	const auto working = static_cast<int>(std::count_if(g_builders.begin(), g_builders.end(),
+	                                                     [site](const auto& b) { return b.second.site == static_cast<uint32_t>(site); }));
+	const int needed = most - working;
+	return {needed, std::clamp(static_cast<float>(needed) / static_cast<float>(most), 0.0f, 1.0f)};
+}
+} // namespace
+
+float TownBuildDesire(uint32_t town)
+{
+	// The town's TO_BUILD desire (0x748640): its building sites' desire for builders, together, at most 1.
+	auto& registry = Locator::entitiesRegistry::value();
+	float desire = 0.0f;
+	registry.Each<openblack::ecs::components::Construction, const Transform>(
+	    [&](entt::entity site, openblack::ecs::components::Construction& construction, const Transform&) {
+		    if (registry.AllOf<openblack::ecs::components::Feature>(site))
+		    {
+			    return; // the Ark: the Missionaries' quest builds it, not the town
+		    }
+		    // Test hook: OPENBLACK_TEST_START_SITES=1 starts every planned site with 1000 wood given.
+		    static const bool s_startSites = std::getenv("OPENBLACK_TEST_START_SITES") != nullptr;
+		    if (s_startSites && !construction.started)
+		    {
+			    construction.woodStock = std::max(construction.woodStock, 1000.0f);
+		    }
+		    construction.started = construction.started ||
+		                           construction.woodStock >= Locator::infoConstants::value().town.totalWoodNeededToStartBuilding;
+		    if (SiteTown(site) == town)
+		    {
+			    desire += SiteBuilderDesire(site, construction).second;
+		    }
+	    });
+	return std::min(desire, 1.0f);
+}
+
+bool StartBuilder(uint32_t villager, float metresPerSecond)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(villager);
+	const auto* person = registry.Valid(entity) ? registry.TryGet<Villager>(entity) : nullptr;
+	if (person == nullptr || g_builders.contains(villager) || NotFreeToBuild(entity, *person) != nullptr || person->town == entt::null)
+	{
+		return false;
+	}
+	const auto& at = registry.Get<Transform>(entity).position;
+	// Town::GetBestBuildingSite: of its sites wanting builders, the nearest, weighed by how much (distance x
+	// (0.95 desire + 0.1), the least).
+	entt::entity best = entt::null;
+	float bestScore = std::numeric_limits<float>::max();
+	registry.Each<const Construction, const Transform>([&](entt::entity site, const Construction& construction, const Transform& where) {
+		if (registry.AllOf<Feature>(site) || SiteTown(site) != static_cast<uint32_t>(person->town))
+		{
+			return;
+		}
+		const auto [needed, desire] = SiteBuilderDesire(site, construction);
+		if (needed <= 0)
+		{
+			return;
+		}
+		const float score = glm::distance(where.position, at) * (desire * 0.95f + 0.1f);
+		if (score < bestScore)
+		{
+			bestScore = score;
+			best = site;
+		}
+	});
+	if (best == entt::null)
+	{
+		return false;
+	}
+	const auto& construction = registry.Get<Construction>(best);
+	const auto& info = VillagerInfoOf(*person);
+	// BuildingSite::ShouldIGetWood: near it (within 50), only if it has none; farther, if it has less than it needs.
+	const float distance = glm::distance(registry.Get<Transform>(best).position, at);
+	const float needed = construction.woodPerStep * construction.steps * (1.0f - construction.built);
+	const bool fetch = distance < 50.0f ? construction.woodStock <= 0.0f : construction.woodStock < std::min(needed, static_cast<float>(info.woodUsedPerBuildCycle));
+	HoldForScript(entity, at);
+	Builder builder;
+	builder.stage = fetch ? Builder::Stage::ToStore : Builder::Stage::ToSite;
+	builder.site = static_cast<uint32_t>(best);
+	builder.speed = metresPerSecond;
+	builder.position = villager % 8;
+	g_builders[villager] = builder;
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} takes up building {} ({})", villager, static_cast<uint32_t>(best),
+	                   fetch ? "for wood first" : "straight to it");
+	return true;
+}
+
+namespace
+{
+void ReleaseForester(uint32_t id)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	g_scriptAnimations.erase(id);
+	CarryPlank(id, false);
+	const auto entity = static_cast<entt::entity>(id);
+	if (registry.Valid(entity))
+	{
+		registry.Remove<ScriptMove>(entity); // back to its own life (DECIDE_WHAT_TO_DO)
+		if (auto* action = registry.TryGet<LivingAction>(entity))
+		{
+			Locator::livingActionSystem::value().VillagerSetState(*action, LivingAction::Index::Top, VillagerStates::DecideWhatToDo, true);
+		}
+	}
+}
+
+// A step towards a point at the forester's speed; true once there.
+bool WalkForester(entt::entity entity, Transform& transform, const glm::vec3& target, float speed, float seconds)
+{
+	const auto toTarget = glm::vec2(target.x - transform.position.x, target.z - transform.position.z);
+	const float distance = glm::length(toTarget);
+	const float step = speed * seconds;
+	if (distance <= std::max(step, 0.5f))
+	{
+		return true;
+	}
+	PlaceMover(entity, transform, transform.position + glm::vec3(toTarget.x, 0.0f, toTarget.y) / distance * step, target);
+	return false;
+}
+
+// Where a forester stands to chop a tree: at its trunk, on its own side (Tree::GetWorkingPos).
+glm::vec3 TreeWorkingPos(const glm::vec3& tree, const glm::vec3& from)
+{
+	auto away = glm::vec2(from.x - tree.x, from.z - tree.z);
+	away = glm::length(away) > 1e-3f ? glm::normalize(away) : glm::vec2(1.0f, 0.0f);
+	return tree + glm::vec3(away.x, 0.0f, away.y) * 1.5f;
+}
+
+bool TreeTaken(uint32_t tree)
+{
+	return std::any_of(g_foresters.begin(), g_foresters.end(), [tree](const auto& f) { return f.second.tree == tree; });
+}
+
+// A standing tree for the town: of its nearest forest (Town::FindNearestForestToPos), nearest the forester there
+// (FindTreeNearVillager); without a forest, the nearest standing tree within 150.
+uint32_t FindTreeToFell(const glm::vec3& villager, const glm::vec3& town)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	std::optional<glm::vec3> forest;
+	float nearest = 400.0f;
+	registry.Each<const Forest, const Transform>([&](entt::entity, const Forest&, const Transform& where) {
+		const float d = glm::distance(glm::vec2(where.position.x, where.position.z), glm::vec2(town.x, town.z));
+		if (d < nearest)
+		{
+			nearest = d;
+			forest = where.position;
+		}
+	});
+	const auto around = forest.value_or(villager);
+	const float reach = forest ? 40.0f : 150.0f;
+	if (std::getenv("OPENBLACK_TRACE_FORESTERS") != nullptr)
+	{
+		int fixed = 0, loose = 0;
+		registry.Each<const Tree, const Transform>([&](entt::entity e, const Tree&, const Transform& where) {
+			if (glm::distance(glm::vec2(where.position.x, where.position.z), glm::vec2(around.x, around.z)) <= reach)
+			{
+				(registry.AllOf<Fixed>(e) ? fixed : loose)++;
+			}
+		});
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Tree search for town at ({:.0f}, {:.0f}): forest {} ({:.0f} away), {} rooted / {} not within {:.0f}",
+		                   town.x, town.z, forest ? "found" : "none", nearest, fixed, loose, reach);
+	}
+	uint32_t best = 0;
+	float bestDistance = std::numeric_limits<float>::max();
+	registry.Each<const Tree, const Transform, const Fixed>([&](entt::entity entity, const Tree&, const Transform& where, const Fixed&) {
+		const auto id = static_cast<uint32_t>(entity);
+		if (id == g_heldObject || g_flying.contains(id) || TreeTaken(id) ||
+		    glm::distance(glm::vec2(where.position.x, where.position.z), glm::vec2(around.x, around.z)) > reach)
+		{
+			return;
+		}
+		const float d = glm::distance(where.position, villager);
+		if (d < bestDistance)
+		{
+			bestDistance = d;
+			best = id;
+		}
+	});
+	return best;
+}
+
+// Wood a felling left lying (a loose pile, not a store's) within `radius`.
+uint32_t LooseWoodNear(const glm::vec3& at, float radius)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	uint32_t best = 0;
+	float bestDistance = radius;
+	registry.Each<const Pot, const Transform>([&](entt::entity entity, const Pot& pot, const Transform& where) {
+		const auto id = static_cast<uint32_t>(entity);
+		if (pot.type != PotInfo::MagicWood || pot.amount == 0 || id == g_heldObject || g_flying.contains(id) ||
+		    std::any_of(g_foresters.begin(), g_foresters.end(), [id](const auto& f) { return f.second.pile == id; }))
+		{
+			return;
+		}
+		const float d = glm::distance(where.position, at);
+		if (d < bestDistance)
+		{
+			bestDistance = d;
+			best = id;
+		}
+	});
+	return best;
+}
+
+// The town's village store (the nearest storage pit to its centre).
+std::optional<glm::vec3> TownStore(uint32_t town)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(town);
+	if (!registry.Valid(entity) || !registry.AllOf<Transform>(entity))
+	{
+		return std::nullopt;
+	}
+	const auto centre = registry.Get<Transform>(entity).position;
+	std::optional<glm::vec3> store;
+	float best = 300.0f;
+	registry.Each<const openblack::ecs::components::StoragePit, const Transform>(
+	    [&](entt::entity, const openblack::ecs::components::StoragePit&, const Transform& where) {
+		    const float d = glm::distance(where.position, centre);
+		    if (d < best)
+		    {
+			    best = d;
+			    store = where.position;
+		    }
+	    });
+	return store;
+}
+
+void UpdateForesters(float seconds)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	for (auto it = g_foresters.begin(); it != g_foresters.end();)
+	{
+		const auto id = it->first;
+		auto& forester = it->second;
+		const auto entity = static_cast<entt::entity>(id);
+		auto* villager = registry.Valid(entity) ? registry.TryGet<Villager>(entity) : nullptr;
+		// Taken away (picked up, thrown, a script's now): the wood it carried goes with it, the job ends.
+		if (villager == nullptr || id == g_heldObject || g_flying.contains(id) || g_walks.contains(id) || g_followers.contains(id) ||
+		    g_scriptMoves.contains(id) || g_builders.contains(id))
+		{
+			ReleaseForester(id);
+			it = g_foresters.erase(it);
+			continue;
+		}
+		auto& transform = registry.Get<Transform>(entity);
+		const auto& info = VillagerInfoOf(*villager);
+		bool done = false;
+		switch (forester.stage)
+		{
+		case Forester::Stage::ToTree:
+		{
+			const auto treeEntity = static_cast<entt::entity>(forester.tree);
+			if (!registry.Valid(treeEntity) || !registry.AllOf<Tree, Fixed>(treeEntity) || forester.tree == g_heldObject)
+			{
+				done = true; // gone (uprooted, thrown): it thinks again
+				break;
+			}
+			SetBuilderAnimation(id, std::nullopt);
+			const auto& tree = registry.Get<Transform>(treeEntity).position;
+			if (WalkForester(entity, transform, TreeWorkingPos(tree, transform.position), forester.speed, seconds))
+			{
+				FaceTowards(transform, tree);
+				forester.stage = Forester::Stage::Chopping;
+				const auto [rate, duration] = AnimationRate(static_cast<uint32_t>(AnimId::PChoppingTree));
+				forester.timer = rate > 0.0f ? duration / rate : 1.0f; // one play of it
+				g_scriptAnimations[id] = {static_cast<uint32_t>(AnimId::PChoppingTree), 1.0f};
+			}
+			break;
+		}
+		case Forester::Stage::Chopping:
+		{
+			const auto treeEntity = static_cast<entt::entity>(forester.tree);
+			forester.timer -= seconds;
+			if (!registry.Valid(treeEntity) || !registry.AllOf<Tree, Fixed>(treeEntity))
+			{
+				done = true;
+				break;
+			}
+			if (forester.timer > 0.0f && g_scriptAnimations.contains(id))
+			{
+				break;
+			}
+			// FelledTree::Create: down it comes, away from the forester.
+			const auto& tree = registry.Get<Transform>(treeEntity).position;
+			const auto away = tree - transform.position;
+			registry.Remove<Fixed>(treeEntity); // no longer in the walkers' way
+			LayTreeDown(treeEntity, tree, glm::vec3(away.x, 0.0f, away.z));
+			forester.stage = Forester::Stage::Felled;
+			forester.timer = 1.5f; // lying felled a moment
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} fells tree {} for town {}", id, forester.tree, forester.town);
+			break;
+		}
+		case Forester::Stage::Felled:
+		{
+			forester.timer -= seconds;
+			if (forester.timer > 0.0f)
+			{
+				break;
+			}
+			const auto treeEntity = static_cast<entt::entity>(forester.tree);
+			if (!registry.Valid(treeEntity))
+			{
+				done = true;
+				break;
+			}
+			const auto wood = ShredWood(treeEntity).value_or(0u);
+			const auto at = registry.Get<Transform>(treeEntity).position;
+			const auto take = std::min<uint32_t>(info.maxWoodCarried, wood);
+			if (wood > take)
+			{
+				openblack::ecs::archetypes::PotArchetype::Create(glm::vec3(at.x, Locator::terrainSystem::value().GetHeightAt(glm::vec2(at.x, at.z)), at.z), 0.0f,
+				                                                 PotInfo::MagicWood, static_cast<int32_t>(wood - take));
+			}
+			ForgetObject(forester.tree);
+			g_treeFootprints.erase(forester.tree);
+			registry.Destroy(treeEntity);
+			forester.tree = 0;
+			forester.carrying = static_cast<float>(take);
+			PlayBankSound(1, 151, &at); // the wood knock: the logs taken up
+			forester.stage = Forester::Stage::ToStore;
+			break;
+		}
+		case Forester::Stage::ToPile:
+		{
+			auto* pot = registry.Valid(static_cast<entt::entity>(forester.pile)) ? registry.TryGet<Pot>(static_cast<entt::entity>(forester.pile)) : nullptr;
+			if (pot == nullptr || pot->amount == 0 || forester.pile == g_heldObject)
+			{
+				done = true;
+				break;
+			}
+			SetBuilderAnimation(id, std::nullopt);
+			if (WalkForester(entity, transform, registry.Get<Transform>(static_cast<entt::entity>(forester.pile)).position, forester.speed, seconds))
+			{
+				const auto take = std::min<uint32_t>(info.maxWoodCarried, pot->amount);
+				pot->amount = static_cast<uint16_t>(pot->amount - take);
+				forester.carrying = static_cast<float>(take);
+				if (pot->amount == 0)
+				{
+					ForgetObject(forester.pile);
+					registry.Destroy(static_cast<entt::entity>(forester.pile));
+				}
+				forester.pile = 0;
+				forester.stage = Forester::Stage::ToStore;
+			}
+			break;
+		}
+		case Forester::Stage::ToStore:
+		{
+			SetBuilderAnimation(id, std::nullopt);
+			const auto store = TownStore(forester.town);
+			if (!store)
+			{
+				done = true;
+				break;
+			}
+			if (WalkForester(entity, transform, *store, forester.speed * 0.9f, seconds))
+			{
+				// ArrivesAtStoragePitForDropOff: into the store's wood.
+				const auto pile = StoreWoodPileAt(*store);
+				if (pile != entt::null)
+				{
+					AddToPile(pile, static_cast<int32_t>(forester.carrying));
+					PlayBankSound(1, 155 + static_cast<int32_t>(Locator::rng::value().NextValue(0.0f, 3.99f)), &*store);
+					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} brings {:.0f} wood to town {}'s store", id, forester.carrying,
+					                   forester.town);
+				}
+				forester.carrying = 0.0f;
+				done = true;
+			}
+			break;
+		}
+		}
+		CarryPlank(id, forester.stage == Forester::Stage::ToStore && forester.carrying > 0.0f);
+		if (done)
+		{
+			ReleaseForester(id);
+			it = g_foresters.erase(it);
+			continue;
+		}
+		++it;
+	}
+}
+} // namespace
+
+bool StartForester(uint32_t villager, float metresPerSecond)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(villager);
+	const auto* person = registry.Valid(entity) ? registry.TryGet<Villager>(entity) : nullptr;
+	const char* why = person == nullptr ? "not a villager" : g_foresters.contains(villager) ? "already at it" : NotFreeToBuild(entity, *person);
+	if (why == nullptr && (person->town == entt::null || !registry.Valid(person->town) || !registry.AllOf<Transform>(person->town)))
+	{
+		why = "no town";
+	}
+	static std::unordered_map<uint32_t, std::string> s_toldWhy; // each reason once per villager
+	if (why != nullptr)
+	{
+		if (auto [told, fresh] = s_toldWhy.try_emplace(villager, why); fresh || told->second != why)
+		{
+			told->second = why;
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} can't go for wood: {}", villager, why);
+		}
+		return false;
+	}
+	const auto& at = registry.Get<Transform>(entity).position;
+	const auto& town = registry.Get<Transform>(person->town).position;
+	Forester forester;
+	forester.town = static_cast<uint32_t>(person->town);
+	forester.speed = metresPerSecond;
+	forester.tree = FindTreeToFell(at, town);
+	if (forester.tree != 0)
+	{
+		forester.pile = LooseWoodNear(registry.Get<Transform>(static_cast<entt::entity>(forester.tree)).position, 25.0f);
+	}
+	if (forester.pile != 0)
+	{
+		forester.tree = 0;
+		forester.stage = Forester::Stage::ToPile;
+	}
+	else if (forester.tree == 0)
+	{
+		if (auto [told, fresh] = s_toldWhy.try_emplace(villager, "no tree"); fresh || told->second != "no tree")
+		{
+			told->second = "no tree";
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} can't go for wood: no standing tree near town {}", villager, forester.town);
+		}
+		return false; // no forest for it (DecideHowToGetWood: nothing)
+	}
+	HoldForScript(entity, at);
+	g_foresters[villager] = forester;
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} goes for wood for town {} ({})", villager, forester.town,
+	                   forester.pile != 0 ? "a pile left lying" : "a tree to fell");
+	return true;
+}
+
+uint32_t ForesterCount(uint32_t town)
+{
+	return static_cast<uint32_t>(std::count_if(g_foresters.begin(), g_foresters.end(), [town](const auto& f) { return f.second.town == town; }));
+}
+
+namespace
+{
+// Field::GetFieldActivity: 1 to sow (not all its crops in), 2 to harvest (ripe: grown to ageGrowth), 0 growing.
+int FieldActivity(const openblack::ecs::components::Field& field)
+{
+	const auto& type = Locator::infoConstants::value().fieldType.at(field.fieldType);
+	if (type.timesToSow > 0.0f && static_cast<float>(field.crops) / type.timesToSow < 1.0f)
+	{
+		return 1;
+	}
+	return field.growth >= type.ageGrowth ? 2 : 0;
+}
+
+uint32_t FarmersOn(uint32_t field)
+{
+	return static_cast<uint32_t>(std::count_if(g_farmers.begin(), g_farmers.end(), [field](const auto& f) { return f.second.field == field; }));
+}
+
+// Field::GetDesireToBeFarmed: sowing wanted the less it is sown and the fewer farm it, harvesting (fully grown) the
+// fewer farm it - against its maxFarmerInFarm.
+float DesireToBeFarmed(uint32_t id, const openblack::ecs::components::Field& field)
+{
+	const auto& type = Locator::infoConstants::value().fieldType.at(field.fieldType);
+	const float crowd = std::min(static_cast<float>(FarmersOn(id)) / static_cast<float>(std::max(type.maxFarmerInFarm, 1u)), 1.0f);
+	const float room = 1.0f - crowd;
+	const float sown = type.timesToSow > 0.0f ? std::min(static_cast<float>(field.crops) / type.timesToSow, 1.0f) : 1.0f;
+	switch (FieldActivity(field))
+	{
+	case 2:
+		return field.growth >= type.ageRecolt ? room : 0.0f;
+	case 1:
+		return (1.0f - sown) * room * room * room;
+	default:
+		return 0.0f;
+	}
+}
+
+// GUtils::GetDistanceModifier: 1 near, a half at half `reach`, nothing past it (its sigmoid table, from runblack.exe).
+float DistanceModifier(float distance, float reach)
+{
+	static constexpr std::array<float, 41> k_Sigmoid {0.0f,   0.0f,   0.0f,   0.0f,   0.0f,   0.0f,   0.0f,   0.0f,   0.0f,   0.0f,   0.0f,
+	                                                   0.0f,   0.0f,   0.001f, 0.002f, 0.006f, 0.016f, 0.044f, 0.114f, 0.264f, 0.5f,   0.736f,
+	                                                   0.886f, 0.956f, 0.984f, 0.994f, 0.998f, 0.999f, 1.0f,   1.0f,   1.0f,   1.0f,   1.0f,
+	                                                   1.0f,   1.0f,   1.0f,   1.0f,   1.0f,   1.0f,   1.0f,   1.0f};
+	const float near = 1.0f - std::min(distance, reach) / reach;
+	const float v = std::clamp(std::clamp(near, -1.0f, 1.0f) - 0.5f, -1.0f, 1.0f);
+	return k_Sigmoid.at(std::min(static_cast<size_t>((v + 1.0f) * 20.5f), size_t {40}));
+}
+
+// A spot in the field to work (runblack.exe's 0x528970: its middle, a few metres either way).
+glm::vec3 FieldSpot(const glm::vec3& middle)
+{
+	auto& rng = Locator::rng::value();
+	auto at = middle + glm::vec3(5.0f - rng.NextValue(0.0f, 10.0f), 0.0f, 5.0f - rng.NextValue(0.0f, 10.0f));
+	at.y = Locator::terrainSystem::value().GetHeightAt(glm::vec2(at.x, at.z));
+	return at;
+}
+
+// The town's village store itself (for its food pile).
+entt::entity TownStoreEntity(uint32_t town)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(town);
+	if (!registry.Valid(entity) || !registry.AllOf<Transform>(entity))
+	{
+		return entt::null;
+	}
+	const auto centre = registry.Get<Transform>(entity).position;
+	entt::entity store = entt::null;
+	float best = 300.0f;
+	registry.Each<const openblack::ecs::components::StoragePit, const Transform>(
+	    [&](entt::entity pit, const openblack::ecs::components::StoragePit&, const Transform& where) {
+		    const float d = glm::distance(where.position, centre);
+		    if (d < best)
+		    {
+			    best = d;
+			    store = pit;
+		    }
+	    });
+	return store;
+}
+
+void ReleaseFarmer(uint32_t id)
+{
+	ReleaseForester(id); // the same: its animation and what it carried gone, back to its own life
+}
+
+void UpdateFarmers(float seconds)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	for (auto it = g_farmers.begin(); it != g_farmers.end();)
+	{
+		const auto id = it->first;
+		auto& farmer = it->second;
+		const auto entity = static_cast<entt::entity>(id);
+		auto* villager = registry.Valid(entity) ? registry.TryGet<Villager>(entity) : nullptr;
+		const auto fieldEntity = static_cast<entt::entity>(farmer.field);
+		auto* field = registry.Valid(fieldEntity) ? registry.TryGet<Field>(fieldEntity) : nullptr;
+		if (villager == nullptr || id == g_heldObject || g_flying.contains(id) || g_walks.contains(id) || g_followers.contains(id) ||
+		    g_scriptMoves.contains(id) || g_builders.contains(id) || (field == nullptr && farmer.stage != Farmer::Stage::ToStore))
+		{
+			ReleaseFarmer(id);
+			it = g_farmers.erase(it);
+			continue;
+		}
+		auto& transform = registry.Get<Transform>(entity);
+		const auto& info = VillagerInfoOf(*villager);
+		bool done = false;
+		auto work = [&](AnimId animation) {
+			// One play of the work, then on (PlayAnimThenSetState).
+			const auto [rate, duration] = AnimationRate(static_cast<uint32_t>(animation));
+			farmer.timer = rate > 0.0f ? duration / rate : 1.0f;
+			farmer.working = true;
+			g_scriptAnimations[id] = {static_cast<uint32_t>(animation), 1.0f};
+		};
+		switch (farmer.stage)
+		{
+		case Farmer::Stage::ToField:
+			SetBuilderAnimation(id, std::nullopt);
+			if (WalkForester(entity, transform, farmer.spot, farmer.speed, seconds))
+			{
+				farmer.stage = farmer.activity == 1 ? Farmer::Stage::Sowing : Farmer::Stage::Harvesting;
+				FaceTowards(transform, registry.Get<Transform>(fieldEntity).position);
+				work(farmer.activity == 1 ? AnimId::PFarmerSowingSeeds : AnimId::PFarmerHarvesting);
+			}
+			break;
+		case Farmer::Stage::Sowing:
+		{
+			farmer.timer -= seconds;
+			if (farmer.timer > 0.0f && g_scriptAnimations.contains(id))
+			{
+				break;
+			}
+			// Field::PlantCrop; then the next spot while crops are still wanted (GetPlantCropPos).
+			const auto& type = Locator::infoConstants::value().fieldType.at(field->fieldType);
+			if (static_cast<float>(field->crops) < type.timesToSow)
+			{
+				++field->crops;
+				if (static_cast<float>(field->crops) >= type.timesToSow)
+				{
+					field->growth = 0.0f;
+					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Field {} sown ({} crops) by villager {}", farmer.field, field->crops, id);
+				}
+			}
+			if (static_cast<float>(field->crops) < type.timesToSow)
+			{
+				farmer.spot = FieldSpot(registry.Get<Transform>(fieldEntity).position);
+				farmer.stage = Farmer::Stage::ToField;
+			}
+			else
+			{
+				done = true;
+			}
+			break;
+		}
+		case Farmer::Stage::Harvesting:
+		{
+			farmer.timer -= seconds;
+			if (farmer.timer > 0.0f && g_scriptAnimations.contains(id))
+			{
+				break;
+			}
+			// Field::RemoveFood up to what it can still carry (GetFoodCapacity).
+			const float room = static_cast<float>(info.maxFoodCarried) - farmer.carrying;
+			const float take = std::min(room, field->grain);
+			if (take > 0.0f)
+			{
+				AddToPile(fieldEntity, -static_cast<int32_t>(take));
+				farmer.carrying += take;
+			}
+			if (farmer.carrying >= static_cast<float>(info.maxFoodCarried) || field->grain <= 0.0f || take <= 0.0f)
+			{
+				farmer.stage = farmer.carrying > 0.0f ? Farmer::Stage::ToStore : Farmer::Stage::ToField;
+				done = farmer.carrying <= 0.0f;
+			}
+			else
+			{
+				farmer.spot = FieldSpot(registry.Get<Transform>(fieldEntity).position);
+				farmer.stage = Farmer::Stage::ToField;
+			}
+			break;
+		}
+		case Farmer::Stage::ToStore:
+		{
+			SetBuilderAnimation(id, std::nullopt);
+			const auto store = TownStoreEntity(farmer.town);
+			if (store == entt::null)
+			{
+				done = true;
+				break;
+			}
+			const auto at = registry.Get<Transform>(store).position;
+			if (WalkForester(entity, transform, at, farmer.speed, seconds))
+			{
+				ChangeContainerResource(static_cast<uint32_t>(store), static_cast<int32_t>(ResourceType::Food), farmer.carrying);
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} brings {:.0f} grain to town {}'s store", id, farmer.carrying, farmer.town);
+				farmer.carrying = 0.0f;
+				done = true;
+			}
+			break;
+		}
+		}
+		CarryPlank(id, farmer.stage == Farmer::Stage::ToStore && farmer.carrying > 0.0f, MeshId::ObjectWheatInHand);
+		if (done)
+		{
+			ReleaseFarmer(id);
+			it = g_farmers.erase(it);
+			continue;
+		}
+		++it;
+	}
+}
+} // namespace
+
+float TakeFromTownStore(uint32_t town, bool wood, float amount)
+{
+	const auto store = TownStoreEntity(town);
+	if (store == entt::null || amount <= 0.0f)
+	{
+		return 0.0f;
+	}
+	return -ChangeContainerResource(static_cast<uint32_t>(store), static_cast<int32_t>(wood ? ResourceType::Wood : ResourceType::Food), -amount);
+}
+
+void VillagerDiesOf(uint32_t villager, const char* why)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(villager);
+	if (!registry.Valid(entity) || g_fallenDead.contains(villager))
+	{
+		return;
+	}
+	if (auto* person = registry.TryGet<openblack::ecs::components::Villager>(entity))
+	{
+		person->life = 0.0f;
+	}
+	g_scriptAnimations[villager] = {static_cast<uint32_t>(AnimId::PDying), std::numeric_limits<float>::max()};
+	g_fallenDead.insert(villager);
+	HoldForScript(entity, registry.Get<Transform>(entity).position); // the dead stay where they fell
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} died: {}", villager, why);
+}
+
+bool StartFarmer(uint32_t villager, float metresPerSecond)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(villager);
+	const auto* person = registry.Valid(entity) ? registry.TryGet<Villager>(entity) : nullptr;
+	if (person == nullptr || g_farmers.contains(villager) || NotFreeToBuild(entity, *person) != nullptr || person->town == entt::null ||
+	    !registry.Valid(person->town) || !registry.AllOf<Town>(person->town))
+	{
+		return false;
+	}
+	const auto& at = registry.Get<Transform>(entity).position;
+	const auto townId = registry.Get<Town>(person->town).id;
+	// Town::FindBestField: its fields, by how much each wants farming and how near (within 300).
+	uint32_t best = 0;
+	float bestScore = 0.0f;
+	registry.Each<const Field, const Transform>([&](entt::entity entity, const Field& field, const Transform& where) {
+		if (static_cast<uint32_t>(field.town) != townId)
+		{
+			return;
+		}
+		const float score = DesireToBeFarmed(static_cast<uint32_t>(entity), field) * DistanceModifier(glm::distance(where.position, at), 300.0f);
+		if (score > bestScore)
+		{
+			bestScore = score;
+			best = static_cast<uint32_t>(entity);
+		}
+	});
+	if (best == 0)
+	{
+		return false;
+	}
+	Farmer farmer;
+	farmer.field = best;
+	farmer.town = static_cast<uint32_t>(person->town);
+	farmer.speed = metresPerSecond;
+	farmer.activity = FieldActivity(registry.Get<Field>(static_cast<entt::entity>(best)));
+	farmer.spot = FieldSpot(registry.Get<Transform>(static_cast<entt::entity>(best)).position);
+	HoldForScript(entity, at);
+	g_farmers[villager] = farmer;
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Villager {} goes to {} field {} for town {}", villager, farmer.activity == 1 ? "sow" : "harvest",
+	                   best, farmer.town);
+	return true;
+}
+
+uint32_t FarmerCount(uint32_t town)
+{
+	return static_cast<uint32_t>(std::count_if(g_farmers.begin(), g_farmers.end(), [town](const auto& f) { return f.second.town == town; }));
+}
 
 namespace
 {
@@ -9747,14 +11286,434 @@ void UpdateVortices(float seconds)
 }
 } // namespace
 
+namespace
+{
+// One game turn of a dance's choreography: the key frames due (each once; the original applies one for every turn of
+// its half-second), then each group's changes under way (DanceGroup::Process), then the clock, which loops.
+void DanceTurn(Dance& dance)
+{
+	using namespace dance;
+	const auto& keyFrames = dance.choreography->keyFrames;
+	const auto bucket = [](float t) { return static_cast<int>(t) / k_TurnsPerKeyBucket; };
+	while (dance.nextKeyFrame < keyFrames.size() && bucket(keyFrames[dance.nextKeyFrame].time) <= bucket(dance.time))
+	{
+		for (const auto& action : keyFrames[dance.nextKeyFrame].actions)
+		{
+			for (const auto index : action.groups)
+			{
+				if (index >= 64)
+				{
+					continue;
+				}
+				if (index >= dance.groups.size())
+				{
+					dance.groups.resize(index + 1);
+				}
+				auto& group = dance.groups[index];
+				// UpdateGroupBasedOnAction
+				switch (action.type)
+				{
+				case Action::SetShape:
+					group.shape = action.value[0];
+					break;
+				case Action::SetPos:
+					group.pos = glm::vec2(action.Float(0), action.Float(1));
+					break;
+				case Action::SetSize:
+					group.size = action.Float(0);
+					break;
+				case Action::SetAngle:
+					group.angle = action.Float(0);
+					break;
+				case Action::SetPath:
+					group.isPath = action.value[0] != 0;
+					break;
+				case Action::Proportion:
+					if (!group.isPath)
+					{
+						group.fixed = action.value[0] != 0;
+						group.proportion = action.value[1];
+					}
+					break;
+				case Action::SetAction:
+				{
+					// UpdateGroupBasedOnDancerAction: the change per turn that gets there by the action's end.
+					const auto& to = action.action;
+					group.action = to;
+					group.actionSerial++;
+					const int remaining = to.endTime - static_cast<int>(dance.time);
+					const float rate = remaining > 0 ? k_Speed / static_cast<float>(remaining) : 0.0f;
+					switch (to.kind)
+					{
+					case Kind::RotateDancers:
+						group.changeDancerRotation = rate * k_DancerFullTurn;
+						break;
+					case Kind::RotateShape:
+						group.changeShapeRotation = (to.param2 - group.angle) * rate;
+						break;
+					case Kind::ChangeSize:
+						group.changeSize = (to.Param1Float() - group.size) * rate;
+						break;
+					case Kind::MoveToPos:
+						group.changeMove = glm::vec2(to.Param1Float(), to.param2) * rate;
+						break;
+					case Kind::FaceIn:
+						group.facingOut = false;
+						break;
+					case Kind::FaceOut:
+						group.facingOut = true;
+						break;
+					default:
+						break;
+					}
+				}
+				break;
+				default:
+					break; // paths, cameras, lights, signals: not in the port
+				}
+			}
+		}
+		dance.nextKeyFrame++;
+	}
+	for (auto& group : dance.groups)
+	{
+		const bool ended = static_cast<int>(dance.time) >= group.action.endTime;
+		switch (group.action.kind)
+		{
+		case Kind::ChangeSize:
+			group.size += group.changeSize;
+			break;
+		case Kind::MoveToPos:
+			group.pos += group.changeMove;
+			break;
+		case Kind::RotateDancers:
+			group.dancerAngle = std::fmod(group.dancerAngle + (group.action.param1 != 0 ? -1.0f : 1.0f) * group.changeDancerRotation + k_DancerFullTurn,
+			                              k_DancerFullTurn);
+			break;
+		case Kind::RotateShape:
+			group.angle = std::fmod(group.angle + group.changeShapeRotation + k_ShapeFullTurn, k_ShapeFullTurn);
+			break;
+		default:
+			break;
+		}
+		if (ended && (group.action.kind == Kind::ChangeSize || group.action.kind == Kind::MoveToPos))
+		{
+			group.action.kind = Kind::StandStill;
+			group.changeSize = 0.0f;
+			group.changeMove = glm::vec2(0.0f);
+		}
+	}
+	dance.time += 1.0f;
+	if (dance.time >= 600.0f * static_cast<float>(dance.choreography->lengthMinutes)) // Length minutes of turns
+	{
+		dance.time = 0.0f;
+		dance.nextKeyFrame = 0;
+	}
+}
+
+// Where in its shape a dancer stands (GroupBehaviour::CalculateDancePosition): spread evenly round it from the
+// group's dancer angle, Size metres across, moved by the group's position.
+glm::vec3 DancePlace(const Dance& dance, const dance::Group& group, size_t index)
+{
+	using namespace dance;
+	const size_t count = group.fixed ? std::max<size_t>(group.proportion, group.dancers.size()) : group.dancers.size();
+	const float along = std::fmod(static_cast<float>(index) * k_DancerFullTurn / static_cast<float>(std::max<size_t>(count, 1)) + group.dancerAngle,
+	                              k_DancerFullTurn) / k_DancerFullTurn; // 0..1 round the shape
+	glm::vec2 point; // the shape's own, half a unit across its middle
+	switch (group.shape)
+	{
+	case 5: // line (V)
+		point = glm::vec2(0.0f, along - 0.5f);
+		break;
+	case 6: // line (H)
+		point = glm::vec2(along - 0.5f, 0.0f);
+		break;
+	case 7: // point
+		point = glm::vec2(0.0f);
+		break;
+	default: // the circle - and, not yet in the port, the other shapes
+		point = glm::vec2(std::cos(along * glm::two_pi<float>()), std::sin(along * glm::two_pi<float>())) * 0.5f;
+		break;
+	}
+	if (group.angle != 0.0f)
+	{
+		const float turn = group.angle / k_ShapeFullTurn * glm::two_pi<float>();
+		point = glm::vec2(point.x * std::cos(turn) - point.y * std::sin(turn), point.x * std::sin(turn) + point.y * std::cos(turn));
+	}
+	const auto offset = point * group.size + group.pos;
+	return dance.centre + glm::vec3(offset.x, 0.0f, offset.y);
+}
+
+// What a dancer plays for its group's movement (Villager::DanceAnimation); nothing when it walks (the villager system's
+// own walk shows).
+std::optional<AnimId> DanceAnimation(const dance::DancerAction& action, bool woman)
+{
+	using dance::Kind;
+	// PLAY_ANIM's animations by number, the man's and the woman's (runblack.exe 1.20's table at 0xbe6970).
+	static constexpr std::array<std::pair<AnimId, AnimId>, 45> k_Played {{
+	    {AnimId::PMDanceA, AnimId::PFDanceA}, {AnimId::PMDanceB, AnimId::PFDanceB}, {AnimId::PMDanceC, AnimId::PFDanceC},
+	    {AnimId::PDancePissTake, AnimId::PDancePissTake}, {AnimId::PDanceTogetherArmlink, AnimId::PDanceTogetherArmlink},
+	    {AnimId::PDanceTogetherCircling, AnimId::PDanceTogetherCircling},
+	    {AnimId::PDanceTogetherCirclingPartner, AnimId::PDanceTogetherCirclingPartner}, {AnimId::PDanceX, AnimId::PDanceX},
+	    {AnimId::PDanceXPartner, AnimId::PDanceXPartner}, {AnimId::PGossipMan, AnimId::PGossipWoman_1},
+	    {AnimId::PFrightDuck, AnimId::PFrightDuck}, {AnimId::PFrightJump, AnimId::PFrightJump}, {AnimId::PScaredStiff, AnimId::PScaredStiff},
+	    {AnimId::PInspectObject_1, AnimId::PInspectObject_1}, {AnimId::PInspectObject_2, AnimId::PInspectObject_2},
+	    {AnimId::PInspectObject_3, AnimId::PInspectObject_3}, {AnimId::PIntoMourning, AnimId::PIntoMourning},
+	    {AnimId::PMourning, AnimId::PMourning}, {AnimId::POutOfMourning, AnimId::POutOfMourning},
+	    {AnimId::PIntoPointing, AnimId::PIntoPointing}, {AnimId::POutOfPointing, AnimId::POutOfPointing},
+	    {AnimId::PIntoPray, AnimId::PIntoPray}, {AnimId::PPray, AnimId::PPray}, {AnimId::POutOfPray, AnimId::POutOfPray},
+	    {AnimId::PPuzzled, AnimId::PPuzzled}, {AnimId::PSittingDown1Into, AnimId::PSittingDown1Into},
+	    {AnimId::PSittingDown1Sitting, AnimId::PSittingDown1Sitting}, {AnimId::PSittingDown1OutOf, AnimId::PSittingDown1OutOf},
+	    {AnimId::PSittingDown2Into, AnimId::PSittingDown2Into}, {AnimId::PSittingDown2Sitting, AnimId::PSittingDown2Sitting},
+	    {AnimId::PSittingDown2OutOf, AnimId::PSittingDown2OutOf}, {AnimId::PSittingDown2Into, AnimId::PSittingDown2Into},
+	    {AnimId::PSittingSwingingLegs, AnimId::PSittingSwingingLegs}, {AnimId::PSittingDown2OutOf, AnimId::PSittingDown2OutOf},
+	    {AnimId::PStandDespair_1, AnimId::PStandDespair_1}, {AnimId::PStandDespair_2, AnimId::PStandDespair_2},
+	    {AnimId::PStandDespair_3, AnimId::PStandDespair_3}, {AnimId::PYawn, AnimId::PYawn}, {AnimId::PYawn2, AnimId::PYawn2},
+	    {AnimId::POverworked1, AnimId::POverworked1}, {AnimId::POverworked2, AnimId::POverworked2},
+	    {AnimId::PCoupleKissMan, AnimId::PCoupleKissWoman}, {AnimId::PCrowdImpressed_1, AnimId::PCrowdImpressed_1},
+	    {AnimId::PCrowdWon, AnimId::PCrowdWon}, {AnimId::PCrowdWon_2, AnimId::PCrowdWon_2},
+	}};
+	const auto pick = [woman](AnimId man, AnimId womans) { return woman ? womans : man; };
+	switch (action.kind)
+	{
+	case Kind::RotateDancers:
+	case Kind::ChangeSize:
+	case Kind::MoveToPos:
+		return std::nullopt; // walking (MoveToPosAnimation)
+	case Kind::RandomDance:
+	{
+		const auto which = static_cast<int>(std::rand() % 3);
+		return static_cast<AnimId>(static_cast<int>(pick(AnimId::PMDanceA, AnimId::PFDanceA)) + which);
+	}
+	case Kind::Pray:
+	case Kind::Sex:
+	case Kind::WorshipCreature:
+		return AnimId::PPray;
+	case Kind::Funky:
+	case Kind::RotateShape:
+		return pick(AnimId::PDanceX, AnimId::PDanceXPartner);
+	case Kind::PlayAnim:
+		if (action.param1 < k_Played.size())
+		{
+			const auto& [man, womans] = k_Played.at(action.param1);
+			return pick(man, womans);
+		}
+		return AnimId::PStand;
+	case Kind::Sad:
+		return AnimId::PCrowdLost;
+	case Kind::Happy:
+		return AnimId::PCrowdWon;
+	case Kind::LookingForSomething:
+		return AnimId::PLookingForSomething;
+	case Kind::Mourning:
+		return AnimId::PMourning;
+	case Kind::Talk:
+		return AnimId::PTalkToNeighbour;
+	case Kind::TalkAndPoint:
+		return AnimId::PTalkingAndPointing;
+	case Kind::DanceX:
+		return AnimId::PDanceX;
+	case Kind::DanceXPartner:
+		return AnimId::PDanceXPartner;
+	default:
+		if (action.kind >= Kind::FemaleA && action.kind <= Kind::FemaleC)
+		{
+			return static_cast<AnimId>(static_cast<int>(AnimId::PFDanceA) + static_cast<int>(action.kind) - static_cast<int>(Kind::FemaleA));
+		}
+		if (action.kind >= Kind::MaleA && action.kind <= Kind::MaleC)
+		{
+			return static_cast<AnimId>(static_cast<int>(AnimId::PMDanceA) + static_cast<int>(action.kind) - static_cast<int>(Kind::MaleA));
+		}
+		return AnimId::PStand; // standing still, facing in or out, looking...
+	}
+}
+
+void UpdateDances(float seconds)
+{
+	using openblack::ecs::components::Villager;
+	auto& registry = Locator::entitiesRegistry::value();
+	for (auto it = g_dances.begin(); it != g_dances.end();)
+	{
+		auto& dance = it->second;
+		const auto flock = g_flocks.find(it->first);
+		dance.secondsLeft -= seconds;
+		if (dance.secondsLeft <= 0.0f || flock == g_flocks.end())
+		{
+			if (flock != g_flocks.end())
+			{
+				for (const auto member : flock->second.members)
+				{
+					if (dance.dancerSerial.contains(member))
+					{
+						g_scriptAnimations.erase(member);
+					}
+					if (const auto entity = static_cast<entt::entity>(member); registry.Valid(entity))
+					{
+						registry.Remove<ScriptMove>(entity); // back to the villager AI
+					}
+				}
+				SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Dance {} over: {} dancers go back to their lives", it->first,
+				                   flock->second.members.size());
+				g_flocks.erase(flock);
+			}
+			it = g_dances.erase(it);
+			continue;
+		}
+		if (dance.choreography != nullptr)
+		{
+			dance.turnClock += seconds;
+			while (dance.turnClock >= dance::k_TurnSeconds)
+			{
+				dance.turnClock -= dance::k_TurnSeconds;
+				DanceTurn(dance);
+			}
+		}
+		else if (!dance.groups.empty()) // no file: one ring, dancing as it likes
+		{
+			dance.groups[0].size = std::max(8.0f, static_cast<float>(flock->second.members.size()) * 1.4f);
+			dance.groups[0].action.kind = dance::Kind::RandomDance;
+		}
+
+		// The dancers into the groups (GroupBehaviour's proportions): a fixed group takes its number, the others share
+		// the rest as their proportions say, in the order the dancers joined.
+		for (auto& group : dance.groups)
+		{
+			group.dancers.clear();
+		}
+		std::vector<uint32_t> dancers;
+		for (const auto member : flock->second.members)
+		{
+			const auto entity = static_cast<entt::entity>(member);
+			if (registry.Valid(entity) && registry.AllOf<Transform>(entity) && member != g_heldObject && !g_flying.contains(member))
+			{
+				dancers.push_back(member);
+			}
+		}
+		size_t next = 0;
+		uint32_t shares = 0;
+		for (auto& group : dance.groups)
+		{
+			if (group.fixed)
+			{
+				for (uint32_t n = 0; n < group.proportion && next < dancers.size(); n++)
+				{
+					group.dancers.push_back(dancers[next++]);
+				}
+			}
+			else
+			{
+				shares += group.proportion;
+			}
+		}
+		const size_t rest = dancers.size() - next;
+		size_t given = 0;
+		for (size_t g = 0; g < dance.groups.size(); g++)
+		{
+			auto& group = dance.groups[g];
+			if (group.fixed || shares == 0)
+			{
+				continue;
+			}
+			size_t take = rest * group.proportion / shares;
+			const bool lastShared = std::none_of(dance.groups.begin() + static_cast<long>(g) + 1, dance.groups.end(),
+			                                     [](const auto& other) { return !other.fixed && other.proportion > 0; });
+			if (lastShared)
+			{
+				take = rest - given; // the remainder of the rounding
+			}
+			for (size_t n = 0; n < take && next < dancers.size(); n++)
+			{
+				group.dancers.push_back(dancers[next++]);
+			}
+			given += take;
+		}
+
+		for (const auto& group : dance.groups)
+		{
+			const auto groupCentre = dance.centre + glm::vec3(group.pos.x, 0.0f, group.pos.y);
+			for (size_t i = 0; i < group.dancers.size(); i++)
+			{
+				const auto member = group.dancers[i];
+				const auto entity = static_cast<entt::entity>(member);
+				auto& transform = registry.Get<Transform>(entity);
+				// The dance has them now: not a walk or a flock's gathering point from before.
+				g_walks.erase(member);
+				g_followers.erase(member);
+				g_scriptMoves.erase(member);
+				const auto place = DancePlace(dance, group, i);
+				const auto toPlace = glm::vec2(place.x - transform.position.x, place.z - transform.position.z);
+				const float distance = glm::length(toPlace);
+				const auto* villager = registry.TryGet<Villager>(entity);
+				const bool woman = villager != nullptr && villager->sex == Villager::Sex::FEMALE;
+				const auto animation = DanceAnimation(group.action, woman);
+				auto playing = g_scriptAnimations.find(member);
+				if (distance > 0.3f || !animation)
+				{
+					// Walking to its place, or the group's movement walks it (a ring turning or growing): no dance on
+					// the way; faster when far behind, so a dancer keeps up with its place.
+					if (playing != g_scriptAnimations.end() && dance.dancerSerial.contains(member))
+					{
+						g_scriptAnimations.erase(playing);
+					}
+					dance.dancerSerial.erase(member);
+					HoldForScript(entity, transform.position);
+					if (distance > 0.01f)
+					{
+						const float speed = FullSpeed(member) * 0.4f * std::clamp(distance, 1.0f, 3.0f);
+						const float step = std::min(distance, speed * seconds);
+						PlaceMover(entity, transform, transform.position + glm::vec3(toPlace.x, 0.0f, toPlace.y) / distance * step, place);
+					}
+					continue;
+				}
+				HoldForScript(entity, place);
+				// Facing the group's middle, or away from it after FACE_OUT.
+				const auto awayFrom = group.facingOut ? transform.position * 2.0f - groupCentre : groupCentre;
+				FaceTowards(transform, awayFrom);
+				const auto serial = dance.dancerSerial.find(member);
+				if (playing == g_scriptAnimations.end() || serial == dance.dancerSerial.end() || serial->second != group.actionSerial)
+				{
+					g_scriptAnimations[member] = {static_cast<uint32_t>(*animation), 1.0f}; // again each time it has played
+					dance.dancerSerial[member] = group.actionSerial;
+				}
+			}
+		}
+		++it;
+	}
+}
+} // namespace
+
 void UpdateScriptFrame(std::chrono::microseconds dt)
 {
 	g_scriptClock += std::chrono::duration_cast<std::chrono::steady_clock::duration>(dt);
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f * PlaySpeed()); // a long frame (a load) is cut short, at any play speed
 	auto& registry = Locator::entitiesRegistry::value();
 	UpdateBuilders(seconds);
+	UpdateForesters(seconds);
+	UpdateFarmers(seconds);
+	// Reward chests from the sky (rewardfromsky): down to the ground, then there to be opened.
+	for (auto& [id, chest] : g_rewards)
+	{
+		if (chest.falling <= 0.0f || chest.opened)
+		{
+			continue;
+		}
+		const auto entity = static_cast<entt::entity>(id);
+		if (!registry.Valid(entity) || !registry.AllOf<Transform>(entity))
+		{
+			chest.falling = 0.0f;
+			continue;
+		}
+		const float drop = std::min(chest.falling, 20.0f * seconds);
+		chest.falling -= drop;
+		registry.Get<Transform>(entity).position.y -= drop;
+		if (chest.falling <= 0.0f)
+		{
+			PlayTreeThud(registry.Get<Transform>(entity).position); // down it comes
+		}
+	}
 	UpdateDispensers();
 	UpdateVortices(seconds);
+	UpdateDances(seconds);
 	// The Ark: built up to what its wood allows, a little each second, as its sailors work.
 	registry.Each<const openblack::ecs::components::Feature, openblack::ecs::components::Construction>(
 	    [seconds](entt::entity, const openblack::ecs::components::Feature&, openblack::ecs::components::Construction& construction) {
@@ -9804,25 +11763,46 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		if (s_sinceFlockCheck >= 1.0f)
 		{
 			s_sinceFlockCheck = 0.0f;
-			std::unordered_set<uint32_t> inFlock;
+			std::unordered_map<uint32_t, uint32_t> inFlock; // animal -> its flock
 			for (const auto& [id, flock] : g_flocks)
 			{
-				inFlock.insert(flock.members.begin(), flock.members.end());
+				for (const auto member : flock.members)
+				{
+					inFlock[member] = id;
+				}
 			}
 			const auto& infos = Locator::infoConstants::value().animal;
 			registry.Each<const openblack::ecs::components::Animal, const Transform>(
 			    [&](entt::entity entity, const openblack::ecs::components::Animal& animal, const Transform& transform) {
 				    const auto id = static_cast<uint32_t>(entity);
-				    if (inFlock.contains(id) || id == g_heldObject || g_flying.contains(id) ||
+				    const auto index = static_cast<size_t>(animal.type);
+				    const float info = index < infos.size() ? infos.at(index).flockDistance : 0.0f;
+				    const float reach = info > 0.0f ? info : 20.0f;
+				    // In a flock and with it, it stays; taken far from its own (the hand carried it off), it is a stray:
+				    // Land 1's lost sheep are each a flock of their own, and the one carried to the shepherd's pen
+				    // (Mike, 2026-10-19) never joined his.
+				    std::optional<uint32_t> ownFlock;
+				    if (const auto own = inFlock.find(id); own != inFlock.end())
+				    {
+					    const auto* centre = registry.TryGet<Transform>(static_cast<entt::entity>(own->second));
+					    if (centre == nullptr ||
+					        glm::distance(glm::vec2(centre->position.x, centre->position.z), glm::vec2(transform.position.x, transform.position.z)) <= reach * 2.0f)
+					    {
+						    return;
+					    }
+					    ownFlock = own->second;
+				    }
+				    if (id == g_heldObject || g_flying.contains(id) ||
 				        std::any_of(g_creatureHolding.begin(), g_creatureHolding.end(), [id](const auto& h) { return h.second == id; }))
 				    {
 					    return;
 				    }
-				    const auto index = static_cast<size_t>(animal.type);
-				    const float info = index < infos.size() ? infos.at(index).flockDistance : 0.0f;
-				    const float reach = info > 0.0f ? info : 20.0f;
 				    for (auto& [flockId, flock] : g_flocks)
 				    {
+					    if (ownFlock && flockId == *ownFlock)
+					    {
+						    continue;
+					    }
 					    const auto* centre = registry.TryGet<Transform>(static_cast<entt::entity>(flockId));
 					    const bool ofItsKind = std::any_of(flock.members.begin(), flock.members.end(), [&](uint32_t member) {
 						    const auto* other = registry.Valid(static_cast<entt::entity>(member))
@@ -9835,9 +11815,15 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 					    {
 						    continue;
 					    }
+					    if (ownFlock)
+					    {
+						    auto& old = g_flocks[*ownFlock].members;
+						    old.erase(std::remove(old.begin(), old.end(), id), old.end());
+					    }
 					    flock.members.push_back(id);
-					    SPDLOG_LOGGER_INFO(spdlog::get("game"), "Animal {} (type {}) joined flock {} within {:.0f} (info flockDistance {:.1f}): {} now",
-					                       id, static_cast<int>(animal.type), flockId, reach, info, flock.members.size());
+					    SPDLOG_LOGGER_INFO(spdlog::get("game"), "Animal {} (type {}) joined flock {} within {:.0f} (info flockDistance {:.1f}): {} now{}",
+					                       id, static_cast<int>(animal.type), flockId, reach, info, flock.members.size(),
+					                       ownFlock ? fmt::format(" (a stray from flock {})", *ownFlock) : std::string());
 					    break;
 				    }
 			    });
@@ -9928,6 +11914,47 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Sparkles: {} objects, sheet {}", g_sparklers.size(), sheet != nullptr);
 		}
 	}
+	// Test hook: OPENBLACK_TEST_SPHERES=<seconds>: that long into the run, food, water, heal, wood and fire spheres in a
+	// grid in front of the camera - a row below the eye (seen from above), one level with it, one above - kept there
+	// each frame, to look at from every angle (screenshots: OPENBLACK_SHOT_DIR).
+	{
+		static const char* s_testSpheres = std::getenv("OPENBLACK_TEST_SPHERES");
+		static std::vector<std::pair<uint32_t, glm::vec2>> s_placed; // sphere, its place across and up
+		if (s_testSpheres != nullptr)
+		{
+			static float s_since = 0.0f;
+			s_since += seconds;
+			const auto& camera = Locator::camera::value();
+			const auto eye = camera.GetOrigin();
+			const auto forward = glm::normalize(camera.GetForward());
+			const auto right = glm::normalize(camera.GetRight());
+			const auto up = glm::vec3(0.0f, 1.0f, 0.0f);
+			if (s_placed.empty() && s_since >= static_cast<float>(std::atof(s_testSpheres)))
+			{
+				const std::array<uint32_t, 5> k_Seeds = {3, 9, 7, 8, 2};
+				for (int row = 0; row < 3; ++row)
+				{
+					for (size_t i = 0; i < k_Seeds.size(); ++i)
+					{
+						const std::array<float, 3> k_Heights = {-2.5f, 3.0f, 11.0f};
+						const glm::vec2 place((static_cast<float>(i) - 2.0f) * 6.5f, k_Heights[static_cast<size_t>(row)]);
+						const auto made = CreateScriptObject(ObjectType::OneShotSpell, k_Seeds[i], eye + forward * 30.0f, 0.0f, 0.0f,
+						                                     0.0f, 0.0f, 1.0f);
+						s_placed.emplace_back(static_cast<uint32_t>(made), place);
+					}
+				}
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "Test spheres: {} placed", s_placed.size());
+			}
+			for (const auto& [id, place] : s_placed)
+			{
+				const auto sphere = static_cast<entt::entity>(id);
+				if (registry.Valid(sphere) && registry.AllOf<Transform>(sphere))
+				{
+					registry.Get<Transform>(sphere).position = eye + forward * 24.0f + right * place.x + up * place.y;
+				}
+			}
+		}
+	}
 	// Miracle spheres: each holds its miracle's icon model (the original's I_ meshes: food the cornucopia SpellHornOfPlenty - Mike, I_Heal,
 	// I_Fireball...), turning slowly inside the bubble (Mike, 2026-10-18). By spell seed (info.dat's order).
 	{
@@ -9943,8 +11970,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		// 2026-10-18). The turn itself is wrapped where it is used.
 		static double s_clock = 0.0;
 		s_clock += seconds;
-		const float s_turn = static_cast<float>(std::fmod(s_clock * 0.8, glm::two_pi<double>()));
-		const float tiltClock = static_cast<float>(std::fmod(s_clock, 1000.0 * glm::two_pi<double>()));
+		const float s_spin = static_cast<float>(std::fmod(s_clock * 2.0, glm::two_pi<double>()));
 		const auto& meshes = Locator::resources::value().GetMeshes();
 		for (auto it = s_icons.begin(); it != s_icons.end();)
 		{
@@ -9981,82 +12007,169 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			}
 			const auto& at = registry.Get<Transform>(sphere);
 			const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(sphere);
-			const float radius = k_BubbleRadius; // the bubble image's, not Seed.L3D's (a NoDraw stand-in)
-			// Its biggest side 2.4 of the bubble's radius (Mike, 2026-10-18: twice the 1.2 it was), centred on it.
+			// At the original's size: its model at 0.6 of the bubble's scale (OneOffSpellSeed::GetSpellGraphicPos), the
+			// bubble at 1. Centred on it.
+			const float scale = 0.6f;
 			const auto box = meshes.Handle(iconMesh)->GetBoundingBox();
-			const float size = std::max({box.Size().x, box.Size().y, box.Size().z, 1e-3f});
-			const float scale = 2.4f * radius / size;
 			auto& transform = registry.Get<Transform>(entity);
-			// Tumbling slowly every way (the original's photos show the horn pointing down, sideways, across).
+			// Upright, turning about the up axis at spinSpeed, 2 radians a second (SpellSeedGraphic::DrawSpellGraphic's
+			// YAngle) (Mike, 2026-10-19: tumbling, it left the bubble from some angles). Its middle at the bubble's
+			// centre: by its origin, as GetSpellGraphicPos puts it, the icons sat a little high (Mike, 2026-10-19).
 			const float phase = static_cast<float>(id % 7);
-			transform.rotation = glm::mat3(glm::eulerAngleYXZ(s_turn + phase, std::sin(tiltClock * 0.56f + phase) * 1.2f,
-			                                                  std::cos(tiltClock * 0.4f + phase) * 0.9f));
+			transform.rotation = glm::mat3(glm::eulerAngleY(s_spin + phase));
 			transform.scale = glm::vec3(scale);
 			transform.position = at.position - transform.rotation * (box.Center() * scale);
 		}
-		// Water's sphere holds no model but a cloud, billowing in place and not turning like the others (Mike, 2026-10-18):
-		// a few blue puffs of ATMOS's soft round one (64x64 at 0,64), each drifting and swelling on its own clock.
+		// Each sphere's own effect, as the original's (SpellSeedGraphic::CreateGraphic): its spell seed info's particle
+		// type (+0x174), played by the original's effect file (PSys), at the sphere, at magnitude 1 - water's
+		// SF_WaterOnHolder, a mist that hangs in it; heal, fire, lightning, shield and the
+		// creature spells theirs as their classes are run. Its mists are drawn as the original's LH3DMist: a frame of
+		// the smoke sheet (Data/Textures/smoke.raw, its alpha smokea.raw) turned to the camera, flattened by its ratio
+		// when seen from the side.
 		{
-			constexpr int k_WaterSeed = 9;
-			constexpr int k_Puffs = 5;
-			static std::unordered_map<uint32_t, std::array<entt::entity, k_Puffs>> s_clouds;
-			for (auto it = s_clouds.begin(); it != s_clouds.end();)
+			static const std::map<uint32_t, const char*> k_EffectFiles = {
+			    {18, "WaterOnHolder"},          {47, "FireBallOnHolder"},        {51, "HealChakraOnHolder"},
+			    {58, "LightningStormOnHolder"}, {60, "LightningBoltOnHolder"},   {66, "DefenseSphereOnHolder"},
+			    {74, "TeleportOnHolder"},       {89, "CreatureSpellItchOnHolder"}, {92, "CreatureSpellFreezeOnHolder"},
+			    {95, "CreatureSpellCompassionOnHolder"}};
+			struct SphereEffect
 			{
-				const auto spell = g_oneShotSpells.find(it->first);
-				if (spell == g_oneShotSpells.end() || spell->second != k_WaterSeed || !registry.Valid(static_cast<entt::entity>(it->first)))
+				std::unique_ptr<openblack::psys::Effect> effect;
+				std::vector<entt::entity> sprites;
+			};
+			static std::unordered_map<uint32_t, SphereEffect> s_effects;
+			static openblack::graphics::Texture2D* s_smokeTexture = nullptr; // never freed: see the bubble's
+			static bool s_triedSmoke = false;
+			if (!s_triedSmoke)
+			{
+				s_triedSmoke = true;
+				try
 				{
-					for (const auto puff : it->second)
+					auto& fs = Locator::filesystem::value();
+					const auto textures = fs.GetPath<openblack::filesystem::Path::Data>() / "Textures";
+					const auto rgb = fs.ReadAll(textures / "smoke.raw");
+					const auto alpha = fs.ReadAll(textures / "smokea.raw");
+					constexpr size_t k_Texels = 256 * 256;
+					if (rgb.size() >= k_Texels * 3 && alpha.size() >= k_Texels)
 					{
-						if (registry.Valid(puff))
+						std::vector<uint8_t> pixels(k_Texels * 4);
+						for (size_t t = 0; t < k_Texels; ++t)
 						{
-							registry.Destroy(puff);
+							pixels[t * 4 + 0] = rgb[t * 3 + 0];
+							pixels[t * 4 + 1] = rgb[t * 3 + 1];
+							pixels[t * 4 + 2] = rgb[t * 3 + 2];
+							pixels[t * 4 + 3] = alpha[t];
+						}
+						s_smokeTexture = new openblack::graphics::Texture2D("smoke sheet");
+						s_smokeTexture->Create(256, 256, 1, openblack::graphics::TextureFormat::RGBA8,
+						                       openblack::graphics::Wrapping::ClampEdge, openblack::graphics::Filter::Linear,
+						                       bgfx::copy(pixels.data(), static_cast<uint32_t>(pixels.size())));
+					}
+				}
+				catch (const std::exception& e)
+				{
+					SPDLOG_LOGGER_WARN(spdlog::get("game"), "Smoke sheet: {}", e.what());
+				}
+			}
+			for (auto it = s_effects.begin(); it != s_effects.end();)
+			{
+				if (!g_oneShotSpells.contains(it->first) || !registry.Valid(static_cast<entt::entity>(it->first)))
+				{
+					for (const auto sprite : it->second.sprites)
+					{
+						if (registry.Valid(sprite))
+						{
+							registry.Destroy(sprite);
 						}
 					}
-					it = s_clouds.erase(it);
+					it = s_effects.erase(it);
 					continue;
 				}
 				++it;
 			}
-			const auto atmos = entt::hashed_string("raw/ATMOS").value();
-			auto& textures = Locator::resources::value().GetTextures();
+			const auto& infos = Locator::infoConstants::value().spellSeed;
+			const auto eye = Locator::camera::value().GetOrigin();
+			std::vector<openblack::psys::Drawable> drawables;
 			for (const auto& [id, seed] : g_oneShotSpells)
 			{
 				const auto sphere = static_cast<entt::entity>(id);
-				if (seed != k_WaterSeed || !textures.Contains(atmos) || !registry.Valid(sphere) || !registry.AllOf<Transform>(sphere))
+				if (seed < 0 || static_cast<size_t>(seed) >= infos.size() || !registry.Valid(sphere) || !registry.AllOf<Transform>(sphere))
 				{
 					continue;
 				}
-				auto [cloud, made] = s_clouds.try_emplace(id);
+				const auto file = k_EffectFiles.find(infos[static_cast<size_t>(seed)].field0x164);
+				if (file == k_EffectFiles.end())
+				{
+					continue;
+				}
+				auto [entry, made] = s_effects.try_emplace(id);
 				if (made)
 				{
-					for (auto& puff : cloud->second)
-					{
-						puff = registry.Create();
-						auto& sprite = registry.Assign<openblack::ecs::components::Sprite>(
-						    puff, textures.Handle(atmos)->GetNativeHandle(), glm::vec2(0.0f, 0.25f), glm::vec2(0.25f),
-						    glm::vec4(0.45f, 0.65f, 1.0f, 0.9f));
-						sprite.darkens = true; // a blue cloud over what is behind, not added light
-						registry.Assign<Transform>(puff, glm::vec3(0.0f), glm::mat3(1.0f), glm::vec3(1.0f));
-					}
+					entry->second.effect = std::make_unique<openblack::psys::Effect>(openblack::psys::EffectFile::Load(file->second));
+					entry->second.effect->SetMagnitude(1.0f); // SpellSeedGraphic's Size, 1 for a sphere's
 				}
-				const auto centre = registry.Get<Transform>(sphere).position;
-				const float t = static_cast<float>(std::fmod(s_clock, 1000.0 * glm::two_pi<double>()));
-				for (int i = 0; i < k_Puffs; ++i)
+				auto& effect = *entry->second.effect;
+				effect.SetOrigin(registry.Get<Transform>(sphere).position);
+				effect.Update(seconds);
+				drawables.clear();
+				effect.Collect(drawables);
+				auto& sprites = entry->second.sprites;
+				while (sprites.size() < drawables.size() && s_smokeTexture != nullptr)
 				{
-					const float phase = static_cast<float>(i) * 1.7f + static_cast<float>(id % 5);
-					const glm::vec3 drift(std::sin(t * 0.45f + phase) * 0.35f, std::sin(t * 0.33f + phase * 1.3f) * 0.25f,
-					                      std::cos(t * 0.40f + phase) * 0.35f);
-					auto& transform = registry.Get<Transform>(cloud->second[static_cast<size_t>(i)]);
-					transform.position = centre + drift * k_BubbleRadius;
-					transform.scale = glm::vec3(k_BubbleRadius * (1.1f + 0.25f * std::sin(t * 0.6f + phase)));
+					const auto sprite = registry.Create();
+					auto& made2 = registry.Assign<openblack::ecs::components::Sprite>(sprite, s_smokeTexture->GetNativeHandle(),
+					                                                                  glm::vec2(0.0f), glm::vec2(0.125f), glm::vec4(1.0f));
+					made2.fullColour = true; // the sheet's own colour and alpha
+					registry.Assign<Transform>(sprite, glm::vec3(0.0f), glm::mat3(1.0f), glm::vec3(1.0f));
+					sprites.push_back(sprite);
+				}
+				const auto& camera = Locator::camera::value();
+				for (size_t d = 0; d < sprites.size(); ++d)
+				{
+					auto& transform = registry.Get<Transform>(sprites[d]);
+					if (d >= drawables.size())
+					{
+						transform.scale = glm::vec3(0.0f); // nothing to show this frame
+						continue;
+					}
+					const auto& drawable = drawables[d];
+					auto& sprite = registry.Get<openblack::ecs::components::Sprite>(sprites[d]);
+					sprite.tint = drawable.colour;
+					if (drawable.kind == openblack::psys::Drawable::Kind::Sprite)
+					{
+						const auto* sheet = SpriteSheet(drawable.texture);
+						if (sheet == nullptr)
+						{
+							transform.scale = glm::vec3(0.0f);
+							continue;
+						}
+						sprite.texture = sheet->GetNativeHandle();
+						sprite.uvMin = drawable.uvMin;
+						sprite.uvExtent = drawable.uvExtent;
+						sprite.darkens = !drawable.additive; // added light, or blended over what is behind
+						transform.position = drawable.position + camera.GetRight() * drawable.screenOffset.x +
+						                     camera.GetUp() * drawable.screenOffset.y;
+						transform.scale = glm::vec3(drawable.radius, drawable.radius * drawable.ratio, 1.0f);
+						continue;
+					}
+					sprite.texture = s_smokeTexture->GetNativeHandle();
+					sprite.darkens = true; // blended over what is behind
+					// Frames 0-15: the sheet's rows 2 and 3, eight across (LH3DMist's u = frame % 8 / 8, v = frame / 8 / 8 + 1/4).
+					sprite.uvMin = glm::vec2(static_cast<float>(drawable.frame % 8) * 0.125f,
+					                         0.25f + static_cast<float>(drawable.frame / 8) * 0.125f) +
+					               glm::vec2(0.002f);
+					sprite.uvExtent = glm::vec2(0.121f);
+					// Its height: the radius over 1 + (ratio - 1) x (1 - how straight down it is seen from).
+					const auto toEye = glm::normalize(eye - drawable.position);
+					const float height = drawable.radius / (1.0f + (drawable.ratio - 1.0f) * (1.0f - std::abs(toEye.y)));
+					transform.position = drawable.position;
+					transform.scale = glm::vec3(drawable.radius, height, 1.0f);
 				}
 			}
 		}
-		// The bubble itself (Mike's recording of the original, 2026-10-18): a see-through sphere, pale grey-green with
-		// soft cloudy patches that stay put (not animated), a warm patch on one side, lighter at its rim. Not one
-		// texture in the game: made once here from ATMOS's cloud tile (64x64 at 128,64) for the patches, with a rim
-		// brightening toward the edge, and drawn see-through
-		// (blended, not added light), turned to the camera.
+		// The bubble itself, as the original's (OneOffSpellSeed): Data/Spells/Meshes/O_Bibble_up.l3d, whose drawn part is
+		// a disc turned to the camera (FaceCamera) showing one of the 16 frames of its skin - a 4x4 sheet of a glassy
+		// sphere - stepping 18 frames a second (OneOffSpellSeed::UpdateFrame), drawn at SpellSeedAlpha (150 of 255).
 		// Never freed: as a static unique_ptr it was destroyed at exit, after bgfx had shut down, and bgfx::destroy
 		// crashed every quit and self-update restart (crash report 2026-10-18: textureDecRef from exit()).
 		static openblack::graphics::Texture2D* s_bubbleTexture = nullptr;
@@ -10067,46 +12180,30 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			try
 			{
 				auto& fs = Locator::filesystem::value();
-				auto stream = fs.GetData(fs.GetPath<openblack::filesystem::Path::Data>() / "Textures" / "ATMOS.RAW");
-				std::vector<uint8_t> rgb(256 * 256 * 3);
-				if (stream && stream->read(reinterpret_cast<char*>(rgb.data()), static_cast<std::streamsize>(rgb.size())))
+				const auto bytes = fs.ReadAll(fs.GetPath<openblack::filesystem::Path::Data>() / "Spells" / "Meshes" / "O_bibble_up.l3d");
+				openblack::l3d::L3DFile file;
+				if (file.Open(bytes) == openblack::l3d::L3DResult::Success && !file.GetSkins().empty())
 				{
-					constexpr int k_Side = 128;
+					const auto& skin = file.GetSkins().front();
+					constexpr int k_Side = openblack::l3d::L3DTexture::k_Width;
 					std::vector<uint8_t> pixels(static_cast<size_t>(k_Side * k_Side * 4));
-					auto tile = [&rgb](int x, int y) {
-						return static_cast<float>(rgb[static_cast<size_t>((y * 256 + x) * 3)]) / 255.0f;
-					};
-					for (int y = 0; y < k_Side; ++y)
+					for (size_t i = 0; i < skin.texels.size(); ++i)
 					{
-						for (int x = 0; x < k_Side; ++x)
-						{
-							const int tx = std::min(x / 2, 63);
-							const int ty = std::min(y / 2, 63);
-							const float cloud = tile(128 + tx, 64 + ty);
-							// ATMOS's ring sits halfway in, not at the edge: the rim comes from the distance out.
-							const float out = glm::distance(glm::vec2(x, y), glm::vec2(63.5f)) / 62.0f;
-							const float rim = glm::smoothstep(0.70f, 0.97f, out);
-							const glm::vec3 body(0.64f, 0.74f, 0.66f); // pale grey-green
-							auto colour = glm::mix(body, glm::vec3(cloud), 0.45f) + glm::vec3(rim * 0.30f);
-							const float warm =
-							    std::max(0.0f, 1.0f - glm::distance(glm::vec2(x, y), glm::vec2(40.0f, 70.0f)) / 34.0f);
-							colour += glm::vec3(0.18f, 0.06f, -0.02f) * warm;
-							const float inside = 1.0f - glm::smoothstep(0.97f, 1.0f, out);
-							// Half as opaque as it first showed (0.79 on average, the red channel read as alpha), 0.40;
-							// then half that again (Mike, 2026-10-18: still too opaque to see the miracle), 0.20.
-							const float alpha = std::clamp(0.22f + cloud * 0.15f + rim * 0.50f, 0.0f, 0.85f) * 0.45f * inside;
-							const auto i = static_cast<size_t>((y * k_Side + x) * 4);
-							pixels[i + 0] = static_cast<uint8_t>(std::clamp(colour.r, 0.0f, 1.0f) * 255.0f);
-							pixels[i + 1] = static_cast<uint8_t>(std::clamp(colour.g, 0.0f, 1.0f) * 255.0f);
-							pixels[i + 2] = static_cast<uint8_t>(std::clamp(colour.b, 0.0f, 1.0f) * 255.0f);
-							pixels[i + 3] = static_cast<uint8_t>(alpha * 255.0f);
-						}
+						const auto& texel = skin.texels[i];
+						pixels[i * 4 + 0] = static_cast<uint8_t>(texel.r * 17);
+						pixels[i * 4 + 1] = static_cast<uint8_t>(texel.g * 17);
+						pixels[i * 4 + 2] = static_cast<uint8_t>(texel.b * 17);
+						pixels[i * 4 + 3] = static_cast<uint8_t>(texel.a * 17);
 					}
 					s_bubbleTexture = new openblack::graphics::Texture2D("miracle bubble");
 					s_bubbleTexture->Create(k_Side, k_Side, 1, openblack::graphics::TextureFormat::RGBA8,
 					                        openblack::graphics::Wrapping::ClampEdge, openblack::graphics::Filter::Linear,
 					                        bgfx::copy(pixels.data(), static_cast<uint32_t>(pixels.size())));
-					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Miracle bubble texture made from ATMOS");
+					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Miracle bubble: the original's O_bibble_up.l3d flipbook");
+				}
+				else
+				{
+					SPDLOG_LOGGER_WARN(spdlog::get("game"), "Miracle bubble: O_bibble_up.l3d has no skin");
 				}
 			}
 			catch (const std::exception& e)
@@ -10148,17 +12245,28 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 				{
 					bubble = registry.Create();
 					auto& sprite = registry.Assign<openblack::ecs::components::Sprite>(
-					    bubble, s_bubbleTexture->GetNativeHandle(), glm::vec2(0.0f), glm::vec2(1.0f), glm::vec4(1.0f));
+					    bubble, s_bubbleTexture->GetNativeHandle(), glm::vec2(0.0f), glm::vec2(0.25f),
+					    glm::vec4(1.0f, 1.0f, 1.0f, 150.0f / 255.0f));
 					sprite.darkens = true; // blended over what is behind, not added light
 					// Its alpha is the circle: read as one channel (red), the whole square showed (Mike, 2026-10-18).
 					sprite.fullColour = true;
 					registry.Assign<Transform>(bubble, centre, glm::mat3(1.0f), glm::vec3(2.0f * k_BubbleRadius));
 				}
+				// Its frame of the sheet: 18 a second, round all 16 (each sphere as the original's, from the same clock).
+				const int frame = static_cast<int>(std::fmod(s_clock * 18.0, 16.0));
+				auto& sprite = registry.Get<openblack::ecs::components::Sprite>(bubble);
+				// The part of the frame the original's disc shows: 0.016 to 0.242 across, 0.012 to 0.238 down.
+				sprite.uvMin = glm::vec2(static_cast<float>(frame % 4), static_cast<float>(frame / 4)) * 0.25f + glm::vec2(0.016f, 0.012f);
+				sprite.uvExtent = glm::vec2(0.226f);
 				auto& transform = registry.Get<Transform>(bubble);
 				// In front of everything inside: the icon reaches 1.2 radii from the centre, and at 0.6 the cornucopia's
 				// near end came through the bubble (Mike, 2026-10-18).
-				transform.position = centre + toCamera * (k_BubbleRadius * 2.2f);
-				transform.scale = glm::vec3(2.2f * k_BubbleRadius);
+				// Drawn nearer the camera by its radius twice over (OneOffSpellSeed::Draw, Object::GetRadius), the disc
+				// at its own size.
+				// Along its own line to the eye (OneOffSpellSeed::Draw: camera less centre), not the camera's view: the
+				// view's direction slid the bubbles off their contents away from the middle of the screen.
+				transform.position = centre + glm::normalize(camera.GetOrigin() - centre) * (2.0f * k_BubbleRadius);
+				transform.scale = glm::vec3(k_BubbleDiscRadius);
 			}
 		}
 	}
@@ -10495,32 +12603,35 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 
 	UpdateCameraPath(seconds);
 
-	// Grain fields grow back, from empty to full over a day of the game's clock (Mike, 2026-10-18), and their wheat
-	// stands as tall as the share of grain left: flattened to stubble when empty. By the hours the clock moved, so a
-	// script's MOVE_GAME_TIME grows them too; a clock set back grows nothing.
+	// Grain fields: sown by farmers, grown as the original grows them, harvested; an emptied field shows nothing.
 	{
-		static float s_lastHour = -1.0f;
-		float hours = 0.0f;
-		if (s_lastHour >= 0.0f)
-		{
-			hours = g_gameHour - s_lastHour;
-			if (hours < -12.0f)
-			{
-				hours += 24.0f; // past midnight
-			}
-			hours = std::max(hours, 0.0f);
-		}
-		s_lastHour = g_gameHour;
-		static constexpr float k_HoursToGrow = 24.0f;
 		static constexpr float k_Stubble = 0.05f; // the wheat's height left on an empty field
+		// Field::Process, every 10 game turns: a field all sown grows - by twice its sun effect, the growing one till
+		// ripe (ageGrowth), the ripening one after (no rain in the port yet; the land's alignment, the original's
+		// (alignment / 2 + 1) factor, counts 0) - and fills with food as it grows, its totalFoodInField at ageRecolt.
+		static float s_fieldClock = 0.0f;
+		s_fieldClock += seconds;
+		const bool growTurn = s_fieldClock >= 1.0f;
+		if (growTurn)
+		{
+			s_fieldClock -= 1.0f;
+		}
 		registry.Each<openblack::ecs::components::Field, Transform>(
-		    [hours, &registry](entt::entity entity, openblack::ecs::components::Field& field, Transform& transform) {
+		    [&registry, growTurn](entt::entity entity, openblack::ecs::components::Field& field, Transform& transform) {
 			    if (field.capacity <= 0.0f)
 			    {
 				    return;
 			    }
-			    field.grain = std::min(field.grain + field.capacity * hours / k_HoursToGrow, field.capacity);
-			    transform.scale.y = std::max(field.grain / field.capacity, k_Stubble) * transform.scale.x;
+			    const auto& type = Locator::infoConstants::value().fieldType.at(field.fieldType);
+			    if (growTurn && static_cast<float>(field.crops) >= type.timesToSow && field.growth < type.ageRecolt)
+			    {
+				    const float amount = 2.0f * (field.growth < type.ageGrowth ? type.effectSunWhenGrowing : type.effectSunWhenRipening);
+				    field.growth += amount;
+				    field.grain = std::min(field.grain + amount * type.totalFoodInField / std::max(type.ageRecolt, 1.0f), field.capacity);
+			    }
+			    // The wheat stands as tall as it has grown (sown, it is stubble).
+			    const float tall = type.ageRecolt > 0.0f && static_cast<float>(field.crops) >= type.timesToSow ? field.growth / type.ageRecolt : 0.0f;
+			    transform.scale.y = std::max(std::min(tall, field.grain / field.capacity + 0.05f), k_Stubble) * transform.scale.x;
 			    // Empty, nothing of it shows, as in the original (Mike, 2026-10-18): left out like a far-off thing.
 			    if (field.grain < 1.0f)
 			    {
@@ -10816,6 +12927,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		}
 		auto& velocity = it->second;
 		velocity.y -= k_Gravity * seconds;
+		velocity -= AirDrag(entity) * glm::length(velocity) * velocity * seconds;
 		auto position = transform->position + velocity * seconds;
 		const float ground = SeabedAt(glm::vec2(position.x, position.z)); // the sea's bed out at sea
 		const auto pedestal = IsGateTotem(entity) ? PedestalUnder(position) : std::nullopt;
@@ -11035,7 +13147,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			g_fallenDead.insert(it->first);
 			if (auto* villager = registry.TryGet<openblack::ecs::components::Villager>(entity))
 			{
-				villager->health = 0;
+				villager->life = 0.0f;
 				g_scriptAnimations[it->first] = {static_cast<uint32_t>(AnimId::PDeadDrowned), std::numeric_limits<float>::max()};
 			}
 			else
@@ -11719,25 +13831,43 @@ void UpdateSnapshot() // 238 UPDATE_SNAPSHOT
 	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
+namespace
+{
+// A reward chest of `reward` at `position` for `town` (0: the nearest), falling from the sky if asked (Reward::Create).
+uint32_t MakeReward(int reward, const glm::vec3& position, uint32_t town, bool fromSky)
+{
+	const auto entity = CreateScriptObject(ObjectType::Reward, static_cast<uint32_t>(std::max(reward, 0)), position, 0.0f, 0.0f,
+	                                       Locator::rng::value().NextValue(0.0f, glm::two_pi<float>()), 0.0f, 1.0f);
+	const auto id = static_cast<uint32_t>(entity);
+	if (auto chest = g_rewards.find(id); chest != g_rewards.end())
+	{
+		chest->second.town = town;
+		if (fromSky)
+		{
+			constexpr float k_SkyHeight = 40.0f;
+			chest->second.falling = k_SkyHeight;
+			Locator::entitiesRegistry::value().Get<Transform>(entity).position.y += k_SkyHeight;
+		}
+	}
+	return id;
+}
+} // namespace
+
 void CreateReward() // 239 CREATE_REWARD
 {
-	[[maybe_unused]] const auto fromSky = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto reward = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto fromSky = static_cast<bool>(Pop().intVal);
+	const auto position = PopVec();
+	const auto reward = Pop().intVal;
+	Pusho(MakeReward(reward, position, 0, fromSky));
 }
 
 void CreateRewardInTown() // 240 CREATE_REWARD_IN_TOWN
 {
-	[[maybe_unused]] const auto fromSky = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto town = Pop().uintVal;
-	[[maybe_unused]] const auto reward = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pusho(0);
+	const auto fromSky = static_cast<bool>(Pop().intVal);
+	const auto position = PopVec();
+	const auto town = Pop().uintVal;
+	const auto reward = Pop().intVal;
+	Pusho(MakeReward(reward, position, town, fromSky));
 }
 
 void SetFade() // 241 SET_FADE
@@ -11797,10 +13927,18 @@ void BeliefForPlayer() // 247 BELIEF_FOR_PLAYER
 
 void GetHelp() // 248 GET_HELP
 {
-	[[maybe_unused]] const auto object = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushf(0.0f);
+	const auto object = Pop().uintVal;
+	// A reward's help text (its info.dat helpTextEnum, said by displayrewardhelp once it is opened); nothing else yet.
+	float help = 0.0f;
+	if (const auto chest = g_rewards.find(object); chest != g_rewards.end())
+	{
+		const auto& infos = Locator::infoConstants::value().reward;
+		if (static_cast<size_t>(chest->second.type) < infos.size())
+		{
+			help = static_cast<float>(static_cast<int>(infos.at(static_cast<size_t>(chest->second.type)).helpTextEnum));
+		}
+	}
+	Pushf(help);
 }
 
 void SetLeashWorks() // 249 SET_LEASH_WORKS
@@ -14453,7 +16591,7 @@ bool SaveTestPoint(int slot)
 		}
 		if (const auto* villager = registry.TryGet<Villager>(entity))
 		{
-			out << fmt::format("villager {} {} {}\n", id, villager->age, villager->health);
+			out << fmt::format("villager {} {} {}\n", id, villager->age, villager->life);
 		}
 		if (const auto* move = registry.TryGet<ScriptMove>(entity))
 		{
@@ -14478,6 +16616,10 @@ bool SaveTestPoint(int slot)
 	}
 	for (const auto& [id, flock] : g_flocks)
 	{
+		if (g_dances.contains(id))
+		{
+			continue; // a dance isn't saved: loaded, its dancers would be held in it for ever
+		}
 		out << fmt::format("flock {} {}", id, flock.leader);
 		for (const auto member : flock.members)
 		{
@@ -14571,6 +16713,7 @@ bool LoadTestPoint(int slot)
 	g_scriptMoves.clear();
 	g_flying.clear();
 	g_flocks.clear();
+	g_dances.clear();
 	g_objectProperties.clear();
 	g_scriptAnimations.clear();
 	g_creatureOrders.clear();
@@ -14578,6 +16721,8 @@ bool LoadTestPoint(int slot)
 	EndCameraPath();
 	g_creatureHomes.clear();
 	g_creaturePlaying.clear();
+	g_creatureLastPosition.clear();
+	g_creatureGait.clear();
 	g_interactionMagnitude.clear();
 	EndCreatureInteraction();
 	g_timers.clear();
@@ -14754,12 +16899,13 @@ bool LoadTestPoint(int slot)
 		}
 		else if (kind == "villager")
 		{
-			uint32_t age, health;
-			fields >> id >> age >> health;
+			uint32_t age;
+			float life;
+			fields >> id >> age >> life;
 			if (auto* villager = registry.TryGet<Villager>(static_cast<entt::entity>(id)))
 			{
 				villager->age = age;
-				villager->health = health;
+				villager->life = life > 1.0f ? life / 100.0f : life; // saves before 2026-10-19 kept 0-100
 				villager->lifeStage = age < 18 ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
 			}
 		}

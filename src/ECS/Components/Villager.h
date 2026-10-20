@@ -64,9 +64,11 @@ struct Villager
 
 	using Type = std::tuple<Tribe, Villager::LifeStage, Villager::Sex, VillagerNumber>;
 
-	uint32_t health;
+	// Life and food as the original keeps them (bw1-decomp's Villager): 0-1. Life is worn down by what a villager does
+	// (each state's LifeReductionPerTurn in info.dat) and by hurts, and rested back up at home; food 1 is fed.
+	float life;
 	uint32_t age;
-	uint32_t hunger;
+	float food;
 	LifeStage lifeStage;
 	Sex sex;
 	Tribe tribe;
@@ -74,5 +76,6 @@ struct Villager
 	Task task;
 	entt::entity town;
 	entt::entity abode;
+	uint16_t foodHeld = 0; // food carried to eat (the original's ResourceHeld[FOOD])
 };
 } // namespace openblack::ecs::components

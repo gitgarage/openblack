@@ -55,6 +55,10 @@ public:
 	/// run 2.46, 0 for animations done on the spot). Unconfirmed from the original's code; inferred from
 	/// the values across the locomotion animations.
 	[[nodiscard]] float GetDistancePerPlay() const noexcept { return _unknown_0x28; }
+	/// The header's words at 0x20 and 0x50 (bw1-decomp's LH3DAnim: 0x50 holds the flags, cyclic 0x100 and time-based
+	/// 0x200 - a walk not time-based is played by the distance walked), for inspection.
+	[[nodiscard]] uint32_t GetHeaderWord20() const noexcept { return _unknown_0x20; }
+	[[nodiscard]] uint32_t GetHeaderWord50() const noexcept { return _unknown_0x50; }
 	/// The header's undecoded floats at 0x24..0x34, for inspection.
 	[[nodiscard]] std::array<float, 5> GetHeaderFloats() const noexcept
 	{

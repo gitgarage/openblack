@@ -703,7 +703,8 @@ bool Gui::ShowMenu() noexcept
 
 		// The leash's state beside the frame rate: off, on (and which kind), or tied to something...
 		// ...and the play speed (the stick presses' x1/8 to x8).
-		const float playSpeed = Game::Instance() != nullptr ? Game::Instance()->GetPlaySpeed() : 1.0f;
+		// Shown against normal play, which is secretly 1.6 times the clock (Mike, 2026-10-19): normal reads x1.
+		const float playSpeed = Game::Instance() != nullptr ? Game::Instance()->GetShownPlaySpeed() : 1.0f;
 		const auto status = fmt::format("{}   Speed x{:g}   {:.2f} FPS ({:.2f} ms)", chlapi::LeashStatus(), playSpeed,
 		                                ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);
 		ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(status.c_str()).x - 16.0f);
@@ -940,7 +941,7 @@ void Gui::ShowVillagerNames() noexcept
 		    const std::string name = "Villager #" + std::to_string(i);
 		    const std::string stateHelpText = "TODO: STATE HELP TEXT";
 		    std::string details =
-		        fmt::format("{}\nA:{} L:{}%, H:{}%", stateHelpText, villager.age, villager.health, villager.hunger);
+		        fmt::format("{}\nA:{} L:{:.0f}%, F:{:.0f}%", stateHelpText, villager.age, villager.life * 100.0f, villager.food * 100.0f);
 		    const auto& actionSystem = Locator::livingActionSystem::value();
 		    if (config.debugVillagerStates)
 		    {
@@ -968,9 +969,9 @@ void Gui::ShowVillagerNames() noexcept
 				    {
 					    ImGui::Text("Homeless");
 				    }
-				    ImGui::InputInt("Health", reinterpret_cast<int*>(&villager.health));
+				    ImGui::SliderFloat("Life", &villager.life, 0.0f, 1.0f);
 				    ImGui::InputInt("Age", reinterpret_cast<int*>(&villager.age));
-				    ImGui::InputInt("Hunger", reinterpret_cast<int*>(&villager.hunger));
+				    ImGui::SliderFloat("Food", &villager.food, 0.0f, 1.0f);
 				    ImGui::Combo("Life Stage", &villager.lifeStage, Villager::k_LifeStageStrs);
 				    ImGui::Combo("Sex", &villager.sex, Villager::k_SexStrs);
 				    ImGui::Combo("Tribe", &villager.tribe, k_TribeStrs);

@@ -12,6 +12,7 @@
 #include <bgfx/bgfx.h>
 
 #include "HandPoses.h"
+#include "PSys/PSys.h"
 
 #include <cstdlib>
 #include <string>
@@ -297,10 +298,10 @@ bool Game::ProcessEvents(const SDL_Event& event) noexcept
 
 void Game::ChangePlaySpeed(float factor)
 {
-	constexpr float k_Slowest = 0.125f;
-	constexpr float k_Fastest = 8.0f;
+	constexpr float k_Slowest = k_NormalPlaySpeed / 8.0f;
+	constexpr float k_Fastest = k_NormalPlaySpeed * 8.0f;
 	_playSpeed = std::clamp(_playSpeed * factor, k_Slowest, k_Fastest);
-	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Play speed x{}", _playSpeed);
+	SPDLOG_LOGGER_INFO(spdlog::get("game"), "Play speed x{} (clock x{})", _playSpeed / k_NormalPlaySpeed, _playSpeed);
 }
 
 bool Game::GameLogicLoop() noexcept
@@ -563,6 +564,7 @@ bool Game::Update() noexcept
 	}
 
 	// Update Uniforms
+	static glm::vec2 s_handScreen(0.5f); // where the hand is on the screen, 0-1 (for its lean, below)
 	{
 		auto profilerScopedUpdateUniforms = profiler.BeginScoped(Profiler::Stage::UpdateUniforms);
 
@@ -580,6 +582,7 @@ bool Game::Update() noexcept
 				const auto demoHand = chlapi::UpdateHandDemo();
 				const glm::vec2 handScreen =
 				    demoHand ? *demoHand : static_cast<glm::vec2>(_mousePosition) / static_cast<glm::vec2>(screenSize);
+				s_handScreen = handScreen;
 				camera.DeprojectScreenToWorld(handScreen, rayOrigin, rayDirection);
 				auto& dynamicsSystem = Locator::dynamicsSystem::value();
 
@@ -783,7 +786,9 @@ bool Game::Update() noexcept
 				{
 					s_handScale = handTransform.scale;
 				}
-				handTransform.scale = chlapi::InCutscene() ? glm::vec3(0.0f) : s_handScale;
+				// (Not with a test pose held up to look at: OPENBLACK_TEST_HAND_POSE, below.)
+				static const bool s_testPose = std::getenv("OPENBLACK_TEST_HAND_POSE") != nullptr;
+				handTransform.scale = chlapi::InCutscene() && !s_testPose ? glm::vec3(0.0f) : s_handScale;
 			}
 			// The hand's pose, from the original's hand pose file: closed round what it holds, reaching over
 			// what it could take. OPENBLACK_TEST_HAND_POSE=<name>:<frame> holds one pose, to look at.
@@ -803,20 +808,92 @@ bool Game::Update() noexcept
 					poseFrame = colon == std::string_view::npos ? 0.0f : std::stof(std::string(test.substr(colon + 1)));
 					// ...in front of the camera, where it can be seen without a mouse in the window.
 					auto& handTransform = registry.Get<ecs::components::Transform>(handEntity);
-					handTransform.position = camera.GetOrigin() + camera.GetForward() * 12.0f;
-					handTransform.rotation = glm::eulerAngleY(camera.GetRotation().y) * glm::eulerAngleX(glm::radians(90.0f));
+					// OPENBLACK_TEST_HAND_TURN=<x>,<y>,<z> degrees turns it some other way than lying flat.
+					static const char* s_turnText = std::getenv("OPENBLACK_TEST_HAND_TURN");
+					glm::vec3 turn(90.0f, 0.0f, 0.0f);
+					if (s_turnText != nullptr)
+					{
+						std::sscanf(s_turnText, "%f,%f,%f", &turn.x, &turn.y, &turn.z);
+					}
+					handTransform.position = camera.GetOrigin() + camera.GetForward() * 7.0f;
+					handTransform.rotation = glm::eulerAngleY(camera.GetRotation().y) *
+					                         glm::eulerAngleXYZ(glm::radians(turn.x), glm::radians(turn.y), glm::radians(turn.z));
 				}
 				else if (chlapi::HandHolding())
 				{
-					poseName = chlapi::k_HandHoldPose;
-					poseFrame = static_cast<float>(handposes::FrameCount(poseName) - 1);
+					poseName = chlapi::k_HandHoldPose; // held still (below)
 				}
 				else if (chlapi::HandObjectUnder() != 0)
 				{
 					poseName = "can_pickup";
 				}
+				else
+				{
+					poseName = "wiggle"; // the original's hand at rest: its fingers wiggling
+				}
+				// Played over its own length (the original's CHand runs its animation's clock, CycleTime), from its
+				// start each time the pose changes.
+				static std::string s_playing;
+				static auto s_since = std::chrono::steady_clock::now();
+				if (s_testPose == nullptr)
+				{
+					const auto now = std::chrono::steady_clock::now();
+					if (poseName != s_playing)
+					{
+						s_playing = poseName;
+						s_since = now;
+					}
+					poseFrame = poseName.empty() ? 0.0f
+					                             : handposes::FrameAt(poseName, std::chrono::duration<float>(now - s_since).count());
+					if (chlapi::HandHolding())
+					{
+						poseFrame = chlapi::HandHoldOpenness() * static_cast<float>(handposes::FrameCount(poseName)) / 2.0f;
+					}
+				}
 				const auto& handMesh = *Locator::resources::value().GetMeshes().Handle(ecs::components::Hand::k_MeshId);
-				auto pose = poseName.empty() ? std::vector<glm::mat4> {} : handposes::LocalBones(handMesh, poseName, poseFrame);
+				// It leans as it moves, as the original's (CHand::PrepareForDrawing, HandStateNormal::Update): a point
+				// trails the hand across the screen on a spring - pulled toward it at 20 a second squared, its speed
+				// kept by 0.03 each second, never more than 80 pixels behind - and how far behind it is plays the
+				// pose's "_lr" and "_fb" layers. The original's pixels; this screen is taken as 1920 by 1080 of them (the laptop's, where it was measured).
+				static const glm::vec2 k_OriginalScreen(1920.0f, 1080.0f);
+				static glm::vec2 s_trail(-1.0f);
+				static glm::vec2 s_trailSpeed(0.0f);
+				static auto s_lastLean = std::chrono::steady_clock::now();
+				const auto leanNow = std::chrono::steady_clock::now();
+				const float leanSeconds = std::min(std::chrono::duration<float>(leanNow - s_lastLean).count(), 0.1f);
+				s_lastLean = leanNow;
+				const glm::vec2 pointer = s_handScreen * k_OriginalScreen;
+				if (s_trail.x < 0.0f)
+				{
+					s_trail = pointer;
+				}
+				s_trail += s_trailSpeed * leanSeconds;
+				s_trail = glm::clamp(s_trail, pointer - glm::vec2(80.0f), pointer + glm::vec2(80.0f));
+				s_trailSpeed = (s_trailSpeed + (pointer - s_trail) * 20.0f * leanSeconds) * std::pow(0.03f, leanSeconds);
+				const glm::vec2 lean(s_trail.x - pointer.x, pointer.y - s_trail.y);
+				auto pose = poseName.empty()     ? std::vector<glm::mat4> {}
+				            : s_testPose != nullptr ? handposes::LocalBones(handMesh, poseName, poseFrame)
+				                                    : handposes::LeaningBones(handMesh, poseName, poseFrame, lean);
+				// Held things are held beside the hand, between thumb and forefinger (hold_side), and hang under the
+				// pointer (HandCarry): the hand moves aside so that grip is over them, as the original puts the hand
+				// where its grip meets what it holds (ObtainRequiredHandPosition). The grip: midway between the
+				// thumb's tip (bone 21) and the forefinger's (19).
+				constexpr size_t k_ThumbTip = 21;
+				constexpr size_t k_ForefingerTip = 19;
+				if (chlapi::HandHolding() && s_testPose == nullptr && pose.size() > k_ThumbTip)
+				{
+					const auto& parents = handMesh.GetBoneParents();
+					std::vector<glm::mat4> model(pose.size());
+					for (size_t i = 0; i < pose.size(); ++i)
+					{
+						model[i] = parents[i] != std::numeric_limits<uint32_t>::max() ? model[parents[i]] * pose[i] : pose[i];
+					}
+					const glm::vec3 grip = 0.5f * (glm::vec3(model[k_ThumbTip][3]) + glm::vec3(model[k_ForefingerTip][3]));
+					auto& handTransform = registry.Get<ecs::components::Transform>(handEntity);
+					const glm::vec3 gripOffset = handTransform.rotation * (handTransform.scale * grip);
+					handTransform.position.x = intersectionTransform.position.x - gripOffset.x;
+					handTransform.position.z = intersectionTransform.position.z - gripOffset.z;
+				}
 				if (pose.empty())
 				{
 					registry.Remove<ecs::components::Animated>(handEntity);
@@ -1248,6 +1325,285 @@ bool Game::Initialize() noexcept
 		// OPENBLACK_DUMP_BELIEF=1: the original's belief and impressiveness numbers from info.dat, then quit - for
 		// building town conversion on the game's own values.
 		// OPENBLACK_DUMP_CREATURE=1: info.dat's creature entries (ages, and the 416 bytes not yet named) as floats, then quit.
+		// OPENBLACK_DUMP_VILLAGER=1: info.dat's villager-life numbers (state life drain, home/sleep thresholds, the town's
+		// bed time and the sleep desire's trigger), then quit - for the original's villager life (bw1-decomp).
+		// OPENBLACK_DUMP_POSES=<file in Data/CTR>: each creature animation's CBN header (duration ms, movement).
+		if (const char* posesFile = std::getenv("OPENBLACK_DUMP_POSES"); posesFile != nullptr)
+		{
+			morphposes::Poses poses;
+			morphposes::Load(Locator::filesystem::value().GetPath<filesystem::Path::Data>() / "CTR" / posesFile, "Creature", poses);
+			for (const auto& [name, pose] : poses)
+			{
+				const auto& h = pose.header;
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "POSE {} ms={} f4={} f8={:.3f} fc={:.3f} move=({:.3f},{:.3f},{:.3f}) frames={}/{}",
+				                   name, h.unknown0x0, h.unknown0x4, h.unknown0x8, h.unknown0xc, h.unknown0x10, h.unknown0x14,
+				                   h.unknown0x18, h.frameCount, pose.keyframes.size());
+			}
+			// ...and with OPENBLACK_DUMP_POSES_SPECIES=<CreatureType>, its base mesh's bones in the model at rest and in
+			// stand and walk, posed the old way (LocalBones) and the original's (CreatureBones): BONE lines to draw.
+			if (const char* speciesText = std::getenv("OPENBLACK_DUMP_POSES_SPECIES"); speciesText != nullptr)
+			{
+				const auto meshId = creature::GetIdFromType(static_cast<CreatureType>(std::atoi(speciesText)),
+				                                            creature::CreatureBody::Appearance::Base);
+				const auto& meshes = Locator::resources::value().GetMeshes();
+				if (meshes.Contains(meshId))
+				{
+					const auto& mesh = *meshes.Handle(meshId);
+					const auto& parents = mesh.GetBoneParents();
+					const auto stand = poses.find("stand");
+					auto dump = [&](const char* method, const std::string& name, int frame, std::vector<glm::mat4> local) {
+						for (size_t i = 0; i < local.size(); ++i)
+						{
+							if (parents[i] != std::numeric_limits<uint32_t>::max())
+							{
+								local[i] = local[parents[i]] * local[i];
+							}
+							SPDLOG_LOGGER_INFO(spdlog::get("game"), "BONE {} {} {} {} {} {:.3f} {:.3f} {:.3f}", method, name, frame, i,
+							                   static_cast<int32_t>(parents[i]), local[i][3].x, local[i][3].y, local[i][3].z);
+						}
+					};
+					dump("rest", "rest", 0, [&] {
+						auto local = mesh.GetBoneMatrices();
+						for (size_t i = local.size(); i-- > 0;)
+						{
+							if (parents[i] != std::numeric_limits<uint32_t>::max())
+							{
+								local[i] = glm::inverse(mesh.GetBoneMatrices()[parents[i]]) * local[i];
+							}
+						}
+						return local;
+					}());
+					if (const auto walk = poses.find("walk"); walk != poses.end() && stand != poses.end())
+					{
+						for (const int percent : {25, 50, 75})
+						{
+							const float w = static_cast<float>(percent) / 100.0f;
+							dump("blend", fmt::format("w{}", percent), 3,
+							     morphposes::BlendedCreatureBones(mesh, {{&stand->second, 0.0f, 1.0f - w}, {&walk->second, 3.0f, w}},
+							                                      &stand->second));
+						}
+					}
+					for (const char* name : {"stand", "walk", "run"})
+					{
+						const auto pose = poses.find(name);
+						if (pose == poses.end())
+						{
+							continue;
+						}
+						for (int frame = 0; frame < static_cast<int>(pose->second.keyframes.size()); ++frame)
+						{
+							dump("old", name, frame, morphposes::LocalBones(mesh, pose->second, static_cast<float>(frame), true));
+							dump("new", name, frame,
+							     morphposes::CreatureBones(mesh, pose->second, static_cast<float>(frame),
+							                               stand != poses.end() ? &stand->second : nullptr));
+						}
+					}
+				}
+			}
+		}
+		// OPENBLACK_DUMP_HAND_POSES=1: the hand's bones in every pose of Data/CTR/hh.HBN, at its first and last frames,
+		// posed the old way (LocalBones) and the original's (CreatureBones): BONE lines to draw.
+		if (std::getenv("OPENBLACK_DUMP_HAND_POSES") != nullptr)
+		{
+			morphposes::Poses poses;
+			morphposes::Load(Locator::filesystem::value().GetPath<filesystem::Path::Data>() / "CTR" / "hh.HBN", "Hand", poses);
+			const auto& mesh = *Locator::resources::value().GetMeshes().Handle(ecs::components::Hand::k_MeshId);
+			const auto& parents = mesh.GetBoneParents();
+			auto dump = [&](const char* method, const std::string& name, int frame, std::vector<glm::mat4> local) {
+				for (size_t i = 0; i < local.size(); ++i)
+				{
+					if (parents[i] != std::numeric_limits<uint32_t>::max())
+					{
+						local[i] = local[parents[i]] * local[i];
+					}
+					SPDLOG_LOGGER_INFO(spdlog::get("game"), "BONE {} {} {} {} {} {:.3f} {:.3f} {:.3f}", method, name, frame, i,
+					                   static_cast<int32_t>(parents[i]), local[i][3].x, local[i][3].y, local[i][3].z);
+				}
+				std::string bones;
+				for (size_t i = 0; i < local.size(); ++i)
+				{
+					bones += fmt::format("{}{} {} {} {} {} {} {} {} {} {} {} {}", i == 0 ? "" : " | ", local[i][0].x, local[i][0].y,
+					                     local[i][0].z, local[i][1].x, local[i][1].y, local[i][1].z, local[i][2].x, local[i][2].y,
+					                     local[i][2].z, local[i][3].x, local[i][3].y, local[i][3].z);
+				}
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "MAT {}:{}:{} bones={}", method, name, frame, bones);
+			};
+			// ...every pose between its frames, a tenth of a frame apart (OPENBLACK_DUMP_HAND_POSES=between).
+			if (std::string_view(std::getenv("OPENBLACK_DUMP_HAND_POSES")) == "between")
+			{
+				for (const auto& [name, pose] : poses)
+				{
+					for (int tenth = 0; tenth <= static_cast<int>(pose.keyframes.size() - 1) * 10; ++tenth)
+					{
+						dump("between", fmt::format("{}:{:.1f}", name, static_cast<float>(tenth) / 10.0f), tenth,
+						     handposes::LocalBones(mesh, name, static_cast<float>(tenth) / 10.0f));
+					}
+				}
+			}
+			// ...and every pose with lean layers, over a grid of leans (OPENBLACK_DUMP_HAND_POSES=lean).
+			if (std::string_view(std::getenv("OPENBLACK_DUMP_HAND_POSES")) == "lean")
+			{
+				for (const auto& [name, pose] : poses)
+				{
+					if (!poses.contains(name + "_lr") && !poses.contains(name + "_fb"))
+					{
+						continue;
+					}
+					for (int frame = 0; frame < static_cast<int>(pose.keyframes.size()); ++frame)
+					{
+						for (int lx = -80; lx <= 80; lx += 20)
+						{
+							for (int ly = -80; ly <= 80; ly += 20)
+							{
+								dump("lean", fmt::format("{}:{}:{}", name, lx, ly), frame,
+								     handposes::LeaningBones(mesh, name, static_cast<float>(frame), glm::vec2(lx, ly)));
+							}
+						}
+					}
+				}
+			}
+			for (int variant = 0; variant < 4; ++variant)
+			{
+				morphposes::Poses variantPoses;
+				morphposes::Load(Locator::filesystem::value().GetPath<filesystem::Path::Data>() / "CTR" / "hh.HBN", "Hand",
+				                 variantPoses, variant);
+				for (const auto& [name, pose] : variantPoses)
+				{
+					for (int frame = 0; frame < static_cast<int>(pose.keyframes.size()); ++frame)
+					{
+						dump(fmt::format("var{}", variant).c_str(), name, frame,
+						     morphposes::CreatureBones(mesh, pose, static_cast<float>(frame), nullptr));
+					}
+				}
+			}
+			for (const auto& [name, pose] : poses)
+			{
+				const auto& h = pose.header;
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "HANDPOSE {} ms={} cyclic={} frames={}", name, h.unknown0x0, h.unknown0x4,
+				                   pose.keyframes.size());
+				for (int frame = 0; frame < static_cast<int>(pose.keyframes.size()); ++frame)
+				{
+					dump("old", name, frame, morphposes::LocalBones(mesh, pose, static_cast<float>(frame), false));
+					dump("new", name, frame, morphposes::CreatureBones(mesh, pose, static_cast<float>(frame), nullptr));
+				}
+			}
+		}
+		// OPENBLACK_TEST_EFFECT=<name>: runs SF_<name> (magnitude 0.65) for 2 s, closes it down, runs it out, printing
+		// what it draws; and reads every on-holder effect, saying which of their classes are not run yet.
+		if (const char* effectName = std::getenv("OPENBLACK_TEST_EFFECT"); effectName != nullptr)
+		{
+			for (const char* other : {"WaterOnHolder", "FireBallOnHolder", "HealChakraOnHolder", "LightningStormOnHolder",
+			                          "LightningBoltOnHolder", "DefenseSphereOnHolder", "TeleportOnHolder"})
+			{
+				psys::EffectFile::Load(other);
+			}
+			psys::Effect effect(psys::EffectFile::Load(effectName));
+			effect.SetMagnitude(0.65f);
+			effect.SetOrigin(glm::vec3(100.0f, 10.0f, 200.0f));
+			std::vector<psys::Drawable> drawn;
+			for (int step = 0; step < 120 && !effect.Finished(); ++step)
+			{
+				if (step == 60)
+				{
+					effect.CloseDown();
+				}
+				effect.Update(1.0f / 30.0f);
+				drawn.clear();
+				effect.Collect(drawn);
+				if (step % 10 == 0 || step == 61)
+				{
+					for (const auto& d : drawn)
+					{
+						SPDLOG_LOGGER_INFO(spdlog::get("game"), "EFFECT {} t={:.2f} {} at ({:.2f},{:.2f},{:.2f}) radius {:.2f} ratio {:.1f} "
+						                   "colour ({:.2f},{:.2f},{:.2f},{:.2f}) frame {} {} uv ({:.3f},{:.3f}) offset ({:.2f},{:.2f}){}",
+						                   effectName, step / 30.0f, d.kind == psys::Drawable::Kind::Mist ? "mist" : "sprite", d.position.x,
+						                   d.position.y, d.position.z, d.radius, d.ratio, d.colour.r, d.colour.g, d.colour.b, d.colour.a,
+						                   d.frame, d.texture, d.uvMin.x, d.uvMin.y, d.screenOffset.x, d.screenOffset.y,
+						                   d.additive ? " additive" : "");
+					}
+					if (drawn.empty())
+					{
+						SPDLOG_LOGGER_INFO(spdlog::get("game"), "EFFECT {} t={:.2f} nothing drawn", effectName, step / 30.0f);
+					}
+				}
+			}
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "EFFECT {} finished: {}", effectName, effect.Finished());
+		}
+		// OPENBLACK_DUMP_SPELLSEEDS=1: each spell seed's model (info +0x140) and particle effect type (+0x174).
+		if (std::getenv("OPENBLACK_DUMP_SPELLSEEDS") != nullptr)
+		{
+			const auto& info = Locator::infoConstants::value();
+			for (size_t i = 0; i < info.spellSeed.size(); ++i)
+			{
+				const auto& seed = info.spellSeed[i];
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "SPELLSEED {} mesh {} particle {} (f0x134 {:.2f} f0x150 {:.2f} f0x154 {:.2f})", i,
+				                   seed.field0x130, seed.field0x164, seed.field0x134, seed.field0x150, seed.field0x154);
+			}
+		}
+		if (std::getenv("OPENBLACK_DUMP_VILLAGER") != nullptr)
+		{
+			const auto& info = Locator::infoConstants::value();
+			for (size_t i = 0; i < info.villagerStateTable.size(); i++)
+			{
+				const auto& state = info.villagerStateTable.at(i);
+				if (state.name[0] == '\0')
+				{
+					continue;
+				}
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "VSTATE {} {} drain {:.5f} checks {} hurtHome {} worship {} final {} speedId {} anim {}", i,
+				                   state.name.data(), state.field0xf8, state.field0xe4, state.field0xe8, state.field0xd8, state.isFinalState,
+				                   state.field0x24, state.field0x0);
+			}
+			for (size_t i = 0; i < info.villager.size(); i++)
+			{
+				const auto& v = info.villager.at(i);
+				SPDLOG_LOGGER_INFO(spdlog::get("game"),
+				                   "VINFO {} tribe {} number {} life {:.3f} goHome {:.3f} sleepUntil {:.3f} restTime {} restBy {:.4f} hungry {:.3f} "
+				                   "starving {:.3f} ownDesire {:.3f} waitAtHome {}",
+				                   i, static_cast<int>(v.tribeType), static_cast<int>(v.villagerNumber), v.life, v.damageThresholdToGoHome,
+				                   v.damageThresholdToSleepUntil, v.restAtHomeTime, v.restAtHomeRestoresLifeBy, v.hungryForFood, v.starvingForFood,
+				                   v.ownDesireThreshold, v.waitAtHome);
+				const auto& sp = v.speedGroup;
+				SPDLOG_LOGGER_INFO(spdlog::get("game"),
+				                   "VSPEED {} speeds {} {} {} {} {} {} (m/s x100/65536) townNeeds base {:.3f} div {:.3f} fullWood {:.3f} fullFood {:.3f} "
+				                   "walksWounded {:.3f} crawls {:.3f} foodPowerup {:.3f} maxWood {} maxFood {}",
+				                   i, static_cast<uint32_t>(sp.speedDefault), static_cast<uint32_t>(sp.speedFleeing), static_cast<uint32_t>(sp.speed2),
+				                   static_cast<uint32_t>(sp.speed3), static_cast<uint32_t>(sp.speed4), static_cast<uint32_t>(sp.speed5),
+				                   v.baseForTownNeedsSpeedMod, v.divisorForTownNeedsSpeedMod, v.speedModWhenFullLoadOfWood, v.speedModWhenFullLoadOfFood,
+				                   v.lifeWhenWalksWounded, v.lifeWhenCrawlsWounded, v.foodPowerupIncrease, v.maxWoodCarried, v.maxFoodCarried);
+			}
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "TOWN bedTimeMod {:.3f} relaxationMod {:.3f} maxForTimeWillWorkUntil {:.3f} foodWanted {:.3f} beliefSpeed {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} mp {:.3f}",
+			                   info.town.bedTimeMod, info.town.relaxationMod, info.town.maxForTimeWillWorkUntil, info.town.foodWantedMultiplier,
+			                   info.town.beliefSpeedScaleStory[0], info.town.beliefSpeedScaleStory[1], info.town.beliefSpeedScaleStory[2],
+			                   info.town.beliefSpeedScaleStory[3], info.town.beliefSpeedScaleStory[4], info.town.beliefSpeedScaleStory[5],
+			                   info.town.beliefSpeedScaleMultiPlayer);
+			for (size_t i = 0; i < info.townDesire.size(); i++)
+			{
+				const auto& d = info.townDesire.at(i);
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "TDESIRE {} trigger {:.3f} emergency {:.3f} tribe {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}", i,
+				                   d.desireTriggersVillagerAction, d.desireTriggersVillagerEmergencyAction, d.tribeMultiplier[0], d.tribeMultiplier[1],
+				                   d.tribeMultiplier[2], d.tribeMultiplier[3], d.tribeMultiplier[4], d.tribeMultiplier[5], d.tribeMultiplier[6],
+				                   d.tribeMultiplier[7], d.tribeMultiplier[8]);
+			}
+			for (size_t i = 0; i < info.speedThreshold.size(); i++)
+			{
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "VTHRESH {} walk max {} run max {}", i, static_cast<uint32_t>(info.speedThreshold[i].speedMaxWalk),
+				                   static_cast<uint32_t>(info.speedThreshold[i].speedMaxRun));
+			}
+			auto& animations = Locator::resources::value().GetAnimations();
+			for (uint32_t a = 200; a < 450; a++)
+			{
+				const auto id = resources::HashIdentifier(a);
+				if (!animations.Contains(id))
+				{
+					continue;
+				}
+				const auto h = animations.Handle(id);
+				SPDLOG_LOGGER_INFO(spdlog::get("game"), "VANIM {} {} duration {} distance {:.3f} frames {} w20 {:#x} w50 {:#x}", a, h->GetName().c_str(),
+				                   h->GetDuration(), h->GetDistancePerPlay(), h->GetFrames().size(), h->GetHeaderWord20(), h->GetHeaderWord50());
+			}
+			std::exit(0);
+		}
 		if (std::getenv("OPENBLACK_DUMP_CREATURE") != nullptr)
 		{
 			const auto& info = Locator::infoConstants::value();

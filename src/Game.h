@@ -94,6 +94,8 @@ public:
 	// scripts' clock.
 	void ChangePlaySpeed(float factor);
 	[[nodiscard]] float GetPlaySpeed() const { return _playSpeed; }
+	// The speed as shown: against normal play, so normal reads x1.
+	[[nodiscard]] float GetShownPlaySpeed() const { return _playSpeed / k_NormalPlaySpeed; }
 
 	[[nodiscard]] uint32_t GetTurn() const { return _turnCount; }
 	[[nodiscard]] bool IsPaused() const { return _paused; }
@@ -117,7 +119,10 @@ private:
 	static constexpr int k_MaxTurnsPerFrame = 8;
 	std::chrono::steady_clock::duration _turnDeltaTime;
 	float _gameSpeedMultiplier {1.0f};
-	float _playSpeed {1.0f};
+	// Normal play runs at 1.6 times the 100 ms game turn (Mike, 2026-10-19: x1 looked slow and choppy, x2 a little fast,
+	// 1.6 about right); the speed steps double and halve from there.
+	static constexpr float k_NormalPlaySpeed = 1.6f;
+	float _playSpeed {k_NormalPlaySpeed};
 	uint32_t _frameCount {0};
 	uint32_t _turnCount {0};
 	bool _paused {false}; // running from the start (Mike, 2026-10-18); + (P) pauses

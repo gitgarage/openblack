@@ -40,8 +40,9 @@ entt::entity VillagerArchetype::Create([[maybe_unused]] const glm::vec3& abodePo
 
 	registry.Assign<Transform>(entity, position, glm::eulerAngleY(glm::radians(180.0f)), glm::vec3(1.0));
 	registry.Assign<Mobile>(entity);
-	const uint32_t health = 100;
-	const uint32_t hunger = 100;
+	const float life = info.life;
+	// Villager::Villager: fed to a random point above hungry (bw1-decomp).
+	const float food = std::min(Locator::rng::value().NextValue(0.0f, 0.6f) + info.hungryForFood, 1.0f);
 
 	const auto lifeStage = age < 18 ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
 	const auto sex = info.villagerNumber == VillagerNumber::Housewife ? Villager::Sex::FEMALE : Villager::Sex::MALE;
@@ -55,7 +56,7 @@ entt::entity VillagerArchetype::Create([[maybe_unused]] const glm::vec3& abodePo
 		abode = Locator::townSystem::value().FindAbodeWithSpace(town);
 	}
 
-	registry.Assign<Villager>(entity, health, static_cast<uint32_t>(age), hunger, lifeStage, sex, info.tribeType,
+	registry.Assign<Villager>(entity, life, static_cast<uint32_t>(age), food, lifeStage, sex, info.tribeType,
 	                          info.villagerNumber, task, town, abode);
 	// The pathfinder steps a living by its WallHug speed once a game turn (100 ms), and info.dat's speed is metres a
 	// second: a tenth of it a turn. Given whole, villagers about the town went ten times their pace (Mike,
