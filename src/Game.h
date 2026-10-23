@@ -119,9 +119,10 @@ private:
 	static constexpr int k_MaxTurnsPerFrame = 8;
 	std::chrono::steady_clock::duration _turnDeltaTime;
 	float _gameSpeedMultiplier {1.0f};
-	// Normal play runs at 1.6 times the 100 ms game turn (Mike, 2026-10-19: x1 looked slow and choppy, x2 a little fast,
-	// 1.6 about right); the speed steps double and halve from there.
-	static constexpr float k_NormalPlaySpeed = 1.6f;
+	// Normal play is the original's: a game turn every 100 ms, 10 a second (its GetSpeedInMetresPerSecond is the speed
+	// a turn x 10, and the scripts' SLEEP counts tenths). From 2026-10-19 it was 1.6 times that (x1 had looked slow),
+	// which ran every script sleep and camera move of the opening 1.6 times fast; the speed steps double and halve from here.
+	static constexpr float k_NormalPlaySpeed = 1.0f;
 	float _playSpeed {k_NormalPlaySpeed};
 	uint32_t _frameCount {0};
 	uint32_t _turnCount {0};

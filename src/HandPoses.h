@@ -61,6 +61,8 @@ std::vector<glm::mat4> BlendedCreatureBones(const graphics::L3DMesh& mesh, const
 // bones' rotation (on top of the mesh's rest rotation) and translation over a few frames.
 namespace openblack::handposes
 {
+// The segment named `name` of a Lionhead segmented file ("LiOnHeAd", then name[32], size, data...); empty if none.
+std::vector<uint8_t> Segment(const std::vector<uint8_t>& file, std::string_view name);
 bool Load();
 // The hand mesh's bones (relative to their parents) in pose `name` at `frame` (fractional frames blend
 // between the two either side); empty if there is no such pose.

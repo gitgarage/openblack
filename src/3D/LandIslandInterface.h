@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <vector>
 
@@ -35,6 +36,12 @@ class LandIslandInterface
 public:
 	static const uint8_t k_CellCount;
 	static const float k_HeightUnit;
+	// The original's LAND_CELL_SEA_ALTITUDE: land points this low are drawn, and stood on, at sea level (0); and its
+	// LAND_SEA_LEVEL: GetAltitude flattens them only in cells this low (LH3DIsland::GetAltitude's caca_jc_bodge).
+	static constexpr uint8_t k_SeaAltitude = 3;
+	static constexpr uint8_t k_SeaLevel = 4;
+	// The original's LAND_CELL_SHORE_ALTITUDE: land points this low are see-through, where the sea is drawn.
+	static constexpr uint8_t k_ShoreAltitude = 1;
 	static const float k_CellSize;
 	static constexpr entt::hashed_string k_SmallBumpTextureId = entt::hashed_string("raw/smallbumpa");
 

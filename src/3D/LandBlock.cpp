@@ -120,9 +120,13 @@ void LandBlock::BuildVertexList(std::span<LandVertex> vertices, LandIslandInterf
 			for (auto [position, cell, material, offset] : std::views::zip(pos, cells, materials, offsets))
 			{
 				cell = &island.GetCell(blockOffset + offset);
-				position =
-				    glm::vec3(offset.x * LandIslandInterface::k_CellSize, cell->altitude * LandIslandInterface::k_HeightUnit,
-				              offset.y * LandIslandInterface::k_CellSize);
+				// As the original draws the land (LH3DP3's DRAW_VERTICES): a point at the sea's altitude or below is at
+				// sea level, so the shore meets the water flat instead of standing up to 2 units above it.
+				const float altitude = cell->altitude <= LandIslandInterface::k_SeaAltitude
+				                           ? 0.0f
+				                           : static_cast<float>(cell->altitude) * LandIslandInterface::k_HeightUnit;
+				position = glm::vec3(offset.x * LandIslandInterface::k_CellSize, altitude,
+				                     offset.y * LandIslandInterface::k_CellSize);
 
 				const auto& country = countries.at(cell->properties.country);
 				const auto noise = island.GetNoise(blockOffset + offset);
@@ -130,18 +134,10 @@ void LandBlock::BuildVertexList(std::span<LandVertex> vertices, LandIslandInterf
 				material = &country.materials.at((cell->altitude + noise) % country.materials.size());
 			}
 
-			// TODO(470): This is temporary way for drawing landscape, should be moved to a shader in the renderer
-			// Using a lambda so we're not repeating ourselves
-			auto getAlpha = [](lnd::LNDCell::Properties properties) {
-				if (properties.hasWater || properties.fullWater)
-				{
-					return 0.0f;
-				}
-				if (properties.coastLine)
-				{
-					return 0.5f;
-				}
-				return 1.0f;
+			// As the original (LH3DP3's DRAW_VERTICES): the land is see-through only at points of the shore's altitude or
+			// below, where the sea shows; the rest of the shore, flattened to sea level, is sand.
+			auto getAlpha = [](const lnd::LNDCell& cell) {
+				return cell.altitude <= LandIslandInterface::k_ShoreAltitude ? 0.0f : 1.0f;
 			};
 			auto makeVert = [&getAlpha, &pos, &cells, &materials](Corner corner, const glm::vec3& weight,
 			                                                      const std::array<Corner, 3>& m) -> LandVertex {
@@ -171,7 +167,7 @@ void LandBlock::BuildVertexList(std::span<LandVertex> vertices, LandIslandInterf
 				// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
 				const auto& cell = *cells[static_cast<size_t>(corner)];
 				// NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index)
-				return {pos[static_cast<size_t>(corner)], weight, mat, blend, cell.luminosity, getAlpha(cell.properties)};
+				return {pos[static_cast<size_t>(corner)], weight, mat, blend, cell.luminosity, getAlpha(cell)};
 			};
 
 			auto makeTriangle = [&makeVert, &vertices, &index](const std::array<Corner, 3>& corners, bool forward) {

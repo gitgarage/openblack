@@ -161,10 +161,17 @@ float LandIsland::GetHeightAt(glm::vec2 vec) const
 	const float fx = cellPos.x - static_cast<float>(cell.x);
 	const float fz = cellPos.y - static_cast<float>(cell.y);
 	const auto& topLeft = GetCell(cell);
-	const float hTL = topLeft.altitude * LandIsland::k_HeightUnit;
-	const float hTR = GetCell(cell + glm::u16vec2(1, 0)).altitude * LandIsland::k_HeightUnit;
-	const float hBL = GetCell(cell + glm::u16vec2(0, 1)).altitude * LandIsland::k_HeightUnit;
-	const float hBR = GetCell(cell + glm::u16vec2(1, 1)).altitude * LandIsland::k_HeightUnit;
+	// The original's LH3DIsland::GetAltitude: in a cell at sea level or below, its corners at the sea's altitude count as
+	// sea level, as they are drawn.
+	const bool coast = topLeft.altitude <= k_SeaLevel;
+	auto height = [this, coast](glm::u16vec2 at) {
+		const auto altitude = GetCell(at).altitude;
+		return coast && altitude <= k_SeaAltitude ? 0.0f : static_cast<float>(altitude) * LandIsland::k_HeightUnit;
+	};
+	const float hTL = height(cell);
+	const float hTR = height(cell + glm::u16vec2(1, 0));
+	const float hBL = height(cell + glm::u16vec2(0, 1));
+	const float hBR = height(cell + glm::u16vec2(1, 1));
 	if (!topLeft.properties.split)
 	{
 		return fx >= fz ? hTL + fx * (hTR - hTL) + fz * (hBR - hTR) // top-left, top-right, bottom-right

@@ -16,14 +16,22 @@ uniform vec4 u_skyAndBump;
 vec3 timeOfDayTint(float skyType)
 {
 	vec3 night = vec3(0.55f, 0.6f, 0.85f);
-	vec3 dusk = vec3(1.0f, 0.66f, 0.44f);
-	return skyType < 1.0f ? mix(night, dusk, skyType) : mix(dusk, vec3(1.0f, 1.0f, 1.0f), skyType - 1.0f);
+	// Dusk measured on the opening's sand (the original's 150, 82, 51 against ours 128, 68, 33 with 1, 0.66, 0.44).
+	vec3 dusk = vec3(1.17f, 0.79f, 0.68f);
+	// Day measured on the opening's path (the original's sand 139, 120, 68 against ours 151, 128, 77 at 1, 1, 1).
+	vec3 day = vec3(0.9f, 0.93f, 0.92f);
+	return skyType < 1.0f ? mix(night, dusk, skyType) : mix(dusk, day, skyType - 1.0f);
 }
 
 void main()
 {
 	// unpack uniforms
 	float skyType = u_skyAndBump.x;
+	// From dawn to day the light changes slowly at first, then quickly (eased, matched to the original's opening).
+	if (skyType > 1.0f)
+	{
+		skyType = 1.0f + (skyType - 1.0f) * (skyType - 1.0f);
+	}
 	float bumpMapStrength = u_skyAndBump.y;
 	float smallBumpMapStrength = u_skyAndBump.z;
 

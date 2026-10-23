@@ -380,6 +380,9 @@ Renderer::Renderer(uint32_t bgfxReset, std::unique_ptr<BgfxCallback>&& bgfxCallb
 		bgfx::setViewName(i, name.data());
 		++i;
 	}
+	// The world drawn in the order DrawPass submits it - sky, sea, land, models, sprites - as the original's
+	// GLandscape::Draw: the sea, writing no depth, lies under whatever is drawn after it (a shark's body, a swimmer's).
+	bgfx::setViewMode(static_cast<bgfx::ViewId>(graphics::RenderPass::Main), bgfx::ViewMode::Sequential);
 }
 
 Renderer::~Renderer() noexcept
@@ -538,6 +541,9 @@ void Renderer::DrawSubMesh(const graphics::L3DMesh& mesh, const graphics::L3DSub
 				    built != heights.end() ? built->second : 0.0f,
 				};
 				desc.program->SetUniformValue("u_skyAlphaThreshold", &u_skyAlphaThreshold);
+				const auto& ownLight = mesh.GetOwnLight();
+				const glm::vec4 u_ownLight = ownLight ? glm::vec4(*ownLight, 1.0f) : glm::vec4(0.0f);
+				desc.program->SetUniformValue("u_ownLight", &u_ownLight);
 			}
 		}
 		else
@@ -668,14 +674,13 @@ void Renderer::DrawScene(const DrawSceneDesc& drawDesc) const noexcept
 	// Reflection Pass
 	{
 		auto section = Locator::profiler::value().BeginScoped(Profiler::Stage::ReflectionPass);
-#if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
-		// Switch minimal graphics: the water reflects the sky and the land only, at 512 x 512 (Ocean.cpp), every frame
-		// (the whole scene cost ~10 FPS; none left the sea a still picture). Mike, 2026-10-17. The near-the-sea models
-		// (reflectedDrawDescs) are there for when models are wanted back: drawEntities true below.
+		// The sea shows the sky only, as the original's does with its land reflection off (LH3DIsland::g_b_draw_reflection:
+		// GLandscape::Draw draws the sky, then only with it set LH3DIsland::DrawUnderWater the land again, mirrored at
+		// half its brightness, before the sea goes over them). It was off in the original captured on 2026-10-21 - no
+		// land, model or creature is mirrored in any of its shots - so the reflection pass draws the sky alone. The
+		// near-the-sea models (reflectedDrawDescs) are there for if the original's option is wanted: drawIsland and
+		// drawEntities true below.
 		if (drawDesc.drawWater)
-#else
-		if (drawDesc.drawWater)
-#endif
 		{
 			DrawSceneDesc drawPassDesc = drawDesc;
 
@@ -688,10 +693,9 @@ void Renderer::DrawScene(const DrawSceneDesc& drawDesc) const noexcept
 			drawPassDesc.drawWater = false;
 			drawPassDesc.drawBoundingBoxes = false;
 			drawPassDesc.cullBack = true;
-#if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
+			drawPassDesc.drawIsland = false;
 			drawPassDesc.drawEntities = false;
 			drawPassDesc.drawSprites = false;
-#endif
 
 			DrawPass(drawPassDesc);
 		}
@@ -767,7 +771,9 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 			const auto& mesh = ocean.GetMesh();
 			mesh.GetIndexBuffer().Bind(mesh.GetIndexBuffer().GetCount(), 0);
 			mesh.GetVertexBuffer().Bind();
-			bgfx::setState(k_BgfxDefaultStateInvertedZ);
+			// Writing no depth, as the original's sea: what is drawn after it under the surface - a shark's body, a
+			// swimmer's - shows whole, as in its shots of the sharks (87-93 s) and the boy in the sea (174-177 s).
+			bgfx::setState(k_BgfxDefaultStateInvertedZ & ~BGFX_STATE_WRITE_Z);
 			auto diffuse = Locator::resources::value().GetTextures().Handle(ocean.GetDiffuseTexture());
 			auto alpha = Locator::resources::value().GetTextures().Handle(ocean.GetAlphaTexture());
 			waterShader->SetTextureSampler("s_diffuse", 0, *diffuse);
@@ -1011,7 +1017,8 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 
 					    _plane->GetVertexBuffer().Bind();
 
-					    bgfx::setState(0 | BGFX_STATE_DEPTH_TEST_GREATER | BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
+					    bgfx::setState(0 | (sprite.onTop ? BGFX_STATE_DEPTH_TEST_ALWAYS : BGFX_STATE_DEPTH_TEST_GREATER) |
+					                   BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
 					                   (sprite.darkens ? BGFX_STATE_BLEND_ALPHA
 					                                   : BGFX_STATE_BLEND_FUNC(BGFX_STATE_BLEND_SRC_ALPHA, BGFX_STATE_BLEND_ONE)) |
 					                   BGFX_STATE_BLEND_EQUATION(BGFX_STATE_BLEND_EQUATION_ADD));

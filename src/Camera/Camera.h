@@ -108,14 +108,25 @@ public:
 	// reads input nor replaces the interpolators, so a scripted move plays out uninterrupted.
 	Camera& SetScriptControl(bool enabled);
 	[[nodiscard]] bool IsScriptControlled() const { return _scriptControl; }
-	// A scripted move of origin and/or focus to a target over a duration (CHL MOVE_CAMERA_*). The
-	// other of the two keeps heading for its last scripted target, so position and focus moves
-	// issued back to back play together.
+	// A scripted move of origin or focus to a target over a duration (CHL MOVE_CAMERA_*), each on its own clock, so
+	// the other carries on with its own move.
 	Camera& ScriptMoveOrigin(const glm::vec3& target, std::chrono::microseconds duration);
 	Camera& ScriptMoveFocus(const glm::vec3& target, std::chrono::microseconds duration);
-	[[nodiscard]] bool HasScriptMoveArrived() const { return GetInterpolatorT() >= 1.0f; }
+	// The same moves, re-aimed every frame at something the script has the camera follow (the original's
+	// CameraModeFollow::Update): not counted as the script taking the camera.
+	Camera& FollowOrigin(const glm::vec3& target, std::chrono::microseconds duration);
+	Camera& FollowFocus(const glm::vec3& target, std::chrono::microseconds duration);
+	// Both position and focus within 0.03 of where they were sent (the original's CameraMode::Arrived), so a camera
+	// following something that has stopped has arrived too.
+	[[nodiscard]] bool HasScriptMoveArrived() const;
+	// How far the drawn camera is raised above where its moves put it, this frame (see _lift).
+	[[nodiscard]] float GetLift() const { return _lift; }
 	// Bumped by every ScriptMoveOrigin/Focus, so a hand demo can tell the script took the camera back.
 	[[nodiscard]] uint32_t GetScriptMoveCount() const { return _scriptMoveCount; }
+	// The lens (CHL MOVE_CAMERA_LENS): the field of view across the screen eased to `degrees` over `duration`, as the
+	// original's GCamera::SetCameraFov. Until a script sets one, the usual (`fallback`) is used.
+	Camera& MoveLens(float degrees, std::chrono::microseconds duration);
+	[[nodiscard]] float GetLens(float fallback) const;
 	Camera& SetWidescreen(bool enabled)
 	{
 		_widescreen = enabled;
@@ -130,16 +141,32 @@ public:
 	[[nodiscard]] const CameraModel& GetModel() const { return *_model; }
 
 protected:
+	// Where the moves have the camera now, before the lift.
+	[[nodiscard]] glm::vec3 MovedOrigin() const;
+	[[nodiscard]] glm::vec3 MovedFocus() const;
+	[[nodiscard]] float GetFocusT() const;
+
 	ZoomInterpolator3f _originInterpolators;
 	ZoomInterpolator3f _focusInterpolators;
 	// As a value between 0 and _interpolatorDuration
 	bool _scriptControl = false;
 	uint32_t _scriptMoveCount = 0;
 	bool _widescreen = false;
-	glm::vec3 _scriptOriginTarget {0.0f};
-	glm::vec3 _scriptFocusTarget {0.0f};
 	std::chrono::microseconds _interpolatorTime = std::chrono::microseconds::zero();
 	std::chrono::microseconds _interpolatorDuration = std::chrono::microseconds::zero();
+	// The focus's own move clock: the original moves position and focus with separate Zoomers (GCamera's
+	// CameraOriginZoomer and CameraHeadingZoomer), so a script's 20 s position move and 30 s focus move each take their
+	// own time. The player model times both together (SetInterpolatorTime/Duration set both clocks).
+	std::chrono::microseconds _focusTime = std::chrono::microseconds::zero();
+	std::chrono::microseconds _focusDuration = std::chrono::microseconds::zero();
+	// The original's GCamera::Update draws the camera at least a unit above the land under it, raising position and
+	// focus alike so the view keeps its pitch, each frame, without touching the moves themselves (runblack.exe
+	// 0x442464-0x4424ab: altitude + 1.0 - y, added to both y's when positive; skipped only in CameraModeFree).
+	float _lift = 0.0f;
+	std::optional<float> _lensFrom;
+	float _lensTo = 0.0f;
+	std::chrono::microseconds _lensTime = std::chrono::microseconds::zero();
+	std::chrono::microseconds _lensDuration = std::chrono::microseconds::zero();
 	float _xFov = 0.0f; // TODO(#707): This should be a zoomer for animations
 	glm::mat4 _projectionMatrix = glm::mat4 {1.0f};
 	glm::mat4 _projectionMatrixReversedZ = glm::mat4 {1.0f};

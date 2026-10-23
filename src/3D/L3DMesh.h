@@ -116,6 +116,7 @@ public:
 private:
 	l3d::L3DMeshFlags _flags;
 	std::string _debugName;
+	std::optional<glm::vec3> _ownLight;
 
 	std::unordered_map<SkinId, std::unique_ptr<graphics::Texture2D>> _skins;
 	std::vector<Footprint> _footprints; ///< If ContainsLandscapeFeature() is true
@@ -139,6 +140,9 @@ public:
 
 	[[nodiscard]] uint32_t GetFlags() const { return static_cast<uint32_t>(_flags); }
 
+	// A light of its own (the advisors': HelpDude::Draw moves the sun beside the camera for them), lit as by day.
+	void SetOwnLight(std::optional<glm::vec3> position) { _ownLight = position; }
+	[[nodiscard]] const std::optional<glm::vec3>& GetOwnLight() const { return _ownLight; }
 	[[nodiscard]] bool IsBoned() const { return static_cast<bool>(_flags & l3d::L3DMeshFlags::HasBones); }
 	[[nodiscard]] bool HasDoorPosition() const { return static_cast<bool>(_flags & l3d::L3DMeshFlags::HasDoorPosition); }
 	[[nodiscard]] bool IsPacked() const { return static_cast<bool>(_flags & l3d::L3DMeshFlags::Packed); }

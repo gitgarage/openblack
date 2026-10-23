@@ -12,9 +12,12 @@
 #include <bgfx/bgfx.h>
 
 #include "HandPoses.h"
+#include "HelpSpirits.h"
+#include "Subtitles.h"
 #include "PSys/PSys.h"
 
 #include <cstdlib>
+#include <fstream>
 #include <string>
 
 #include <LHVM.h>
@@ -494,7 +497,7 @@ bool Game::Update() noexcept
 		const auto& config = Locator::config::value();
 		const float nearClip = camera.IsScriptControlled() ? std::min(config.cameraNearClip, 0.1f) : config.cameraNearClip;
 		const float aspect = Locator::windowing::has_value() ? Locator::windowing::value().GetAspectRatio() : 1.0f;
-		camera.SetProjectionMatrixPerspective(config.cameraXFov, aspect, nearClip, config.cameraFarClip);
+		camera.SetProjectionMatrixPerspective(camera.GetLens(config.cameraXFov), aspect, nearClip, config.cameraFarClip);
 	}
 	{
 		// Close in on your creature's fight and the view goes side on, as the original: your creature on the right, the
@@ -580,6 +583,7 @@ bool Game::Update() noexcept
 				glm::vec3 rayDirection;
 				// A tutorial hand demo moves the hand in place of the mouse.
 				const auto demoHand = chlapi::UpdateHandDemo();
+				subtitles::SetDemoHand(demoHand);
 				const glm::vec2 handScreen =
 				    demoHand ? *demoHand : static_cast<glm::vec2>(_mousePosition) / static_cast<glm::vec2>(screenSize);
 				s_handScreen = handScreen;
@@ -905,6 +909,55 @@ bool Game::Update() noexcept
 			}
 		}
 
+		// The advisors, in front of the camera as it is now.
+		{
+			static auto s_lastAdvisors = std::chrono::steady_clock::now();
+			const auto now = std::chrono::steady_clock::now();
+			// Test hook: OPENBLACK_TEST_ADVISORS=<seconds> brings both in that long after starting, where Land 1's
+			// opening first puts them (FLY_SPIRIT 0.2/0.8, 0.75), the Demon pointing after two more seconds.
+			static const char* s_testAdvisors = std::getenv("OPENBLACK_TEST_ADVISORS");
+			static const auto s_started = now;
+			static int s_testStep = 0;
+			if (s_testAdvisors != nullptr)
+			{
+				const float since = std::chrono::duration<float>(now - s_started).count();
+				const float at = static_cast<float>(std::atof(s_testAdvisors));
+				if (s_testStep == 0 && since > at)
+				{
+					helpspirits::Eject(helpspirits::Spirit::Good);
+					helpspirits::Eject(helpspirits::Spirit::Evil);
+					helpspirits::FlyTo(helpspirits::Spirit::Good, 0.8f, 0.75f);
+					helpspirits::FlyTo(helpspirits::Spirit::Evil, 0.2f, 0.75f);
+					s_testStep = 1;
+				}
+				if (s_testStep == 1 && since > at + 4.0f)
+				{
+					helpspirits::PointAt(helpspirits::Spirit::Evil, Locator::camera::value().GetFocus());
+					s_testStep = 2;
+				}
+			}
+			helpspirits::Update(std::chrono::duration<float>(now - s_lastAdvisors).count());
+			// Test hook: OPENBLACK_HEIGHT_PROBE=<file of "x y z" lines> logs the land's height at each, and a cell to each side.
+			static bool s_probed = false;
+			if (const char* probe = std::getenv("OPENBLACK_HEIGHT_PROBE"); probe != nullptr && !s_probed)
+			{
+				s_probed = true;
+				std::ifstream in(probe);
+				float x = 0.0f;
+				float y = 0.0f;
+				float z = 0.0f;
+				auto& land = Locator::terrainSystem::value();
+				while (in >> x >> y >> z)
+				{
+					SPDLOG_LOGGER_INFO(spdlog::get("game"), "Probe ({:.1f}, {:.2f}, {:.1f}): here {:.2f}, x-10 {:.2f}, x+10 {:.2f}, z-10 {:.2f}, z+10 {:.2f}, -10-10 {:.2f}, +10+10 {:.2f}", x, y, z,
+					                   land.GetHeightAt({x, z}), land.GetHeightAt({x - 10, z}), land.GetHeightAt({x + 10, z}),
+					                   land.GetHeightAt({x, z - 10}), land.GetHeightAt({x, z + 10}), land.GetHeightAt({x - 10, z - 10}),
+					                   land.GetHeightAt({x + 10, z + 10}));
+				}
+			}
+			s_lastAdvisors = now;
+		}
+
 		// Update Entities
 		{
 			auto updateEntities = profiler.BeginScoped(Profiler::Stage::UpdateEntities);
@@ -1165,11 +1218,16 @@ bool Game::Initialize() noexcept
 	{
 		using AFromDiskTag = resources::L3DAnimLoader::FromDiskTag;
 		animationManager.Load("coffre", AFromDiskTag {}, fileSystem.GetPath<Path::Misc>() / "coffre.anm");
+		// The opening's hand (runblack.exe 1.20's JCMisc.cpp Intro): picking the boy out of the sea, putting him down.
+		animationManager.Load("hand_intro", AFromDiskTag {}, fileSystem.GetPath<Path::Misc>() / "hand_intro.anm");
+		animationManager.Load("hand_intro2", AFromDiskTag {}, fileSystem.GetPath<Path::Misc>() / "hand_intro2.anm");
 
 		using LFromDiskTag = resources::L3DLoader::FromDiskTag;
 		meshManager.Load("hand", LFromDiskTag {}, fileSystem.GetPath<Path::CreatureMesh>() / "Hand_Boned_Base2.l3d");
 		handposes::Load();
+		helpspirits::Load();
 		meshManager.Load("coffre", LFromDiskTag {}, fileSystem.GetPath<Path::Misc>() / "coffre.l3d");
+		meshManager.Load("hand_intro", LFromDiskTag {}, fileSystem.GetPath<Path::Misc>() / "hand_intro.l3d");
 		meshManager.Load("cone", LFromDiskTag {}, fileSystem.GetPath<Path::Data>() / "cone.l3d");
 		meshManager.Load("marker", LFromDiskTag {}, fileSystem.GetPath<Path::Data>() / "marker.l3d");
 		meshManager.Load("river", LFromDiskTag {}, fileSystem.GetPath<Path::Data>() / "river.l3d");
@@ -1859,7 +1917,8 @@ bool Game::Run() noexcept
 			                                   : 0.0f;
 			static uint32_t shotNumber = 0;
 			static auto nextShot = std::chrono::steady_clock::now();
-			constexpr uint32_t k_MaxShots = 60;
+			// (OPENBLACK_SHOT_KEEP keeps more, to look over a whole cutscene.)
+			static const uint32_t k_MaxShots = std::getenv("OPENBLACK_SHOT_KEEP") != nullptr ? static_cast<uint32_t>(std::atoi(std::getenv("OPENBLACK_SHOT_KEEP"))) : 60;
 			if (shotDir != nullptr && shotEvery > 0.0f)
 			{
 				if (shotNumber == 0 && nextShot <= std::chrono::steady_clock::now())
@@ -1889,13 +1948,14 @@ bool Game::Run() noexcept
 		{
 			auto section = profiler.BeginScoped(Profiler::Stage::GuiDraw);
 			const bool screenshotThisFrame = _requestScreenshot.has_value() && _requestScreenshot->first == _frameCount;
-			// Skip drawing Debug UI for screenshots
+			// Skip drawing Debug UI for screenshots (OPENBLACK_SHOT_WITH_GUI keeps it: the subtitles are in it)
+			static const bool s_shotWithGui = std::getenv("OPENBLACK_SHOT_WITH_GUI") != nullptr;
 			if (screenshotThisFrame)
 			{
 				SPDLOG_LOGGER_INFO(spdlog::get("game"), "Requesting a screenshot at frame {}...", _frameCount);
 				Locator::rendererInterface::value().RequestScreenshot(_requestScreenshot->second);
 			}
-			else
+			if (!screenshotThisFrame || s_shotWithGui)
 			{
 				Locator::debugGui::value().Draw();
 			}

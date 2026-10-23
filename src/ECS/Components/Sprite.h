@@ -27,6 +27,8 @@ struct Sprite
 	bool fullColour = false;
 	// Lying flat in its Transform's XZ plane (shadows on the ground), not turned to face the camera.
 	bool flat = false;
+	// Drawn over everything, whatever is in front (the opening's fire ball as it lands, Z test off).
+	bool onTop = false;
 };
 
 } // namespace openblack::ecs::components

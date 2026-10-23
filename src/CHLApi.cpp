@@ -78,6 +78,8 @@
 #include "ECS/Components/Animal.h"
 #include "ECS/Components/Creature.h"
 #include "HandPoses.h"
+#include "HelpSpirits.h"
+#include "Subtitles.h"
 #include "Audio/AudioManagerInterface.h"
 #include "Resources/ResourcesInterface.h"
 #include "3D/CreatureBody.h"
@@ -529,8 +531,9 @@ entt::entity CreateScriptObjectOn(entt::entity hint, const ObjectType type, uint
 		auto& registry = Locator::entitiesRegistry::value();
 		const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
 		const float ground = Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z));
+		// Drawn twice its model's size (Whale::CallVirtualFunctionsForCreation sets its LH3DObject's scale to 2).
 		registry.Assign<Transform>(entity, glm::vec3(position.x, std::max(ground, 0.0f), position.z), glm::eulerAngleY(yAngleRadians),
-		                           glm::vec3(scale > 0.0f ? scale : 1.0f));
+		                           glm::vec3(2.0f));
 		registry.Assign<openblack::ecs::components::Mesh>(entity, resources::HashIdentifier(MeshId::SharkBoned), static_cast<int8_t>(0),
 		                                                  static_cast<int8_t>(0));
 		registry.Assign<openblack::ecs::components::Animated>(entity, static_cast<uint32_t>(AnimId::SharkBonedSwim), 0.0f);
@@ -699,6 +702,23 @@ bool g_dialogueActive = false;
 uint32_t g_dialogueTask = 0; // the script task holding it
 // Whether a script holds the camera (START/END_CAMERA_CONTROL): what a hand demo gives the camera back to.
 bool g_scriptHasCamera = false;
+// What the script's camera follows, as the original's CameraModeScript (a CameraModeFollow): its focus on one thing
+// (SET_FOCUS_FOLLOW), its position kept from another (SET_POSITION_FOLLOW, ..._AND_...) at a distance, heading and
+// pitch, re-aimed every frame (UpdateCameraFollow). A new camera control starts without either.
+struct CameraFollow
+{
+	uint32_t focus = 0;  // FocusThing
+	uint32_t target = 0; // Target: the position follows it, and the focus too unless focus is set
+	float heading = 0.0f;
+	float pitch = 0.0f;
+	float distance = 0.0f;
+	float zoomTimeScale = 0.2f;  // how quickly it keeps up: the script mode's, until CAMERA_PROPERTIES
+	bool relativeHeading = true; // heading measured from the way a walker faces, not from the world's +z
+};
+CameraFollow g_cameraFollow;
+void CameraFollowFocus(uint32_t thing);
+std::optional<glm::vec3> CameraFollowPoint(uint32_t thing);
+void CameraFollowPosition(uint32_t thing, std::optional<float> distance, bool snap);
 // The line RUN_TEXT last showed, and when. There is no text display yet, so a line counts as read
 // once it has been up long enough to read (TEXT_READ).
 int g_lastTextId = -1;
@@ -711,6 +731,9 @@ struct ScriptAnimation
 	float playsLeft;
 };
 std::unordered_map<uint32_t, ScriptAnimation> g_scriptAnimations;
+// What a living plays while a script moves it, if the script said (OVERRIDE_STATE_ANIMATION: the opening's son skips
+// away with PSkip02, runs to the sea with PRunMan) - else its walk or run for the speed. Until the move ends.
+std::unordered_map<uint32_t, uint32_t> g_moveAnimations;
 
 // What a script last told each creature to do (CREATURE_DO_ACTION). The number is the creature action's place in
 // info.dat's creature action table (82 LookAtCamera, 161 BeIdle, 17 SleepAtHome...), the table the creature mind
@@ -758,8 +781,16 @@ std::unordered_map<uint32_t, openblack::ecs::components::Fixed> g_treeFootprints
 // Knocked off its feet until then (a creature's thrown stone): reads as Flying a while after landing, since Land 1's
 // punishment lesson only starts looking once Sable's line before it has been read, after she had already landed.
 std::unordered_map<uint32_t, std::chrono::steady_clock::time_point> g_knockedUntil;
-// When the current SET_FADE / SET_FADE_IN finishes.
-std::chrono::steady_clock::time_point g_fadeEnd {};
+// The screen's fade (GScript's, runblack.exe 0x6eb9d0-0x6ebb50): a colour drawn over the picture at an alpha that
+// SET_FADE takes from 0 to 255 and SET_FADE_IN from 255 to 0, by 255 / (whole seconds x 10) a game turn
+// (ProcessFade), drawn last of each frame (LH3DFade::Draw, from LH3DRender::FinishFrame).
+struct ScreenFadeState
+{
+	std::array<uint8_t, 3> colour {};
+	float alpha = 0.0f; // 0-255
+	float rate = 0.0f;  // a turn
+};
+ScreenFadeState g_screenFade;
 
 // The scripts' clock: real time scaled by the play speed (UpdateScriptFrame advances it by the game's frame time),
 // so dialogue, fades and script timers keep pace when the game is sped up or slowed down.
@@ -775,10 +806,19 @@ float PlaySpeed()
 	return game != nullptr ? game->GetPlaySpeed() : 1.0f;
 }
 
-void StartFade(float seconds)
+// GScript::SetupScreenFadeTo: none of its seconds (truncated) is the colour at once.
+void SetupScreenFadeTo(uint8_t red, uint8_t green, uint8_t blue, int seconds)
 {
-	g_fadeEnd = ScriptNow() +
-	            std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<float>(std::max(seconds, 0.0f)));
+	g_screenFade.colour = {red, green, blue};
+	g_screenFade.alpha = seconds <= 0 ? 255.0f : 0.0f;
+	g_screenFade.rate = seconds <= 0 ? 0.0f : 255.0f / (static_cast<float>(seconds) * 10.0f);
+}
+
+// GScript::SetupScreenFadeBackToNormal: likewise back to nothing over it.
+void SetupScreenFadeBackToNormal(int seconds)
+{
+	g_screenFade.alpha = seconds <= 0 ? 0.0f : 255.0f;
+	g_screenFade.rate = seconds <= 0 ? 0.0f : -255.0f / (static_cast<float>(seconds) * 10.0f);
 }
 constexpr auto k_TextReadTime = std::chrono::seconds(2);
 entt::entity g_textVoice = entt::null; // the voice of the last RUN_TEXT line while it plays
@@ -790,6 +830,22 @@ uint32_t g_clickedThing = 0;
 void EndScriptTurn()
 {
 	g_clickedThing = 0; // a click lasts one script turn
+	// GScript::ProcessFade, every turn: to the end, where it stops.
+	if (g_screenFade.rate != 0.0f)
+	{
+		g_screenFade.alpha += g_screenFade.rate;
+		if (g_screenFade.alpha > 255.0f || g_screenFade.alpha < 0.0f)
+		{
+			g_screenFade.alpha = std::clamp(g_screenFade.alpha, 0.0f, 255.0f);
+			g_screenFade.rate = 0.0f;
+		}
+	}
+}
+
+std::array<uint8_t, 4> ScreenFade()
+{
+	const auto& fade = g_screenFade;
+	return {fade.colour[0], fade.colour[1], fade.colour[2], static_cast<uint8_t>(fade.alpha)};
 }
 
 namespace
@@ -1405,26 +1461,16 @@ namespace
 float SeaDepthAt(glm::vec2 at); // below, with the walkers
 } // namespace
 
-// Over the sea, a script's camera kept at least k_ScriptCameraLift above its surface (y 0): the opening's shark shots
-// put it 3 below a shark, which swims at the surface - under water, where the sea is never drawn from below (Mike,
-// 2026-10-18: the shark scene too low). Over land it is left where the script puts it (Mike: only the water scenes).
-// Raise this if they still look low.
-constexpr float k_ScriptCameraLift = 2.0f;
-glm::vec3 AboveWater(glm::vec3 position)
-{
-	if (SeaDepthAt(glm::vec2(position.x, position.z)) > 0.0f && position.y < k_ScriptCameraLift)
-	{
-		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Script camera over the sea at ({:.1f}, {:.1f}, {:.1f}) lifted to {:.1f}",
-		                   position.x, position.y, position.z, k_ScriptCameraLift);
-		position.y = k_ScriptCameraLift;
-	}
-	return position;
-}
+// A script's camera is drawn at least a unit above the land or sea floor under it, its focus raised alike, each frame
+// (Camera::Update, as the original's GCamera::Update) - not moved where the script sends it.
 
 void SetCameraPosition() // 001 SET_CAMERA_POSITION
 {
 	EndCameraPath(); // the script takes the camera from its path
-	const auto position = AboveWater(PopVec());
+	g_cameraFollow.target = 0;
+	const auto position = PopVec();
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SET_CAMERA_POSITION ({:.1f}, {:.2f}, {:.1f}), ground there {:.2f}", position.x, position.y,
+	                   position.z, Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z)));
 	// TODO(Daniels118): check if cinema mode is enabled
 	auto& camera = Locator::camera::value();
 	camera.SetOrigin(position);
@@ -1433,7 +1479,10 @@ void SetCameraPosition() // 001 SET_CAMERA_POSITION
 void SetCameraFocus() // 002 SET_CAMERA_FOCUS
 {
 	EndCameraPath(); // the script takes the camera from its path
+	g_cameraFollow.focus = 0;
 	const auto position = PopVec();
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SET_CAMERA_FOCUS ({:.1f}, {:.2f}, {:.1f}), ground there {:.2f}", position.x, position.y,
+	                   position.z, Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z)));
 	// TODO(Daniels118): check if cinema mode is enabled
 	auto& camera = Locator::camera::value();
 	camera.SetFocus(position);
@@ -1442,8 +1491,11 @@ void SetCameraFocus() // 002 SET_CAMERA_FOCUS
 void MoveCameraPosition() // 003 MOVE_CAMERA_POSITION
 {
 	EndCameraPath(); // the script takes the camera from its path
+	g_cameraFollow.target = 0;
 	const auto time = Popf();
-	const auto position = AboveWater(PopVec());
+	const auto position = PopVec();
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "MOVE_CAMERA_POSITION ({:.1f}, {:.2f}, {:.1f}) over {:.1f} s, ground there {:.2f}", position.x,
+	                   position.y, position.z, time, Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z)));
 	auto& camera = Locator::camera::value();
 	camera.ScriptMoveOrigin(position, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<float>(time)));
 }
@@ -1451,8 +1503,11 @@ void MoveCameraPosition() // 003 MOVE_CAMERA_POSITION
 void MoveCameraFocus() // 004 MOVE_CAMERA_FOCUS
 {
 	EndCameraPath(); // the script takes the camera from its path
+	g_cameraFollow.focus = 0;
 	const auto time = Popf();
 	const auto position = PopVec();
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "MOVE_CAMERA_FOCUS ({:.1f}, {:.2f}, {:.1f}) over {:.1f} s, ground there {:.2f}", position.x,
+	                   position.y, position.z, time, Locator::terrainSystem::value().GetHeightAt(glm::vec2(position.x, position.z)));
 	auto& camera = Locator::camera::value();
 	camera.ScriptMoveFocus(position, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<float>(time)));
 }
@@ -1471,36 +1526,47 @@ void GetCameraFocus() // 006 GET_CAMERA_FOCUS
 	PushVec(focus);
 }
 
+// The script's spirit (HelpSpiritType) as an advisor: Good the Yogi, Evil the Demon (the rest taken as the good one).
+helpspirits::Spirit AdvisorOf(int spirit)
+{
+	return static_cast<HelpSpiritType>(spirit) == HelpSpiritType::Evil ? helpspirits::Spirit::Evil : helpspirits::Spirit::Good;
+}
+
 void SpiritEject() // 007 SPIRIT_EJECT
 {
-	[[maybe_unused]] const auto spirit = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto spirit = Pop().intVal;
+	helpspirits::Eject(AdvisorOf(spirit));
 }
 
 void SpiritHome() // 008 SPIRIT_HOME
 {
-	[[maybe_unused]] const auto spirit = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto spirit = Pop().intVal;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SPIRIT_HOME {}", spirit);
+	helpspirits::Home(AdvisorOf(spirit));
 }
 
 void SpiritPointPos() // 009 SPIRIT_POINT_POS
 {
-	[[maybe_unused]] const auto inWorld = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto position = PopVec();
-	[[maybe_unused]] const auto spirit = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto inWorld = static_cast<bool>(Pop().intVal);
+	const auto position = PopVec();
+	const auto spirit = Pop().intVal;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SPIRIT_POINT_POS {} at ({:.1f}, {:.1f}, {:.1f}), in world {}", spirit,
+	                   position.x, position.y, position.z, inWorld);
+	helpspirits::PointAt(AdvisorOf(spirit), position);
 }
 
 void SpiritPointGameThing() // 010 SPIRIT_POINT_GAME_THING
 {
-	[[maybe_unused]] const auto inWorld = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	[[maybe_unused]] const auto spirit = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto inWorld = static_cast<bool>(Pop().intVal);
+	const auto target = Pop().uintVal;
+	const auto spirit = Pop().intVal;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(target);
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SPIRIT_POINT_GAME_THING {} at {}, in world {}", spirit, target, inWorld);
+	if (registry.Valid(entity) && registry.AllOf<Transform>(entity))
+	{
+		helpspirits::PointAt(AdvisorOf(spirit), registry.Get<Transform>(entity).position);
+	}
 }
 
 // Whether a point is on screen: inside the camera's view once projected. (A fixed cone round the view
@@ -1547,6 +1613,7 @@ void RunText() // 013 RUN_TEXT
 		audio.StopEmitter(g_textVoice); // the next line cuts in, as a new line does
 	}
 	g_textVoice = PlayTextVoice(textID);
+	openblack::subtitles::Show(textID);
 	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "RUN_TEXT: text {}{}", textID, g_textVoice != entt::null ? " (voiced)" : "");
 }
 
@@ -1914,6 +1981,11 @@ void GetPosition() // 023 GET_POSITION
 	PushVec(position);
 }
 
+namespace
+{
+void EndScriptMove(uint32_t object); // below, with the walkers
+} // namespace
+
 void SetPosition() // 024 SET_POSITION
 {
 	auto position = PopVec();
@@ -1931,6 +2003,12 @@ void SetPosition() // 024 SET_POSITION
 		{
 			transform->position = position;
 			g_scriptPlaced[objId] = position;
+			SPDLOG_LOGGER_DEBUG(spdlog::get("scripting"), "SET_POSITION {} ({:.2f}, {:.2f}, {:.2f})", objId, position.x, position.y, position.z);
+			// Put there, not walked on: GScript::SetPosition moves the map object itself (a creature's by
+			// ForceMoveMapObjectWithoutWalking). A MOVE_GAME_THING still going had the opening's mother, set on the
+			// shore and turned to her son by SET_FOCUS, turn back to where she had been walking and call that way
+			// (Mike, 2026-10-22).
+			EndScriptMove(objId);
 		}
 	}
 }
@@ -2021,6 +2099,7 @@ void StartCameraControl() // 030 START_CAMERA_CONTROL
 	// Always granted: nothing else in openblack competes for the camera yet.
 	Locator::camera::value().SetScriptControl(true);
 	g_scriptHasCamera = true;
+	g_cameraFollow = {};
 	Pushb(true);
 }
 
@@ -2028,6 +2107,7 @@ void EndCameraControl() // 031 END_CAMERA_CONTROL
 {
 	Locator::camera::value().SetScriptControl(false);
 	g_scriptHasCamera = false;
+	g_cameraFollow = {};
 }
 
 void SetWidescreen() // 032 SET_WIDESCREEN
@@ -2047,6 +2127,13 @@ struct ScriptWalk
 	float at;                      // distance walked so far
 	float end;                     // distance to stop at (may be below `at`: walking backwards)
 	int32_t track = 0;             // the camera.edt track it follows
+	// A MobileObject's walk (the opening's sharks): by the track's own clock, as the original's
+	// MobileObject::MoveAlongPath - 100 ms of the track a game turn, so its keys' times - placed where
+	// LH3DWay::Running::GetPosAtTime puts it. Empty for a living, which walks at its own speed.
+	std::vector<float> keyTimes;  // ms from the first key
+	std::vector<float> keySpeeds; // m/s
+	float timeMs = 0.0f;
+	float endMs = 0.0f;
 };
 std::unordered_map<uint32_t, ScriptWalk> g_walks;
 
@@ -2289,9 +2376,8 @@ void AddFlockMembers(std::unordered_set<uint32_t>& held)
 }
 
 constexpr int32_t k_SpeedProperty = 11; // what scripts set to make livings run (0.9), walk (0.4) or stop (0)
-// A living's full speed, which the script's speed property scales: a villager's fleeing speed from its
-// type's info (a Norse woman 6 m/s, a man 6.5; world units are metres), so the script's 0.2 is a stroll,
-// 0.4 a walk and 0.8-0.9 a run, and a family runs at different speeds. Anything else: 3 units/s.
+// A living's full speed, for a script move given no speed (ScriptSpeed): a villager's fleeing speed from its
+// type's info (a Norse woman 6 m/s, a man 6.5; world units are metres). Anything else: 3 units/s.
 constexpr float k_UnitsPerSecond = 3.0f;
 float FullSpeed(uint32_t object)
 {
@@ -2311,6 +2397,27 @@ std::unordered_map<uint32_t, glm::vec3> g_followers;
 // Livings a script sent somewhere (MOVE_GAME_THING): moved every frame straight to the spot at their
 // script speed and placed exactly on it (scripts wait for a distance of 0).
 std::unordered_map<uint32_t, glm::vec3> g_scriptMoves;
+// How fast each script-moved living went (a MOVE_GAME_THING, a WALK_PATH, a flock member), units a second, and in
+// which script frame: its walk plays at that, as the original's plays at the speed it gives the villager
+// (Villager::MoveToPosAnimation) - not at the ground it covered between two frames. That was measured in the
+// animations, before these moves, so each frame's distance went over the next frame's time: the walk's pace jumped
+// with every uneven frame (Mike, 2026-10-22: the opening's family walked jittery, others smoothly - the pathfinder's
+// walkers are moved in the animations themselves).
+struct MoverSpeed
+{
+	float speed = 0.0f;
+	uint64_t frame = 0;
+};
+std::unordered_map<uint32_t, MoverSpeed> g_moverSpeeds;
+uint64_t g_scriptFrame = 0;
+
+// A script's move or walk of it, if it has one, given up where it is.
+void EndScriptMove(uint32_t object)
+{
+	g_scriptMoves.erase(object);
+	g_walks.erase(object);
+	g_moveAnimations.erase(object);
+}
 
 // How deep the sea is at a point. The land keeps no depth: its sea cells lie flat at the water's height (0), drawn
 // transparent over the sea plane. So, as Mike put it (2026-10-17), the farther from the shore, the deeper: a cell's
@@ -2388,16 +2495,20 @@ float SeabedAt(glm::vec2 at)
 	return depth > 0.0f ? -depth : Locator::terrainSystem::value().GetHeightAt(at);
 }
 
-float SpeedFactor(uint32_t object)
+// The speed a script gave a living, in units a second. SET_PROPERTY's SCRIPT_OBJECT_PROPERTY_TYPE_SPEED is the
+// original's SetSpeedInMetres(value, 0) (runblack.exe 0x70e9f6): metres a game turn - 10 turns a second
+// (MobileWallHug::GetSpeedInMetresPerSecond is it x 10), a metre a unit (GUtils::ConvertMetersToWholeDistance and
+// ConvertDistance3DToGame scale alike) - and Villager::SetSpeed with that 0 flag takes it as it is. So FollowUs's
+// 0.2 is the family's 2 m/s stroll and the son's 0.6 a 6 m/s run.
+std::optional<float> ScriptSpeed(uint32_t object)
 {
+	constexpr float k_TurnsPerSecond = 10.0f;
 	const auto it = g_objectProperties.find(PropertyKey(object, k_SpeedProperty));
 	if (it == g_objectProperties.end())
 	{
-		return 1.0f;
+		return std::nullopt;
 	}
-	// A run (0.6 and up) is not slowed with the walks (k_LivingPace): the opening's son, sent off at 0.6-0.7, only
-	// walked away from his family (Mike, 2026-10-17).
-	return it->second >= 0.6f ? it->second / k_LivingPace : it->second;
+	return std::max(it->second, 0.0f) * k_TurnsPerSecond;
 }
 
 // Turn an object about the vertical axis to face a point. The game's people face their model's -Z (their
@@ -2436,6 +2547,7 @@ void HoldInScriptState(uint32_t object, int32_t state)
 		return;
 	}
 	g_walks.erase(object);
+	g_moveAnimations.erase(object);
 	if (g_scriptMoves.erase(object) != 0)
 	{
 		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "MOVE_GAME_THING {} cut short by SET_SCRIPT_STATE", object);
@@ -2503,6 +2615,10 @@ bool MoveThingTo(uint32_t objId, const glm::vec3& position)
 	HoldForScript(entity, from);
 	Locator::livingActionSystem::value().VillagerSetState(*action, LivingAction::Index::Top, VillagerStates::MoveToPos, true);
 	g_scriptMoves[objId] = position;
+	// Its own moving state from now (the original's MOVE_GAME_THING puts a villager in one, which plays its walk or
+	// run): a script animation it was given before ends. The opening's father beckons (PBeckon, twice) and then runs to
+	// the beach - and ran there in the beckon, his feet still (Mike, 2026-10-22).
+	g_scriptAnimations.erase(objId);
 	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "MOVE_GAME_THING {} from ({:.1f}, {:.1f}, {:.1f}) to ({:.1f}, {:.1f}, {:.1f})", objId,
 	                   from.x, from.y, from.z, position.x, position.y, position.z);
 	return true;
@@ -2562,6 +2678,8 @@ void SetFocus() // 034 SET_FOCUS
 		if (auto* transform = registry.TryGet<Transform>(static_cast<entt::entity>(object)))
 		{
 			FaceTowards(*transform, position);
+			SPDLOG_LOGGER_DEBUG(spdlog::get("scripting"), "SET_FOCUS {} at ({:.1f}, {:.1f}) towards ({:.1f}, {:.1f})", object, transform->position.x,
+			                    transform->position.z, position.x, position.z);
 		}
 	}
 }
@@ -2960,16 +3078,14 @@ void ObjectDelete() // 048 OBJECT_DELETE
 
 void FocusFollow() // 049 FOCUS_FOLLOW
 {
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto target = Pop().uintVal;
+	CameraFollowFocus(target);
 }
 
 void PositionFollow() // 050 POSITION_FOLLOW
 {
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto target = Pop().uintVal;
+	CameraFollowPosition(target, std::nullopt, false);
 }
 
 void CallNear() // 051 CALL_NEAR
@@ -3274,11 +3390,11 @@ void OverrideStateAnimation() // 068 OVERRIDE_STATE_ANIMATION
 {
 	const auto animType = Pop().intVal;
 	const auto obj = Pop().uintVal;
-	// Which animation each script number means isn't known yet: logged once per number, the creature keeps standing.
-	static std::set<int32_t> logged;
-	if (logged.insert(animType).second)
+	// The animation its state plays, in the animations' own numbering (as SET_SCRIPT_ULONG's): FollowUs gives the son
+	// 379 PSkip02 and 351 PRunMan for his moves. Played while a script moves it, by the ground it covers.
+	if (obj != 0 && animType >= 0)
 	{
-		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "OVERRIDE_STATE_ANIMATION {} not played (object {})", animType, obj);
+		g_moveAnimations[obj] = static_cast<uint32_t>(animType);
 	}
 }
 
@@ -4224,21 +4340,48 @@ void CreateDualCameraWithPoint() // 105 CREATE_DUAL_CAMERA_WITH_POINT
 	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
 }
 
+// The original's camera facing a thing (runblack.exe 0x6ed710): looking at its middle from `distance` in front of it,
+// 0.1 radians above level.
+std::optional<std::pair<glm::vec3, glm::vec3>> CameraFacing(uint32_t thing, float distance)
+{
+	const auto focus = CameraFollowPoint(thing);
+	if (!focus)
+	{
+		return std::nullopt;
+	}
+	const auto front = Locator::entitiesRegistry::value().Get<Transform>(static_cast<entt::entity>(thing)).rotation *
+	                   glm::vec3(0.0f, 0.0f, -1.0f);
+	const float heading = std::atan2(front.x, front.z);
+	constexpr float k_Pitch = 0.1f;
+	const auto origin = *focus + distance * glm::vec3(std::sin(heading) * std::cos(k_Pitch), std::sin(k_Pitch),
+	                                                  std::cos(heading) * std::cos(k_Pitch));
+	return std::make_pair(origin, *focus);
+}
+
 void SetCameraToFaceObject() // 106 SET_CAMERA_TO_FACE_OBJECT
 {
-	[[maybe_unused]] const auto unk1 = Pop().intVal;
-	[[maybe_unused]] const auto unk0 = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto distance = Popf();
+	const auto target = Pop().uintVal;
+	if (const auto facing = CameraFacing(target, distance))
+	{
+		EndCameraPath();
+		g_cameraFollow.target = g_cameraFollow.focus = 0;
+		Locator::camera::value().SetOrigin(facing->first).SetFocus(facing->second);
+	}
 }
 
 void MoveCameraToFaceObject() // 107 MOVE_CAMERA_TO_FACE_OBJECT
 {
-	[[maybe_unused]] const auto time = Popf();
-	[[maybe_unused]] const auto distance = Popf();
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto time = Popf();
+	const auto distance = Popf();
+	const auto target = Pop().uintVal;
+	if (const auto facing = CameraFacing(target, distance))
+	{
+		EndCameraPath();
+		g_cameraFollow.target = g_cameraFollow.focus = 0;
+		const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<float>(time));
+		Locator::camera::value().ScriptMoveOrigin(facing->first, duration).ScriptMoveFocus(facing->second, duration);
+	}
 }
 
 void GetMoonPercentage() // 108 GET_MOON_PERCENTAGE
@@ -4290,10 +4433,50 @@ std::optional<GameTimeMove> g_gameTimeMove;
 // PC's.
 bool g_gameTimeSet = false;
 
+// The sky's hour for a game hour, as the original's LH3DSky (fn_00869FD0 from fn_0086A110): the morning's game hours
+// 3.5, 7.5, 8 and 8.5 are the sky's 4.5 (night ends), 7 and 7.5 (dawn) and 8.25 (full day), straight between them,
+// the evening's the same about midday.
+float SkyHour(float hour)
+{
+	constexpr std::array<float, 6> k_Game {0.0f, 3.5f, 7.5f, 8.0f, 8.5f, 12.0f};
+	constexpr std::array<float, 6> k_Sky {0.0f, 4.5f, 7.0f, 7.5f, 8.25f, 12.0f};
+	const bool evening = hour > 12.0f;
+	const float x = evening ? 24.0f - hour : hour;
+	float sky = x;
+	for (size_t i = 1; i < k_Game.size(); ++i)
+	{
+		if (x <= k_Game.at(i))
+		{
+			sky = k_Sky.at(i - 1) + (x - k_Game.at(i - 1)) / (k_Game.at(i) - k_Game.at(i - 1)) * (k_Sky.at(i) - k_Sky.at(i - 1));
+			break;
+		}
+	}
+	return evening ? 24.0f - sky : sky;
+}
+
+// The game hour of a sky hour (SkyHour backwards).
+float GameHourOfSky(float sky)
+{
+	constexpr std::array<float, 6> k_Game {0.0f, 3.5f, 7.5f, 8.0f, 8.5f, 12.0f};
+	constexpr std::array<float, 6> k_Sky {0.0f, 4.5f, 7.0f, 7.5f, 8.25f, 12.0f};
+	const bool evening = sky > 12.0f;
+	const float x = evening ? 24.0f - sky : sky;
+	float hour = x;
+	for (size_t i = 1; i < k_Sky.size(); ++i)
+	{
+		if (x <= k_Sky.at(i))
+		{
+			hour = k_Game.at(i - 1) + (x - k_Sky.at(i - 1)) / (k_Sky.at(i) - k_Sky.at(i - 1)) * (k_Game.at(i) - k_Game.at(i - 1));
+			break;
+		}
+	}
+	return evening ? 24.0f - hour : hour;
+}
+
 void ApplyGameHour(float hour)
 {
 	g_gameHour = std::fmod(std::fmod(hour, 24.0f) + 24.0f, 24.0f);
-	Locator::skySystem::value().SetTime(g_gameHour);
+	Locator::skySystem::value().SetTime(SkyHour(g_gameHour));
 }
 } // namespace
 
@@ -4362,12 +4545,35 @@ void ReleaseDialogueOfEndedTask()
 	}
 }
 
+// Both advisors home, as the original's HelpSystem::SpiritHome (fn_005C5200): a help script's vanish in a puff
+// (fn_005C3540, HelpDude::TriggerSmoke), anyone else's fly back off their edge over a second (fn_005C3590).
+void SendAdvisorsHome()
+{
+	const auto& vm = Locator::vm::value();
+	const auto task = vm.GetTasks().find(vm.GetCurrentTaskId());
+	const bool help = task != vm.GetTasks().end() && task->second.type == lhvm::ScriptType::Help;
+	for (const auto spirit : {helpspirits::Spirit::Good, helpspirits::Spirit::Evil})
+	{
+		if (help)
+		{
+			helpspirits::Disappear(spirit);
+		}
+		else
+		{
+			helpspirits::Home(spirit);
+		}
+	}
+}
+
 void StartDialogue() // 120 START_DIALOGUE
 {
+	// runblack.exe 1.20's GScript::StartSpiritControl: taking a free dialogue first sends both advisors home, so
+	// whatever the last one left out goes before this one's lines.
 	ReleaseDialogueOfEndedTask();
 	const bool granted = !g_dialogueActive;
 	if (granted)
 	{
+		SendAdvisorsHome();
 		g_dialogueActive = true;
 		g_dialogueTask = Locator::vm::value().GetCurrentTaskId();
 	}
@@ -4376,6 +4582,13 @@ void StartDialogue() // 120 START_DIALOGUE
 
 void EndDialogue() // 121 END_DIALOGUE
 {
+	// GScript::EndSpiritControl: the task holding the dialogue sends both advisors home as it lets go. Nothing else
+	// sends them back after the opening or a lesson (FollowUs never calls SPIRIT_HOME), so without this they stayed
+	// on screen for good.
+	if (g_dialogueActive && g_dialogueTask == Locator::vm::value().GetCurrentTaskId())
+	{
+		SendAdvisorsHome();
+	}
 	g_dialogueActive = false;
 	g_dialogueTask = 0;
 }
@@ -5115,8 +5328,7 @@ void PlaySpiritAnim() // 140 PLAY_SPIRIT_ANIM
 	[[maybe_unused]] const auto unk2 = Pop().intVal;
 	[[maybe_unused]] const auto unk1 = Pop().intVal;
 	[[maybe_unused]] const auto unk0 = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "PLAY_SPIRIT_ANIM {} {} {} {} {}", unk0, unk1, unk2, unk3, unk4);
 }
 
 void CallInNotNear() // 141 CALL_IN_NOT_NEAR
@@ -5362,11 +5574,10 @@ void ClingSpirit() // 166 CLING_SPIRIT
 
 void FlySpirit() // 167 FLY_SPIRIT
 {
-	[[maybe_unused]] const auto yPercent = Popf();
-	[[maybe_unused]] const auto xPercent = Popf();
-	[[maybe_unused]] const auto spirit = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto yPercent = Popf();
+	const auto xPercent = Popf();
+	const auto spirit = Pop().intVal;
+	helpspirits::FlyTo(AdvisorOf(spirit), xPercent, yPercent);
 }
 
 void SetIdMoveable() // 168 SET_ID_MOVEABLE
@@ -5612,15 +5823,27 @@ void UpdateCameraPath(float seconds)
 	}
 }
 
-std::vector<glm::vec3> LoadTrackGround(int32_t track)
+// A camera.edt track's second curve, the one walkers follow (FollowUs's sharks are made on its first keys), sampled
+// k_TrackSamples to a segment, with its keys' times and speeds: after its keys and control points, 28 bytes, then the
+// times of keys 1 to n-1 in ms (track 21: 1810 ... 12885 over its 128.85) and n speeds in m/s.
+constexpr int k_TrackSamples = 12;
+struct TrackWay
 {
-	static std::unordered_map<int32_t, std::vector<glm::vec3>> cache;
+	std::vector<glm::vec3> points;
+	std::vector<float> keyTimes;
+	std::vector<float> keySpeeds;
+};
+
+const TrackWay& LoadTrackWay(int32_t track)
+{
+	static std::unordered_map<int32_t, TrackWay> cache;
 	if (const auto it = cache.find(track); it != cache.end())
 	{
 		return it->second;
 	}
 	auto& fileSystem = Locator::filesystem::value();
-	std::vector<glm::vec3> curve;
+	TrackWay way;
+	auto& curve = way.points;
 	std::vector<uint8_t> data;
 	try
 	{
@@ -5653,7 +5876,23 @@ std::vector<glm::vec3> LoadTrackGround(int32_t track)
 		};
 		const size_t keys = 76 + 44 * n;
 		const size_t controls = keys + 12 * n;
-		constexpr int k_Samples = 12;
+		const size_t times = controls + 24 * (n - 1) + 28;
+		const size_t speeds = times + 4 * (n - 1);
+		auto real = [&](size_t at) {
+			float v;
+			std::memcpy(&v, body + at, sizeof(v));
+			return v;
+		};
+		way.keyTimes.push_back(0.0f);
+		for (uint32_t k = 0; k < n; ++k)
+		{
+			if (k > 0)
+			{
+				way.keyTimes.push_back(real(times + 4 * (k - 1)));
+			}
+			way.keySpeeds.push_back(real(speeds + 4 * k));
+		}
+		constexpr int k_Samples = k_TrackSamples;
 		for (uint32_t k = 0; k + 1 < n; ++k)
 		{
 			const auto p0 = vec(keys + 12 * k);
@@ -5673,8 +5912,36 @@ std::vector<glm::vec3> LoadTrackGround(int32_t track)
 	{
 		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "Track {} not found in camera.edt", track);
 	}
-	cache[track] = curve;
-	return curve;
+	return cache[track] = std::move(way);
+}
+
+std::vector<glm::vec3> LoadTrackGround(int32_t track)
+{
+	return LoadTrackWay(track).points;
+}
+
+// How far along a timed walk is `ms` into its track (LH3DWay::Running::GetPosAtTime): in the segment that time falls
+// in, of length L and T seconds, from its first key's speed v0 at the steady change of speed a that ends it on time -
+// v0 t + a t^2 / 2, a = 2 (L - v0 T) / T^2.
+float TimedWalkDistance(const ScriptWalk& walk, float ms)
+{
+	const auto& times = walk.keyTimes;
+	if (times.size() < 2 || walk.lengths.size() < (times.size() - 1) * k_TrackSamples + 1)
+	{
+		return 0.0f;
+	}
+	size_t k = 0;
+	while (k + 2 < times.size() && ms >= times[k + 1])
+	{
+		++k;
+	}
+	const float from = walk.lengths[k * k_TrackSamples];
+	const float length = walk.lengths[(k + 1) * k_TrackSamples] - from;
+	const float duration = std::max((times[k + 1] - times[k]) * 0.001f, 1e-3f);
+	const float t = std::clamp((ms - times[k]) * 0.001f, 0.0f, duration);
+	const float v0 = walk.keySpeeds[k];
+	const float a = 2.0f * (length - v0 * duration) / (duration * duration);
+	return from + std::clamp(v0 * t + 0.5f * a * t * t, 0.0f, length);
 }
 
 void WalkPath() // 177 WALK_PATH
@@ -5703,6 +5970,24 @@ void WalkPath() // 177 WALK_PATH
 	walk.end = std::clamp(forward ? valTo : 1.0f - valTo, 0.0f, 1.0f) * total;
 	HoldForScript(entity, walk.points.back());
 	walk.track = track;
+	// A shark (the scripts' Whale, a MobileObject): GScript::SetWalkPath gives it MobileObject::SetupMoveAlongPath,
+	// which starts the track's clock at valFrom of its length in time and stops it at valTo, forward only.
+	if (const auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(entity);
+	    mesh != nullptr && mesh->id == resources::HashIdentifier(MeshId::SharkBoned))
+	{
+		const auto& way = LoadTrackWay(track);
+		if (way.keyTimes.size() >= 2 && walk.lengths.size() == (way.keyTimes.size() - 1) * k_TrackSamples + 1)
+		{
+			walk.keyTimes = way.keyTimes;
+			walk.keySpeeds = way.keySpeeds;
+			walk.timeMs = std::clamp(valFrom, 0.0f, 1.0f) * way.keyTimes.back();
+			walk.endMs = std::clamp(valTo, 0.0f, 1.0f) * way.keyTimes.back();
+			walk.at = TimedWalkDistance(walk, walk.timeMs);
+			walk.end = TimedWalkDistance(walk, walk.endMs);
+			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "WALK_PATH {} along track {}: {:.1f} long, {:.1f} s", object, track, total,
+			                   (walk.endMs - walk.timeMs) * 0.001f);
+		}
+	}
 	g_walks[object] = std::move(walk);
 }
 
@@ -5915,6 +6200,130 @@ float ObjectHeight(entt::entity entity)
 	return mesh != nullptr && transform != nullptr && meshes.Contains(mesh->id)
 	           ? meshes.Handle(mesh->id)->GetBoundingBox().Size().y * transform->scale.y
 	           : 0.0f;
+}
+
+// Where the camera looks at a thing it follows: its middle (the original: its position, plus half its height).
+std::optional<glm::vec3> CameraFollowPoint(uint32_t thing)
+{
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(thing);
+	const auto* transform = thing != 0 && registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
+	if (transform == nullptr)
+	{
+		return std::nullopt;
+	}
+	return transform->position + glm::vec3(0.0f, ObjectHeight(entity) * 0.5f, 0.0f);
+}
+
+// The original's GCamera::GetHeadingAndPitchFromPoints: heading from +z towards +x, pitch up from level, of origin as
+// seen from focus.
+std::pair<float, float> CameraHeadingAndPitch(const glm::vec3& origin, const glm::vec3& focus)
+{
+	const auto d = origin - focus;
+	if (std::abs(d.x) < 0.01f && std::abs(d.z) < 0.01f)
+	{
+		return {0.0f, 1.5397f};
+	}
+	return {std::atan2(d.x, d.z), std::atan2(d.y, std::sqrt(d.x * d.x + d.z * d.z))};
+}
+
+// The original's CameraModeFollow, each frame while a script holds the camera: the focus eased (over its zoom time,
+// 0.2 s, or at once after CAMERA_PROPERTIES' speed 0) to the middle of what it follows, and the position to its
+// distance from the target's middle at its heading and pitch (at least pi/13 above level) - the heading measured from
+// a walker's front when relative.
+void UpdateCameraFollow()
+{
+	auto& follow = g_cameraFollow;
+	if (!g_scriptHasCamera || (follow.focus == 0 && follow.target == 0))
+	{
+		return;
+	}
+	auto& camera = Locator::camera::value();
+	const auto time = std::chrono::duration_cast<std::chrono::microseconds>(
+	    std::chrono::duration<float>(1.0f /* CameraFollowEndZoomTime */ * follow.zoomTimeScale));
+	const uint32_t focusThing = follow.focus != 0 ? follow.focus : follow.target;
+	if (const auto point = CameraFollowPoint(focusThing))
+	{
+		camera.FollowFocus(*point, time);
+	}
+	else
+	{
+		follow.focus = 0;
+	}
+	if (follow.target == 0)
+	{
+		return;
+	}
+	const auto point = CameraFollowPoint(follow.target);
+	if (!point)
+	{
+		follow.target = 0;
+		return;
+	}
+	follow.pitch = std::max(follow.pitch, glm::pi<float>() / 13.0f);
+	float heading = follow.heading;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto entity = static_cast<entt::entity>(follow.target);
+	if (follow.relativeHeading &&
+	    registry.AnyOf<openblack::ecs::components::Villager, openblack::ecs::components::Creature,
+	                   openblack::ecs::components::Animal>(entity))
+	{
+		// Measured from the way it faces (its front the model's -Z, as everywhere here): FollowUs' son runs at the camera
+		// with heading 22.5, as in the capture of the original.
+		const auto front = registry.Get<Transform>(entity).rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+		heading += std::atan2(front.x, front.z);
+	}
+	const auto origin = *point + follow.distance * glm::vec3(std::sin(heading) * std::cos(follow.pitch), std::sin(follow.pitch),
+	                                                         std::cos(heading) * std::cos(follow.pitch));
+	camera.FollowOrigin(origin, time);
+}
+
+// SET_FOCUS_FOLLOW, FOCUS_FOLLOW: the focus follows `thing` (CameraModeScript::SetCameraFocus).
+void CameraFollowFocus(uint32_t thing)
+{
+	g_cameraFollow.focus = CameraFollowPoint(thing) ? thing : 0;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Camera focus follows {}", g_cameraFollow.focus);
+}
+
+// SET_POSITION_FOLLOW and the others: the position follows `thing` (CameraModeFollow::Set), at `distance` or 8 times its
+// height, keeping the camera's heading (from its front when relative: then straight ahead of it) and pitch; with `snap`,
+// there at once, focus and all (SetToDestinationPosition).
+void CameraFollowPosition(uint32_t thing, std::optional<float> distance, bool snap)
+{
+	auto& follow = g_cameraFollow;
+	auto& camera = Locator::camera::value();
+	if (!CameraFollowPoint(thing))
+	{
+		follow.target = 0;
+		return;
+	}
+	follow.target = thing;
+	const auto [heading, pitch] = CameraHeadingAndPitch(camera.GetOrigin(Camera::Interpolation::Target),
+	                                                    camera.GetFocus(Camera::Interpolation::Target));
+	follow.heading = heading;
+	follow.pitch = pitch;
+	if (distance)
+	{
+		follow.distance = *distance;
+	}
+	else
+	{
+		follow.distance = ObjectHeight(static_cast<entt::entity>(thing)) * 8.0f; // GCamera::GetThingViewingDistance
+		if (follow.relativeHeading)
+		{
+			follow.heading = 0.0f;
+		}
+	}
+	follow.distance = std::clamp(follow.distance, 2.0f, 1500.0f);
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Camera position follows {} at {:.1f}, heading {:.2f}, pitch {:.2f}{}", thing,
+	                   follow.distance, follow.heading, follow.pitch, snap ? ", there at once" : "");
+	if (snap)
+	{
+		const auto zoom = follow.zoomTimeScale;
+		follow.zoomTimeScale = 0.0f;
+		UpdateCameraFollow();
+		follow.zoomTimeScale = zoom;
+	}
 }
 
 bool LeashCommandNow(const glm::vec3& ground, uint32_t objectUnderHand)
@@ -6322,7 +6731,7 @@ std::string ActOutCreatureOrder(entt::entity entity, const CreatureOrder& order,
 	}
 }
 // For a pose whose CBN header gives no length: the old guess.
-constexpr float k_CreatureFramesPerSecond = 15.0f * k_LivingPace;
+constexpr float k_CreatureFramesPerSecond = 15.0f;
 // A creature's walking pace here (ActOutCreatureOrder's and WalkCreatureTo's), units a second, and how quickly
 // its speed changes: the original's Acceleration of 12 against its WalkSpeed of 9 at size 1 (LH3DCreature::SetSize)
 // takes it from standing to walking pace in three quarters of a second.
@@ -7407,12 +7816,21 @@ void UpdateAnimations(float seconds)
 			    g_villagerGlides.erase(id);
 		    }
 		    const auto last = g_lastPositions.find(id);
-		    const float speed = last != g_lastPositions.end() && seconds > 0.0f
+		    const auto moved = g_moverSpeeds.find(id);
+		    const float speed = moved != g_moverSpeeds.end() && moved->second.frame + 1 >= g_scriptFrame ? moved->second.speed
+		                        : last != g_lastPositions.end() && seconds > 0.0f
 		                            ? glm::distance(glm::vec2(last->second.x, last->second.z),
 		                                            glm::vec2(transform.position.x, transform.position.z)) /
 		                                  seconds
 		                            : 0.0f;
 		    g_lastPositions[id] = transform.position;
+		    if (static const char* s_trace = std::getenv("OPENBLACK_TRACE_WALK"); s_trace != nullptr && registry.AllOf<ScriptMove>(entity))
+		    {
+			    const auto* a = registry.TryGet<openblack::ecs::components::Animated>(entity);
+			    SPDLOG_LOGGER_INFO(spdlog::get("game"), "TRACEWALK {} dt {:.4f} pos ({:.3f}, {:.3f}, {:.3f}) speed {:.3f} anim {} t {:.1f} script {} glide {}", id, seconds,
+			                       transform.position.x, transform.position.y, transform.position.z, speed, a ? a->animation : 0u, a ? a->time : 0.0f,
+			                       registry.AllOf<ScriptMove>(entity), g_villagerGlides.contains(id));
+		    }
 		    // Measured pace of villagers going about on their own (not builders, not a script's), logged now and then.
 		    {
 			    static std::vector<float> s_paces;
@@ -7443,8 +7861,20 @@ void UpdateAnimations(float seconds)
 		    {
 			    g_scriptAnimations.erase(drowning);
 		    }
+		    // Moved by a script, it plays a moving animation - the one the script gave it, else its walk or run - never a
+		    // standing one with its feet sliding over the ground.
+		    const bool scriptMoving = moved != g_moverSpeeds.end() && moved->second.frame + 1 >= g_scriptFrame && speed > 0.2f;
+		    if (scriptMoving)
+		    {
+			    g_scriptAnimations.erase(id);
+		    }
+		    const auto override = scriptMoving ? g_moveAnimations.find(id) : g_moveAnimations.end();
 		    const auto scripted = g_scriptAnimations.find(id);
-		    if (scripted != g_scriptAnimations.end())
+		    if (override != g_moveAnimations.end())
+		    {
+			    wanted = override->second;
+		    }
+		    else if (scripted != g_scriptAnimations.end())
 		    {
 			    wanted = scripted->second.animation;
 		    }
@@ -7830,7 +8260,7 @@ constexpr float k_Gravity = 9.81f; // world units are metres
 // it slows by this times its speed times its velocity each second - its type's WindResist (PhysicsConstants.txt)
 // x 0.3 x its radius squared, over its mass. Measured: a rock 0.5731 / 2000, a tree 5.4066 / 721.7, a villager
 // 0.9163 / 72.5. Animals as villagers, and miracles as trees, until they are measured.
-// An effect's sprite sheet, Data/Textures/<name>.raw (256x256 RGB) with its alpha <name>a.raw, made once. Never
+// An effect's sprite sheet, Data/Textures/<name>.raw (256x256 RGB) with its alpha <name>a.raw if any, made once. Never
 // freed (see the miracle bubble's texture). Null if it cannot be read.
 openblack::graphics::Texture2D* SpriteSheet(const std::string& name)
 {
@@ -7845,7 +8275,11 @@ openblack::graphics::Texture2D* SpriteSheet(const std::string& name)
 		auto& fs = Locator::filesystem::value();
 		const auto textures = fs.GetPath<openblack::filesystem::Path::Data>() / "Textures";
 		const auto rgb = fs.ReadAll(textures / (name + ".raw"));
-		const auto alpha = fs.ReadAll(textures / (name + "a.raw"));
+		std::vector<uint8_t> alpha; // none for one drawn adding its light (the sun's), its alpha all 255
+		if (fs.Exists(textures / (name + "a.raw")))
+		{
+			alpha = fs.ReadAll(textures / (name + "a.raw"));
+		}
 		constexpr size_t k_Texels = 256 * 256;
 		if (rgb.size() >= k_Texels * 3)
 		{
@@ -11725,11 +12159,30 @@ void UpdateDances(float seconds)
 }
 } // namespace
 
+namespace
+{
+void UpdateIntro(float seconds);      // below, with PLAY_JC_SPECIAL
+void UpdateSharkWakes(float seconds); // and the sharks' wakes
+void UpdateSun(float seconds);        // and the sun
+}
+
 void UpdateScriptFrame(std::chrono::microseconds dt)
 {
+	++g_scriptFrame;
 	g_scriptClock += std::chrono::duration_cast<std::chrono::steady_clock::duration>(dt);
 	const float seconds = std::min(std::chrono::duration<float>(dt).count(), 0.1f * PlaySpeed()); // a long frame (a load) is cut short, at any play speed
 	auto& registry = Locator::entitiesRegistry::value();
+	// The advisor whose line is being said comes nearer while it is.
+	{
+		const bool saying = g_textVoice != entt::null && Locator::audio::value().EmitterExists(g_textVoice);
+		const int speaker = saying ? openblack::subtitles::SpeakerOf(g_lastTextId) : 0;
+		helpspirits::SetTalking(helpspirits::Spirit::Good, speaker == 1);
+		helpspirits::SetTalking(helpspirits::Spirit::Evil, speaker == 2);
+	}
+	UpdateCameraFollow();
+	UpdateIntro(seconds);
+	UpdateSharkWakes(seconds);
+	UpdateSun(seconds);
 	UpdateBuilders(seconds);
 	UpdateForesters(seconds);
 	UpdateFarmers(seconds);
@@ -12699,18 +13152,40 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			continue;
 		}
 		auto& walk = it->second;
-		const float step = FullSpeed(it->first) * std::max(SpeedFactor(it->first), 0.0f) * seconds;
-		if (step > 0.0f)
+		const float before = walk.at;
+		if (!walk.keyTimes.empty())
+		{
+			walk.timeMs = std::min(walk.timeMs + seconds * 1000.0f, walk.endMs);
+			walk.at = TimedWalkDistance(walk, walk.timeMs);
+		}
+		else if (const float step = ScriptSpeed(it->first).value_or(FullSpeed(it->first)) * seconds; step > 0.0f)
 		{
 			walk.at = walk.end >= walk.at ? std::min(walk.at + step, walk.end) : std::max(walk.at - step, walk.end);
+		}
+		g_moverSpeeds[it->first] = {std::abs(walk.at - before) / std::max(seconds, 1e-4f), g_scriptFrame};
+		if (walk.at != before)
+		{
 			const auto next = std::upper_bound(walk.lengths.begin(), walk.lengths.end(), walk.at);
 			const size_t i = std::clamp<size_t>(static_cast<size_t>(next - walk.lengths.begin()), 1, walk.points.size() - 1);
 			const float span = walk.lengths[i] - walk.lengths[i - 1];
 			const float t = span > 0.0f ? (walk.at - walk.lengths[i - 1]) / span : 1.0f;
 			const auto position = glm::mix(walk.points[i - 1], walk.points[i], std::clamp(t, 0.0f, 1.0f));
 			PlaceMover(entity, *transform, position, walk.end >= walk.at ? walk.points[i] : walk.points[i - 1]);
+			if (!walk.keyTimes.empty())
+			{
+				transform->position.y = std::max(transform->position.y, 0.0f); // a shark swims at the surface, its fin out
+				// Turned as Whale's draw turns it: RotateY(GetYAngle(its move)), GetYAngle being atan2(z, x) - its
+				// model's +X along the way it goes. FaceTowards turns people's -Z there, which left the shark swimming
+				// sideways (Mike, 2026-10-22).
+				const auto way = (walk.end >= walk.at ? walk.points[i] : walk.points[i - 1]) - transform->position;
+				if (way.x != 0.0f || way.z != 0.0f)
+				{
+					transform->rotation = glm::mat3(glm::eulerAngleY(std::atan2(-way.z, way.x)));
+				}
+			}
 		}
-		it = walk.at == walk.end ? g_walks.erase(it) : std::next(it);
+		const bool done = walk.keyTimes.empty() ? walk.at == walk.end : walk.timeMs >= walk.endMs;
+		it = done ? g_walks.erase(it) : std::next(it);
 	}
 
 	UpdateCameraPath(seconds);
@@ -12800,7 +13275,14 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		auto& move = *g_gameTimeMove;
 		move.elapsed += seconds;
 		const float t = move.seconds > 0.0f ? std::min(move.elapsed / move.seconds, 1.0f) : 1.0f;
-		ApplyGameHour(glm::mix(move.from, move.to, t));
+		// Evenly in the sky's hours, as the original keeps its clock (GLandAlignement's time is fn_0086A110's).
+		const float day = std::floor(move.from / 24.0f) * 24.0f;
+		const float fromSky = SkyHour(std::fmod(move.from, 24.0f)) + day;
+		const float toDay = std::floor(move.to / 24.0f) * 24.0f;
+		const float toSky = SkyHour(std::fmod(move.to, 24.0f)) + toDay;
+		const float sky = glm::mix(fromSky, toSky, t);
+		const float skyDay = std::floor(sky / 24.0f) * 24.0f;
+		ApplyGameHour(GameHourOfSky(sky - skyDay) + skyDay);
 		if (t >= 1.0f)
 		{
 			g_gameTimeMove.reset();
@@ -13324,13 +13806,15 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		}
 		const auto toTarget = glm::vec2(it->second.x - transform->position.x, it->second.z - transform->position.z);
 		const float distance = glm::length(toTarget);
-		const float factor = SpeedFactor(it->first);
-		const float step = FullSpeed(it->first) * (factor > 0.0f ? factor : 0.4f) * seconds;
+		const auto speed = ScriptSpeed(it->first);
+		const float step = (speed && *speed > 0.0f ? *speed : FullSpeed(it->first) * 0.4f) * seconds;
+		g_moverSpeeds[it->first] = {distance <= step ? 0.0f : step / std::max(seconds, 1e-4f), g_scriptFrame};
 		if (distance <= step)
 		{
 			PlaceMover(entity, *transform, it->second, it->second);
 			transform->position = it->second; // exactly where the script said
 			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "MOVE_GAME_THING {} arrived", it->first);
+			g_moveAnimations.erase(it->first);
 			it = g_scriptMoves.erase(it);
 			continue;
 		}
@@ -13357,6 +13841,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		const float distance = glm::length(toTarget);
 		// Close in at up to a run, faster when far behind so a member never loses the leader.
 		const float speed = FullSpeed(it->first) * std::clamp(distance / 4.0f, 0.0f, 1.0f);
+		g_moverSpeeds[it->first] = {distance > 0.05f ? speed : 0.0f, g_scriptFrame};
 		if (distance > 0.05f)
 		{
 			const float step = std::min(distance, speed * seconds);
@@ -13385,12 +13870,19 @@ void GetWalkPathPercentage() // 179 GET_WALK_PATH_PERCENTAGE
 
 void CameraProperties() // 180 CAMERA_PROPERTIES
 {
-	[[maybe_unused]] const auto enableBehind = static_cast<bool>(Pop().intVal);
-	[[maybe_unused]] const auto angle = Popf();
-	[[maybe_unused]] const auto speed = Popf();
-	[[maybe_unused]] const auto distance = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// The follow's distance, zoom time scale (0: kept up with at once), heading in degrees and whether that is from
+	// behind a walker (runblack.exe 0x6edff0 sets CameraModeFollow's ViewingDistance, ZoomTimeScale, Heading,
+	// RelativeHeading).
+	const auto enableBehind = static_cast<bool>(Pop().intVal);
+	const auto angle = Popf();
+	const auto speed = Popf();
+	const auto distance = Popf();
+	g_cameraFollow.distance = distance;
+	g_cameraFollow.zoomTimeScale = speed;
+	g_cameraFollow.heading = glm::radians(angle);
+	g_cameraFollow.relativeHeading = enableBehind;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "CAMERA_PROPERTIES distance {:.1f}, speed {:.2f}, heading {:.1f}, behind {}", distance,
+	                   speed, angle, enableBehind);
 }
 
 void EnableDisableMusic() // 181 ENABLE_DISABLE_MUSIC
@@ -13643,6 +14135,9 @@ void SetAviSequence() // 203 SET_AVI_SEQUENCE
 		auto& fs = Locator::filesystem::value();
 		openblack::video::StartMovie(fs.GetPath<openblack::filesystem::Path::Data>(true) / "INTRO.bik");
 	}
+	// PSysGlobal::StartAVISequence: after the movie (or with none to play) the fade the script made for it is gone at
+	// once, so the game comes back in full.
+	SetupScreenFadeBackToNormal(0);
 }
 
 void PlayGesture() // 204 PLAY_GESTURE
@@ -13985,22 +14480,21 @@ void CreateRewardInTown() // 240 CREATE_REWARD_IN_TOWN
 void SetFade() // 241 SET_FADE
 {
 	const auto time = Popf();
-	[[maybe_unused]] const auto blue = Popf();
-	[[maybe_unused]] const auto green = Popf();
-	[[maybe_unused]] const auto red = Popf();
-	// TODO: draw the fade. Only its timing is kept, so FADE_FINISHED waits as long as the game would.
-	StartFade(time);
+	const auto blue = Popf();
+	const auto green = Popf();
+	const auto red = Popf();
+	SetupScreenFadeTo(static_cast<uint8_t>(red), static_cast<uint8_t>(green), static_cast<uint8_t>(blue), static_cast<int>(time));
 }
 
 void SetFadeIn() // 242 SET_FADE_IN
 {
 	const auto duration = Popf();
-	StartFade(duration);
+	SetupScreenFadeBackToNormal(static_cast<int>(duration));
 }
 
 void FadeFinished() // 243 FADE_FINISHED
 {
-	Pushb(ScriptNow() >= g_fadeEnd);
+	Pushb(g_screenFade.rate == 0.0f); // fn_006EBB50
 }
 
 void SetPlayerMagic() // 244 SET_PLAYER_MAGIC
@@ -14497,39 +14991,37 @@ void GetObjectLeashType() // 275 GET_OBJECT_LEASH_TYPE
 
 void SetFocusFollow() // 276 SET_FOCUS_FOLLOW
 {
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto target = Pop().uintVal;
+	CameraFollowFocus(target);
 }
 
 void SetPositionFollow() // 277 SET_POSITION_FOLLOW
 {
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto target = Pop().uintVal;
+	CameraFollowPosition(target, std::nullopt, true);
 }
 
 void SetFocusAndPositionFollow() // 278 SET_FOCUS_AND_POSITION_FOLLOW
 {
-	[[maybe_unused]] const auto distance = Popf();
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto distance = Popf();
+	const auto target = Pop().uintVal;
+	CameraFollowPosition(target, distance, true);
 }
 
 void SetCameraLens() // 279 SET_CAMERA_LENS
 {
-	[[maybe_unused]] const auto lens = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// As the original (runblack.exe 0x6ee2e0): back to the usual lens, over the given time.
+	const auto time = Popf();
+	Locator::camera::value().MoveLens(Locator::config::value().cameraXFov,
+	                                  std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<float>(time)));
 }
 
 void MoveCameraLens() // 280 MOVE_CAMERA_LENS
 {
-	[[maybe_unused]] const auto time = Popf();
-	[[maybe_unused]] const auto lens = Popf();
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// The lens is the field of view across the screen, in degrees (runblack.exe 0x6ee280: GCamera::SetCameraFov).
+	const auto time = Popf();
+	const auto lens = Popf();
+	Locator::camera::value().MoveLens(lens, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<float>(time)));
 }
 
 void CreatureReaction() // 281 CREATURE_REACTION
@@ -14611,7 +15103,10 @@ void MoveGameTime() // 289 MOVE_GAME_TIME
 	{
 		to += 24.0f;
 	}
-	g_gameTimeMove = GameTimeMove {g_gameHour, to, std::max(duration, 0.0f), 0.0f};
+	// The duration is not in seconds: the original's opening (MOVE_GAME_TIME 12 460, from 7.3) reaches full day 39
+	// seconds in - sky hour 8.25, 27% of the way from 6.875 to 12 (the move goes evenly in sky hours, see SkyHour) -
+	// so it takes about 145 seconds in all, 0.316 of the number.
+	g_gameTimeMove = GameTimeMove {g_gameHour, to, std::max(duration * 0.316f, 0.0f), 0.0f};
 }
 
 void SetHighGraphicsDetail() // 290 SET_HIGH_GRAPHICS_DETAIL
@@ -14698,16 +15193,16 @@ void SetGraphicsClipping() // 299 SET_GRAPHICS_CLIPPING
 
 void SpiritAppear() // 300 SPIRIT_APPEAR
 {
-	[[maybe_unused]] const auto spirit = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto spirit = Pop().intVal;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SPIRIT_APPEAR {}", spirit);
+	helpspirits::Appear(AdvisorOf(spirit));
 }
 
 void SpiritDisappear() // 301 SPIRIT_DISAPPEAR
 {
-	[[maybe_unused]] const auto spirit = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto spirit = Pop().intVal;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "SPIRIT_DISAPPEAR {}", spirit);
+	helpspirits::Disappear(AdvisorOf(spirit));
 }
 
 void SetFocusOnObject() // 302 SET_FOCUS_ON_OBJECT
@@ -14957,19 +15452,771 @@ void SetPlayerBelief() // 325 SET_PLAYER_BELIEF
 	SetTownBelief(object, player, belief);
 }
 
+// The opening's god, after the movie (FollowUs: PLAY_JC_SPECIAL 0, 1, 2, 4, 5, 5): runblack.exe 1.20's JCMisc.cpp
+// Intro, whose fn_005DF9C0 starts each effect and fn_005DF640 moves them each frame. A fire ball comes down out of
+// the sky into the sea where the boy swims, the camera behind it; a hand (Data/Misc/hand_intro.l3d) rises where it
+// fell and picks him up (hand_intro2.anm, "Hand_Pick_Up_Swimmer"); then on the beach the hand puts him down by his
+// parents (hand_intro.anm, "Hand_Put_Down_Swimmer"), the boy held at its EBone. Without it the boy was simply back on
+// the sand when the screen came up from black.
+namespace
+{
+enum SJC : int // ScriptEnumstwo.h's SCRIPT_JC_SPECIAL
+{
+	SJC_CREATE_FIRE_BALL = 0,
+	SJC_CAMERA_FOLLOW_FIRE_BALL = 1,
+	SJC_CANCEL_CAMERA_FOLLOW_FIRE_BALL = 2,
+	SJC_CREATE_HAND_WITH_KID = 4,
+	SJC_ACTIVATED_HAND = 5,
+	SJC_I_AM_THE_LITTLE_BOY = 7,
+	SJC_START_HAND_WITH_BOY = 13,
+	SJC_CLEAN_INTRO = 18,
+};
+
+// Intro's numbers (its statics at 0xd19a28/0xd19a38 and the constants beside them).
+const glm::vec3 k_IntroFireBallTarget {1416.337f, 0.0f, 2053.503f}; // where the boy swims
+const glm::vec3 k_IntroFireBallHeading {-1.0f, -0.24f, -1.0f};    // normalised: down from the north-east sky
+const glm::vec3 k_IntroPickUpHand {1416.337f, -1.5f, 2053.503f};   // the hand risen where the fire ball fell
+constexpr float k_IntroPickUpAngle = glm::pi<float>();
+const glm::vec3 k_IntroPutDownHand {1494.379f, -2.5f, 2091.474f}; // on the beach by the mother and father
+constexpr float k_IntroPutDownAngle = -0.7853982f - glm::radians(15.0f);
+constexpr float k_IntroHandScale = 0.008f;
+constexpr float k_IntroBoyCarriedMs = 1817.0f;  // held at the EBone this long into the put-down
+constexpr float k_IntroBoyBelowEBone = 0.65f;   // and this far below it
+constexpr float k_IntroSecondActivateMs = 2379.0f; // a second ACTIVATED_HAND skips on to here (0x94b)
+
+// The fire ball (fn_00827F20, drawn by fn_008283D0): 20 LH3DSprites of Data/Textures/misc0 on one line, flying from
+// 4000 behind the target at 0.45 a millisecond and stopping 10 short of it.
+constexpr float k_FireBallStartDistance = 4000.0f;
+constexpr float k_FireBallTravel = 3990.0f;
+constexpr float k_FireBallSpeedPerMs = 0.45f;
+constexpr float k_FireBallTrailStep = 6.0f;
+constexpr float k_FireBallOnTopAfterMs = 8237.0f; // 0x202d: from here drawn over everything (Z func always)
+constexpr float k_FireBallHoldMs = 500.0f;        // landed: the core alone, held
+constexpr float k_FireBallFadeMs = 1000.0f;       // then fading from 255 to 50
+constexpr float k_FireBallCameraBack = 150.0f;    // the following camera, behind the ball
+constexpr float k_FireBallCameraUp = 30.0f;
+constexpr int k_FireBallSprites = 20;
+
+struct IntroFireBall
+{
+	enum class State
+	{
+		Flying,
+		Landed,
+		Fading,
+		Gone,
+	} state = State::Flying;
+	float ageMs = 0.0f;
+	float timerMs = 0.0f;
+	std::array<entt::entity, k_FireBallSprites> sprites {};
+	std::array<float, k_FireBallSprites> size {};
+	std::array<float, k_FireBallSprites> alpha {};
+	float streakAngle = 0.0f;
+};
+
+struct IntroState
+{
+	// fn_005DF640's 0xbf2afc: -1 nothing, 0 the fire ball flying, 12 it has landed and the hand is up, 4 on the beach.
+	int state = -1;
+	std::optional<IntroFireBall> fireBall;
+	bool cameraFollows = false;
+	entt::entity hand = entt::null;
+	uint32_t handAnimation = 0;
+	bool pickUpPlaying = false; // 0xd19cb0: the pick-up runs once the fire ball has gone
+	bool pickUpDone = false;    // 0xd19c94
+	bool activated = false;     // 0xd19ca4: the put-down running
+	bool carrying = false;      // 0xd19c34: the boy drawn in the hand
+	float handMs = 0.0f;
+	uint32_t littleBoy = 0;     // THING_JC_SPECIAL I_AM_THE_LITTLE_BOY
+	std::optional<glm::vec3> boyPutDown; // where the scripts stood him while he was carried
+	// hand_intro.l3d's EBone: a 3x4 matrix at its footprint offset + 4, its bone at + 0x304 (fn_005DFCE0).
+	int eBone = -1;
+	glm::vec3 eBoneOffset {0.0f};
+	bool eBoneRead = false;
+};
+IntroState g_intro;
+
+void ReadIntroEBone()
+{
+	auto& intro = g_intro;
+	if (intro.eBoneRead)
+	{
+		return;
+	}
+	intro.eBoneRead = true;
+	try
+	{
+		auto& fs = Locator::filesystem::value();
+		const auto data = fs.ReadAll(fs.GetPath<openblack::filesystem::Path::Misc>() / "hand_intro.l3d");
+		uint32_t base = 0;
+		if (data.size() >= 0x4c)
+		{
+			std::memcpy(&base, data.data() + 0x48, sizeof(base));
+		}
+		if (base != 0 && base + 0x308 <= data.size())
+		{
+			std::array<float, 12> matrix {};
+			std::memcpy(matrix.data(), data.data() + base + 4, sizeof(matrix));
+			int32_t bone = -1;
+			std::memcpy(&bone, data.data() + base + 0x304, sizeof(bone));
+			intro.eBone = bone;
+			intro.eBoneOffset = glm::vec3(matrix[9], matrix[10], matrix[11]);
+			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Intro hand EBone on bone {} at ({:.2f}, {:.2f}, {:.2f})", bone,
+			                   intro.eBoneOffset.x, intro.eBoneOffset.y, intro.eBoneOffset.z);
+		}
+	}
+	catch (const std::exception& e)
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "Intro hand EBone: {}", e.what());
+	}
+}
+
+// The hands' lengths in milliseconds: their .anm header's word 0x20, which Intro steps through by the game's time
+// (as the chest's coffre.anm, k_ChestOpenSeconds).
+float IntroAnimationMs(uint32_t animation)
+{
+	if (animation == entt::hashed_string("hand_intro").value())
+	{
+		return 3066.0f; // Hand_Put_Down_Swimmer, 30 frames
+	}
+	if (animation == entt::hashed_string("hand_intro2").value())
+	{
+		return 766.0f; // Hand_Pick_Up_Swimmer, 8 frames
+	}
+	return 0.0f;
+}
+
+// The hand's bones `ms` into its animation, relative to their parents (as the chest's).
+std::vector<glm::mat4> IntroHandPose(uint32_t animation, float ms)
+{
+	const auto& animations = Locator::resources::value().GetAnimations();
+	if (!animations.Contains(animation) || animations.Handle(animation)->GetFrames().empty())
+	{
+		return {};
+	}
+	const auto& anim = *animations.Handle(animation);
+	const float duration = std::max(1.0f, IntroAnimationMs(animation));
+	const float last = static_cast<float>(anim.GetFrames().back().time);
+	return anim.GetBoneMatrices(static_cast<uint32_t>(std::clamp(ms / duration, 0.0f, 1.0f) * last));
+}
+
+void PlaceIntroHand(uint32_t animation, const glm::vec3& position, float angle)
+{
+	auto& intro = g_intro;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto mesh = entt::hashed_string("hand_intro").value();
+	if (!Locator::resources::value().GetMeshes().Contains(mesh))
+	{
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "Intro hand: Data/Misc/hand_intro.l3d not loaded");
+		return;
+	}
+	if (!registry.Valid(intro.hand))
+	{
+		intro.hand = registry.Create();
+		registry.Assign<openblack::ecs::components::Mesh>(intro.hand, mesh, static_cast<int8_t>(0), static_cast<int8_t>(0));
+		registry.Assign<openblack::ecs::components::Animated>(intro.hand, 0u, 0.0f, std::vector<glm::mat4> {});
+		registry.Assign<Transform>(intro.hand, position, glm::mat3(1.0f), glm::vec3(k_IntroHandScale));
+	}
+	auto& transform = registry.Get<Transform>(intro.hand);
+	transform.position = position;
+	transform.rotation = glm::mat3(glm::eulerAngleY(angle));
+	transform.scale = glm::vec3(k_IntroHandScale);
+	intro.handAnimation = animation;
+	intro.handMs = 0.0f;
+	registry.Get<openblack::ecs::components::Animated>(intro.hand).localPose = IntroHandPose(animation, 0.0f);
+}
+
+void RemoveIntroFireBall()
+{
+	auto& intro = g_intro;
+	if (!intro.fireBall)
+	{
+		return;
+	}
+	auto& registry = Locator::entitiesRegistry::value();
+	for (const auto sprite : intro.fireBall->sprites)
+	{
+		if (registry.Valid(sprite))
+		{
+			registry.Destroy(sprite);
+		}
+	}
+	intro.fireBall.reset();
+}
+
+// Intro::ReleaseAll: the hand and the fire ball gone, the boy back where the scripts put him.
+void ReleaseIntro()
+{
+	auto& intro = g_intro;
+	auto& registry = Locator::entitiesRegistry::value();
+	RemoveIntroFireBall();
+	if (registry.Valid(intro.hand))
+	{
+		registry.Destroy(intro.hand);
+	}
+	intro.hand = entt::null;
+	if (intro.boyPutDown && registry.Valid(static_cast<entt::entity>(intro.littleBoy)) &&
+	    registry.AllOf<Transform>(static_cast<entt::entity>(intro.littleBoy)))
+	{
+		registry.Get<Transform>(static_cast<entt::entity>(intro.littleBoy)).position = *intro.boyPutDown;
+	}
+	intro.boyPutDown.reset();
+	intro.state = -1;
+	intro.cameraFollows = false;
+	intro.pickUpPlaying = false;
+	intro.activated = false;
+	intro.carrying = false;
+}
+
+void CreateIntroFireBall()
+{
+	auto& intro = g_intro;
+	RemoveIntroFireBall();
+	auto* sheet = SpriteSheet("misc0");
+	if (sheet == nullptr)
+	{
+		return;
+	}
+	auto& registry = Locator::entitiesRegistry::value();
+	auto& ball = intro.fireBall.emplace();
+	// Its sprites (fn_00827F20): the 18 of the tail shrink from the head back and fade (alpha (19 - i) / 20); the first
+	// six are drawn twice as big; the 19th is a big faint halo at the head and the 20th a long thin streak through it.
+	for (int i = 0; i < k_FireBallSprites; ++i)
+	{
+		const float n = static_cast<float>(19 - i);
+		float size = n * 15.0f * 0.05f + 3.0f;
+		if (i <= 5)
+		{
+			size *= 2.0f;
+		}
+		ball.size[i] = size;
+		ball.alpha[i] = std::floor(n * 255.0f / 20.0f) / 255.0f;
+		// misc0's three fire puffs, 32 texels each along its row 192 (the sprite flags' low bits): the big soft one at
+		// the head, the small hard one for the streak, the middling one down the tail.
+		int tile = i <= 5 ? 0 : 2;
+		if (i == 18)
+		{
+			size = 80.0f;
+			ball.size[i] = size;
+			ball.alpha[i] = 40.0f / 255.0f;
+		}
+		if (i == 19)
+		{
+			tile = 1;
+			ball.size[i] = 350.0f;
+			ball.alpha[i] = 14.0f / 255.0f;
+		}
+		const auto entity = registry.Create();
+		auto& sprite = registry.Assign<openblack::ecs::components::Sprite>(
+		    entity, sheet->GetNativeHandle(), glm::vec2(static_cast<float>(tile) * 0.125f + 0.002f, 0.75f + 0.002f),
+		    glm::vec2(0.121f), glm::vec4(1.0f, 1.0f, 1.0f, ball.alpha[i]));
+		sprite.fullColour = true;
+		registry.Assign<Transform>(entity, k_IntroFireBallTarget, glm::mat3(1.0f), glm::vec3(0.0f));
+		ball.sprites[i] = entity;
+	}
+	ball.streakAngle = -glm::pi<float>() / 8.0f;
+}
+
+glm::vec3 IntroFireBallHead(const IntroFireBall& ball)
+{
+	const auto heading = glm::normalize(k_IntroFireBallHeading);
+	const auto start = k_IntroFireBallTarget - heading * k_FireBallStartDistance;
+	return start + heading * std::min(ball.ageMs * k_FireBallSpeedPerMs, k_FireBallTravel);
+}
+
+// fn_008283D0, each frame: the ball along its line; landed, only its core (three times, turned at random) holding
+// then fading; and the following camera behind it.
+void UpdateIntroFireBall(float ms)
+{
+	auto& intro = g_intro;
+	auto& ball = *intro.fireBall;
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto heading = glm::normalize(k_IntroFireBallHeading);
+	if (ball.state == IntroFireBall::State::Flying && ball.ageMs * k_FireBallSpeedPerMs >= k_FireBallTravel)
+	{
+		ball.state = IntroFireBall::State::Landed;
+		ball.timerMs = k_FireBallHoldMs;
+	}
+	else if (ball.state == IntroFireBall::State::Landed)
+	{
+		ball.timerMs -= ms;
+		if (ball.timerMs < 0.0f)
+		{
+			ball.state = IntroFireBall::State::Fading;
+			ball.timerMs = k_FireBallFadeMs;
+		}
+	}
+	else if (ball.state == IntroFireBall::State::Fading)
+	{
+		ball.timerMs -= ms;
+		if (ball.timerMs < 0.0f)
+		{
+			ball.state = IntroFireBall::State::Gone;
+		}
+	}
+	const auto head = IntroFireBallHead(ball);
+	const bool flying = ball.state == IntroFireBall::State::Flying;
+	const bool onTop = !flying || ball.ageMs > k_FireBallOnTopAfterMs;
+	for (int i = 0; i < k_FireBallSprites; ++i)
+	{
+		const auto entity = ball.sprites[i];
+		if (!registry.Valid(entity))
+		{
+			continue;
+		}
+		auto& sprite = registry.Get<openblack::ecs::components::Sprite>(entity);
+		auto& transform = registry.Get<Transform>(entity);
+		sprite.onTop = onTop;
+		float size = ball.size[i];
+		float alpha = ball.alpha[i];
+		float angle = Locator::rng::value().NextValue(0.0f, glm::two_pi<float>());
+		glm::vec2 stretch(1.0f);
+		auto position = head;
+		if (flying)
+		{
+			if (i < 18)
+			{
+				position += heading * (-static_cast<float>(i) * k_FireBallTrailStep);
+			}
+			if (i < 5)
+			{
+				// The head's five flicker: (57 - 3i) / 4 + 3, give or take 2, every frame.
+				size = static_cast<float>(57 - 3 * i) * 5.0f * 0.05f + 3.0f + Locator::rng::value().NextValue(-2.0f, 2.0f);
+			}
+			if (i == 19)
+			{
+				ball.streakAngle += ms * 0.00015707963f;
+				angle = ball.streakAngle;
+				stretch = glm::vec2(1.0f, 0.05f);
+			}
+		}
+		else if (i < 3)
+		{
+			// Landed: sprite 0 drawn three times, at random turns - its alpha 255, then down to 50 as it fades.
+			size = ball.size[0];
+			alpha = ball.state == IntroFireBall::State::Fading
+			            ? (std::max(ball.timerMs, 0.0f) * (255.0f - 50.0f) / k_FireBallFadeMs + 50.0f) / 255.0f
+			            : ball.alpha[0];
+			if (ball.state == IntroFireBall::State::Gone)
+			{
+				alpha = 0.0f;
+			}
+		}
+		else
+		{
+			alpha = 0.0f;
+		}
+		sprite.tint.a = alpha;
+		transform.position = position;
+		transform.rotation = glm::mat3(glm::eulerAngleZ(angle));
+		// The sprite's size is its width; the drawn plane is 2 across.
+		transform.scale = alpha > 0.0f ? glm::vec3(size * 0.5f * stretch.x, size * 0.5f * stretch.y, 1.0f) : glm::vec3(0.0f);
+	}
+	if (flying)
+	{
+		ball.ageMs += ms;
+	}
+	// SJC_CAMERA_FOLLOW_FIRE_BALL: LH3DTech's camera put 150 back along its line and 30 up, looking at the target
+	// (0xea9ec8 = 2), while the ball flies.
+	if (intro.cameraFollows && intro.state == 0)
+	{
+		auto& cam = Locator::camera::value();
+		cam.SetOrigin(IntroFireBallHead(ball) - heading * k_FireBallCameraBack + glm::vec3(0.0f, k_FireBallCameraUp, 0.0f));
+		cam.SetFocus(k_IntroFireBallTarget);
+	}
+}
+
+// fn_005DFCE0: the hand's EBone in the world, `ms` into the put-down - where the boy is drawn.
+std::optional<glm::vec3> IntroBoyInHand()
+{
+	auto& intro = g_intro;
+	auto& registry = Locator::entitiesRegistry::value();
+	if (!registry.Valid(intro.hand) || !intro.activated || intro.handMs > k_IntroBoyCarriedMs || intro.eBone < 0)
+	{
+		return std::nullopt;
+	}
+	const auto& meshes = Locator::resources::value().GetMeshes();
+	const auto meshId = entt::hashed_string("hand_intro").value();
+	if (!meshes.Contains(meshId))
+	{
+		return std::nullopt;
+	}
+	const auto& mesh = *meshes.Handle(meshId);
+	const auto& pose = registry.Get<openblack::ecs::components::Animated>(intro.hand).localPose;
+	const auto& parents = mesh.GetBoneParents();
+	if (pose.size() != parents.size() || static_cast<size_t>(intro.eBone) >= pose.size())
+	{
+		return std::nullopt;
+	}
+	// The bones composed as the renderer does (RenderingSystem), parents first.
+	std::vector<glm::mat4> model(pose.size());
+	for (size_t i = 0; i < pose.size(); ++i)
+	{
+		model[i] = parents[i] != std::numeric_limits<uint32_t>::max() ? model[parents[i]] * pose[i] : pose[i];
+	}
+	const auto& transform = registry.Get<Transform>(intro.hand);
+	const auto world = glm::scale(glm::translate(glm::mat4(1.0f), transform.position) * glm::mat4(transform.rotation), transform.scale);
+	auto point = glm::vec3(world * model[intro.eBone] * glm::vec4(intro.eBoneOffset, 1.0f));
+	point.y -= k_IntroBoyBelowEBone;
+	return point;
+}
+
+void UpdateIntroHand(float ms)
+{
+	auto& intro = g_intro;
+	auto& registry = Locator::entitiesRegistry::value();
+	if (!registry.Valid(intro.hand))
+	{
+		return;
+	}
+	const float duration = IntroAnimationMs(intro.handAnimation);
+	const bool runs = intro.state == 12 ? intro.pickUpPlaying : intro.activated;
+	if (runs)
+	{
+		intro.handMs += ms;
+		if (intro.handMs >= duration)
+		{
+			intro.handMs = std::max(0.0f, duration - 1.0f);
+			if (intro.state == 12)
+			{
+				intro.pickUpDone = true;
+			}
+			else
+			{
+				// The put-down done: the hand has gone back up out of sight.
+				ReleaseIntro();
+				return;
+			}
+		}
+	}
+	registry.Get<openblack::ecs::components::Animated>(intro.hand).localPose = IntroHandPose(intro.handAnimation, intro.handMs);
+}
+
+void UpdateIntro(float seconds)
+{
+	auto& intro = g_intro;
+	if (intro.state == -1)
+	{
+		return;
+	}
+	const float ms = seconds * 1000.0f;
+	if (intro.fireBall)
+	{
+		UpdateIntroFireBall(ms);
+		if (intro.fireBall->state == IntroFireBall::State::Gone)
+		{
+			RemoveIntroFireBall();
+			if (intro.state == 12)
+			{
+				intro.pickUpPlaying = true;
+			}
+		}
+		else if (intro.state == 0 && intro.fireBall->state != IntroFireBall::State::Flying)
+		{
+			// Landed: the hand rises where it fell, still until the fire ball has gone.
+			intro.state = 12;
+			intro.pickUpDone = false;
+			intro.pickUpPlaying = false;
+			PlaceIntroHand(entt::hashed_string("hand_intro2").value(), k_IntroPickUpHand, k_IntroPickUpAngle);
+			SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "Intro: the fire ball has landed, the hand rises");
+		}
+	}
+	UpdateIntroHand(ms);
+	// GLandscape::Draw: the little boy drawn in the hand while it carries him.
+	auto& registry = Locator::entitiesRegistry::value();
+	const auto boy = static_cast<entt::entity>(intro.littleBoy);
+	if (intro.littleBoy != 0 && registry.Valid(boy) && registry.AllOf<Transform>(boy))
+	{
+		auto& transform = registry.Get<Transform>(boy);
+		const auto held = intro.carrying ? IntroBoyInHand() : std::nullopt;
+		if (held)
+		{
+			if (!intro.boyPutDown)
+			{
+				intro.boyPutDown = transform.position;
+			}
+			transform.position = *held;
+		}
+		else if (intro.boyPutDown)
+		{
+			transform.position = *intro.boyPutDown;
+			intro.boyPutDown.reset();
+		}
+	}
+}
+
+// A shark's wake: the water's circles (GWater's, 1024 of them), one dropped at its fin every 50 ms of drawing
+// (fn_00775170, from Whale's draw fn_00774E30: a counter shared by every shark, plus each frame's milliseconds,
+// a circle each time it passes 50) - on the sea at its mesh's EBone (bone 0, (-0.08, 0.00, 0.30): SharkBoned's,
+// AllMeshes.g3d mesh 31), turned to its heading. Each (fn_005E5100) ages at half the game's time to 700 - 1.4 s -
+// growing from nothing to 10 across (its size age x 10 / 700, its height ratio 1) and fading from 0x90 of white to
+// nothing (alpha (255 - age x 255 / 700) x 0x90 / 256), lying flat (sprite flag 0x40) in the additive smoke material
+// (g_smoke_additif_mat: Data/Textures/smoke.raw) as its sprite 49, a white V of wake, its point along the way the shark
+// swims (the heading Whale's draw takes from its move).
+struct WaterCircle
+{
+	entt::entity sprite = entt::null;
+	float age = 0.0f;
+};
+std::vector<WaterCircle> g_waterCircles;
+
+void UpdateSharkWakes(float seconds)
+{
+	constexpr float k_DropEveryMs = 50.0f;
+	constexpr float k_CircleAge = 700.0f;
+	constexpr float k_AgeRate = 0.5f;
+	constexpr float k_CircleGrowth = 10.0f;
+	constexpr float k_CircleAlpha = 144.0f / 256.0f;
+	constexpr size_t k_MostCircles = 1024;
+	static const glm::vec3 s_fin(-0.07914868f, -0.00280821f, 0.30429077f);
+	static float s_counter = 0.0f;
+	auto& registry = Locator::entitiesRegistry::value();
+	const float ms = seconds * 1000.0f;
+	for (auto it = g_waterCircles.begin(); it != g_waterCircles.end();)
+	{
+		it->age += ms * k_AgeRate;
+		if (it->age >= k_CircleAge || !registry.Valid(it->sprite))
+		{
+			if (registry.Valid(it->sprite))
+			{
+				registry.Destroy(it->sprite);
+			}
+			it = g_waterCircles.erase(it);
+			continue;
+		}
+		const float size = it->age * k_CircleGrowth / k_CircleAge;
+		registry.Get<openblack::ecs::components::Sprite>(it->sprite).tint.a = (1.0f - it->age / k_CircleAge) * k_CircleAlpha;
+		registry.Get<Transform>(it->sprite).scale = glm::vec3(size * 0.5f); // the drawn plane is 2 across
+		++it;
+	}
+	if (ms <= 0.0f)
+	{
+		return;
+	}
+	const auto sharkMesh = resources::HashIdentifier(MeshId::SharkBoned);
+	const auto& animations = Locator::resources::value().GetAnimations();
+	static std::unordered_map<entt::entity, std::pair<glm::vec3, float>> s_headings; // where each was, and its heading
+	std::erase_if(s_headings, [&](const auto& shark) { return !registry.Valid(shark.first); });
+	std::vector<std::pair<glm::vec3, float>> drops;
+	registry.Each<const openblack::ecs::components::Mesh, const Transform, const openblack::ecs::components::Animated>(
+	    [&](entt::entity entity, const openblack::ecs::components::Mesh& mesh, const Transform& transform,
+	        const openblack::ecs::components::Animated& animated) {
+		    if (mesh.id != sharkMesh)
+		    {
+			    return;
+		    }
+		    auto& [was, heading] = s_headings.try_emplace(entity, transform.position, 0.0f).first->second;
+		    if (const auto moved = transform.position - was; moved.x != 0.0f || moved.z != 0.0f)
+		    {
+			    heading = std::atan2(-moved.z, moved.x); // eulerAngleY(heading) turns the sprite's +x (the V's point) that way
+		    }
+		    was = transform.position;
+		    if (s_counter > k_DropEveryMs)
+		    {
+			    s_counter = std::fmod(s_counter, k_DropEveryMs);
+			    // Bone 0, the root, as the swim poses it.
+			    glm::mat4 bone(1.0f);
+			    if (const auto id = resources::HashIdentifier(animated.animation); animations.Contains(id))
+			    {
+				    const auto posed = animations.Handle(id)->GetBoneMatrices(static_cast<uint32_t>(animated.time));
+				    if (!posed.empty())
+				    {
+					    bone = posed[0];
+				    }
+			    }
+			    const auto world =
+			        glm::scale(glm::translate(glm::mat4(1.0f), transform.position) * glm::mat4(transform.rotation), transform.scale);
+			    auto at = glm::vec3(world * bone * glm::vec4(s_fin, 1.0f));
+			    at.y = 0.05f; // on the sea (0), just above it
+			    drops.emplace_back(at, heading);
+		    }
+		    s_counter += ms;
+	    });
+	auto* sheet = drops.empty() ? nullptr : SpriteSheet("smoke");
+	for (const auto& [at, heading] : drops)
+	{
+		if (sheet == nullptr || g_waterCircles.size() >= k_MostCircles)
+		{
+			break;
+		}
+		const auto entity = registry.Create();
+		auto& sprite = registry.Assign<openblack::ecs::components::Sprite>(
+		    entity, sheet->GetNativeHandle(), glm::vec2(1.0f * 0.125f + 0.002f, 0.75f + 0.002f), glm::vec2(0.121f),
+		    glm::vec4(1.0f, 1.0f, 1.0f, k_CircleAlpha));
+		sprite.fullColour = true;
+		sprite.flat = true;
+		registry.Assign<Transform>(entity, at, glm::mat3(glm::eulerAngleY(heading)), glm::vec3(0.0f));
+		g_waterCircles.push_back({entity, 0.0f});
+	}
+}
+
+// The sun (LH3DSky): Data/WeatherSystem/sun.l3d, one square 9928 across, on Data/Textures/sun.raw's rayed sun (its u
+// 0.5-0.75, v 0-0.25; LH3DDivers::Open loads it) in an additive material that writes no depth (type 0xd).
+// It stands at (-30000, 7500 e, -30000) - the sky's hour (fn_0086A160) put to 6-12 and back, e = (that - 6) / 6, so
+// on the horizon at 6 and 18, highest at noon (fn_0086C020) - drawn with the land, coloured 0x957c63 at its
+// strength: 255 from 6 to 18, rising from 3 and dying by 21 (85 an hour). Then, over everything (PostDrawSun), its
+// glare, 1.8 times as big, coloured 0xa06a35 at that strength times how much of it is seen: five points of it tested
+// against the land in front (fn_0086BD00, the depth buffer's), eased towards a hundredth of the way a millisecond.
+// The opening's dusk puts it just over the sea behind the family, as in the original's shots from 54 to 84 s.
+void UpdateSun(float seconds)
+{
+	constexpr glm::vec2 k_SunAt(-30000.0f, -30000.0f);
+	constexpr float k_SunHighest = 7500.0f;
+	constexpr float k_SunHalfSize = 4964.119f;
+	constexpr float k_GlareScale = 1.8f;
+	constexpr float k_Ease = 0.01f; // a millisecond
+	static entt::entity s_disc = entt::null;
+	static entt::entity s_glare = entt::null;
+	static float s_seen = 0.0f; // 0-255
+	auto& registry = Locator::entitiesRegistry::value();
+	auto* sheet = SpriteSheet("sun");
+	if (sheet == nullptr || !Locator::skySystem::has_value())
+	{
+		return;
+	}
+	auto make = [&](entt::entity& entity, glm::vec3 tint, bool over) {
+		if (entity == entt::null || !registry.Valid(entity))
+		{
+			entity = registry.Create();
+			auto& sprite = registry.Assign<openblack::ecs::components::Sprite>(entity, sheet->GetNativeHandle(), glm::vec2(0.5f, 0.0f),
+			                                                                   glm::vec2(0.25f), glm::vec4(tint, 0.0f));
+			sprite.fullColour = true;
+			sprite.onTop = over;
+			registry.Assign<Transform>(entity, glm::vec3(0.0f), glm::mat3(1.0f), glm::vec3(0.0f));
+		}
+		return entity;
+	};
+	make(s_disc, glm::vec3(0x95, 0x7c, 0x63) / 255.0f, false);
+	make(s_glare, glm::vec3(0xa0, 0x6a, 0x35) / 255.0f, true);
+
+	const float hour = Locator::skySystem::value().GetTime();
+	float h = std::clamp(hour, 6.0f, 18.0f);
+	h = h > 12.0f ? 24.0f - h : h;
+	const float elevation = (h - 6.0f) / 6.0f;
+	float strength = 255.0f;
+	if (hour < 6.0f)
+	{
+		strength = hour < 3.0f ? 0.0f : (hour - 3.0f) * 85.0f;
+	}
+	else if (hour > 18.0f)
+	{
+		strength = hour > 21.0f ? 0.0f : 255.0f - (hour - 18.0f) * 85.0f;
+	}
+	const auto sun = glm::vec3(k_SunAt.x, k_SunHighest * elevation, k_SunAt.y);
+	if (InTemple())
+	{
+		strength = 0.0f; // LH3DSky::g_b_we_are_inside_citadel
+	}
+
+	// How much of it the land hides: its middle and four points about it, each looked for along the line from the
+	// camera, over the land near enough to stand in the way.
+	const auto eye = Locator::camera::value().GetOrigin();
+	const auto& land = Locator::terrainSystem::value();
+	auto seen = [&](glm::vec3 point) {
+		const auto way = glm::normalize(point - eye);
+		constexpr float k_Step = 8.0f;
+		constexpr float k_Far = 4000.0f;
+		for (float d = k_Step; d < k_Far; d += k_Step)
+		{
+			const auto at = eye + way * d;
+			if (at.y < land.GetHeightAt(glm::vec2(at.x, at.z)))
+			{
+				return false;
+			}
+		}
+		return true;
+	};
+	const auto toSun = glm::normalize(sun - eye);
+	const auto side = glm::normalize(glm::cross(toSun, glm::vec3(0.0f, 1.0f, 0.0f)));
+	const auto up = glm::cross(side, toSun);
+	const float spread = k_SunHalfSize * 0.25f;
+	int count = 0;
+	if (strength > 0.0f)
+	{
+		for (const auto& offset : {glm::vec3(0.0f), side * spread, -side * spread, up * spread, -up * spread})
+		{
+			count += seen(sun + offset) ? 1 : 0;
+		}
+	}
+	const float target = static_cast<float>(count) * 255.0f / 5.0f;
+	s_seen = std::clamp(s_seen + (target - s_seen) * std::min(seconds * 1000.0f * k_Ease, 1.0f), 0.0f, 255.0f);
+
+	auto place = [&](entt::entity entity, float size, float alpha) {
+		registry.Get<openblack::ecs::components::Sprite>(entity).tint.a = alpha;
+		auto& transform = registry.Get<Transform>(entity);
+		transform.position = sun;
+		transform.scale = alpha > 0.0f ? glm::vec3(size, size, 1.0f) : glm::vec3(0.0f);
+	};
+	place(s_disc, k_SunHalfSize, strength / 255.0f);
+	place(s_glare, k_SunHalfSize * k_GlareScale, s_seen * strength / (255.0f * 255.0f));
+}
+} // namespace
+
 void PlayJcSpecial() // 326 PLAY_JC_SPECIAL
 {
-	[[maybe_unused]] const auto feature = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	const auto feature = Pop().intVal;
+	auto& intro = g_intro;
+	SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "PLAY_JC_SPECIAL {}", feature);
+	switch (feature)
+	{
+	case SJC_CREATE_FIRE_BALL:
+		intro.state = 0;
+		CreateIntroFireBall();
+		break;
+	case SJC_CAMERA_FOLLOW_FIRE_BALL:
+		if (intro.state == 0)
+		{
+			intro.cameraFollows = true;
+		}
+		break;
+	case SJC_CANCEL_CAMERA_FOLLOW_FIRE_BALL:
+		if (intro.state == 0)
+		{
+			intro.cameraFollows = false;
+		}
+		break;
+	case SJC_CREATE_HAND_WITH_KID:
+		// The same hand (made now if it wasn't), on the beach with the put-down, waiting for ACTIVATED_HAND.
+		ReadIntroEBone();
+		RemoveIntroFireBall();
+		intro.cameraFollows = false;
+		PlaceIntroHand(entt::hashed_string("hand_intro").value(), k_IntroPutDownHand, k_IntroPutDownAngle);
+		intro.activated = false;
+		intro.carrying = false;
+		intro.state = 4;
+		break;
+	case SJC_ACTIVATED_HAND:
+		if (intro.state != 4)
+		{
+			break;
+		}
+		if (!intro.activated)
+		{
+			intro.activated = true;
+			intro.carrying = true;
+		}
+		else
+		{
+			// The second: on to the hand's leaving, the boy let go.
+			intro.handMs = k_IntroSecondActivateMs;
+			intro.carrying = false;
+		}
+		break;
+	case SJC_CLEAN_INTRO:
+		ReleaseIntro();
+		break;
+	default:
+		// 3 clouds, 6 the little boat, 14/15 bookmarks shown or hidden: not yet.
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "PLAY_JC_SPECIAL {} not implemented", feature);
+		break;
+	}
 }
 
 void IsPlayingJcSpecial() // 327 IS_PLAYING_JC_SPECIAL
 {
-	[[maybe_unused]] const auto feature = Pop().intVal;
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
-	Pushb(false);
+	// GScript::IsPlayingJCSpecial: 1 for all but START_HAND_WITH_BOY, which is whether the pick-up has finished.
+	const auto feature = Pop().intVal;
+	Pushb(feature == SJC_START_HAND_WITH_BOY ? g_intro.pickUpDone : true);
 }
 
 void VortexParameters() // 328 VORTEX_PARAMETERS
@@ -15197,11 +16444,24 @@ void StartAngleSound348() // 348 START_ANGLE_SOUND
 
 void ThingJcSpecial() // 349 THING_JC_SPECIAL
 {
-	[[maybe_unused]] const auto target = Pop().uintVal;
-	[[maybe_unused]] const auto feature = Pop().intVal;
+	const auto target = Pop().uintVal;
+	const auto feature = Pop().intVal;
 	[[maybe_unused]] const auto enable = static_cast<bool>(Pop().intVal);
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	// GScript::ThingJCSpecial (on a SET_HIGH_GRAPHICS_DETAIL villager): I_AM_THE_LITTLE_BOY marks the one the opening's
+	// hand carries (its SuperVillager's flag 1, read by GLandscape::Draw); CLEAN_INTRO is Intro::ReleaseAll.
+	switch (feature)
+	{
+	case SJC_I_AM_THE_LITTLE_BOY:
+		g_intro.littleBoy = target;
+		break;
+	case SJC_CLEAN_INTRO:
+		ReleaseIntro();
+		break;
+	default:
+		// 8 blend angle, 9-11 turns, 16/17, 19 always visible: not yet.
+		SPDLOG_LOGGER_WARN(spdlog::get("scripting"), "THING_JC_SPECIAL {} on {} not implemented", feature, target);
+		break;
+	}
 }
 
 void MusicPlayed350() // 350 MUSIC_PLAYED
@@ -15730,8 +16990,7 @@ void GetTownWorshipDeaths() // 410 GET_TOWN_WORSHIP_DEATHS
 
 void GameClearDialogue() // 411 GAME_CLEAR_DIALOGUE
 {
-	// TODO(Daniels118): implement this
-	SPDLOG_LOGGER_ERROR(spdlog::get("scripting"), "CHLApi Function {}() not implemented.", __func__);
+	openblack::subtitles::Clear();
 }
 
 void GameCloseDialogue() // 412 GAME_CLOSE_DIALOGUE
@@ -16879,6 +18138,8 @@ bool LoadTestPoint(int slot)
 	g_takenHighlights.clear();
 	ReleaseHeldCreatures();
 	g_followerPopups.clear();
+	ReleaseIntro();
+	g_intro.littleBoy = 0;
 	g_dialogueTask = 0;
 	g_gameTimeMove.reset();
 	const auto now = ScriptNow();

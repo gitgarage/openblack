@@ -52,8 +52,15 @@ glm::mat4 Camera::GetRotationMatrix() const
 
 glm::mat4 Camera::GetViewMatrix(Interpolation interpolation) const
 {
+	auto origin = GetOrigin(interpolation);
+	const auto focus = GetFocus(interpolation);
+	// As the original's GCamera::Update: a camera on its focus is drawn from a step back and up, not with no direction.
+	if (glm::dot(origin - focus, origin - focus) < 0.001f)
+	{
+		origin += glm::vec3(-1.0f, 1.0f, 0.0f);
+	}
 	// Invert the camera's rotation (transposed) and position (negated) to get the view matrix.
-	return glm::lookAt(GetOrigin(interpolation), GetFocus(interpolation), glm::vec3(0.0f, 1.0f, 0.0f));
+	return glm::lookAt(origin, focus, glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
 glm::mat4 Camera::GetViewProjectionMatrix(Interpolation interpolation) const
@@ -117,13 +124,27 @@ Camera& Camera::SetInterpolatorTime(std::chrono::microseconds t)
 	// and past t = 1 it extrapolates without bound. The player model restarts the interpolation
 	// every few frames so it never got there; a finished scripted move did, and the camera zoomed
 	// out forever (2026-09-24).
-	if (_interpolatorDuration.count() > 0 && t > _interpolatorDuration)
-	{
-		t = _interpolatorDuration;
-	}
-	_interpolatorTime = t;
+	_interpolatorTime = (_interpolatorDuration.count() > 0 && t > _interpolatorDuration) ? _interpolatorDuration : t;
+	_focusTime = (_focusDuration.count() > 0 && t > _focusDuration) ? _focusDuration : t;
 
 	return *this;
+}
+
+float Camera::GetFocusT() const
+{
+	return _focusDuration == decltype(_focusDuration)::zero()
+	           ? 1.0f
+	           : static_cast<float>(_focusTime.count()) / static_cast<float>(_focusDuration.count());
+}
+
+glm::vec3 Camera::MovedOrigin() const
+{
+	return _originInterpolators.PositionAt(GetInterpolatorT());
+}
+
+glm::vec3 Camera::MovedFocus() const
+{
+	return _focusInterpolators.PositionAt(GetFocusT());
 }
 
 glm::vec3 Camera::GetForward() const
@@ -230,20 +251,25 @@ void Camera::Update(std::chrono::microseconds dt)
 		const auto m1 = glm::zero<glm::vec3>();
 		// You have to normalize the velocity with the NEW duration
 		const auto durationSeconds = std::chrono::duration_cast<std::chrono::duration<float>>(updateInfo->duration);
-		SetOriginInterpolator(GetOrigin(), updateInfo->origin, GetOriginVelocity() * durationSeconds.count(), m1);
-		SetFocusInterpolator(GetFocus(), updateInfo->focus, GetFocusVelocity() * durationSeconds.count(), m1);
+		SetOriginInterpolator(MovedOrigin(), updateInfo->origin, GetOriginVelocity() * durationSeconds.count(), m1);
+		SetFocusInterpolator(MovedFocus(), updateInfo->focus, GetFocusVelocity() * durationSeconds.count(), m1);
 		SetInterpolatorDuration(updateInfo->duration);
 		SetInterpolatorTime(0us);
 	}
 
-	const auto duration = GetInterpolatorDuration().count();
-	if (duration == 0.0f)
+	// Each move's clock, a step of at most 0.1 s (as the original's GCamera::Update).
+	const auto step = std::min(100'000us, dt);
+	_interpolatorTime = _interpolatorDuration.count() == 0 ? _interpolatorDuration
+	                                                      : std::min(_interpolatorTime + step, _interpolatorDuration);
+	_focusTime = _focusDuration.count() == 0 ? _focusDuration : std::min(_focusTime + step, _focusDuration);
+	_lensTime = std::min(_lensTime + step, _lensDuration);
+
+	// Drawn at least a unit above the land, position and focus raised together (see _lift).
+	_lift = 0.0f;
+	if (Locator::terrainSystem::has_value())
 	{
-		SetInterpolatorT(1.0f);
-	}
-	else
-	{
-		AddInterpolatorTime(std::min(100'000us, dt));
+		const auto moved = MovedOrigin();
+		_lift = std::max(Locator::terrainSystem::value().GetHeightAt(glm::xz(moved)) + 1.0f - moved.y, 0.0f);
 	}
 }
 
@@ -257,13 +283,7 @@ void Camera::HandleActions(std::chrono::microseconds dt)
 
 Camera& Camera::SetScriptControl(bool enabled)
 {
-	if (enabled && !_scriptControl)
-	{
-		// Scripted moves start from wherever the camera is now.
-		_scriptOriginTarget = GetOrigin();
-		_scriptFocusTarget = GetFocus();
-	}
-	else if (!enabled && _scriptControl)
+	if (!enabled && _scriptControl)
 	{
 		// Hand the view back without a jump: the player model continues from here.
 		_model->SetFlight(GetOrigin(), GetFocus());
@@ -272,29 +292,79 @@ Camera& Camera::SetScriptControl(bool enabled)
 	return *this;
 }
 
+// As the original's Zoomer::SetDestinationWithSpeedAndTime: from where the move has it now, at the speed it has now, to
+// rest at the target - the other of position and focus carrying on with its own move.
 Camera& Camera::ScriptMoveOrigin(const glm::vec3& target, std::chrono::microseconds duration)
 {
 	++_scriptMoveCount;
-	using namespace std::chrono_literals;
-	const auto zero = glm::zero<glm::vec3>();
-	_scriptOriginTarget = target;
-	SetOriginInterpolator(GetOrigin(), _scriptOriginTarget, zero, zero);
-	SetFocusInterpolator(GetFocus(), _scriptFocusTarget, zero, zero);
-	SetInterpolatorDuration(duration);
-	SetInterpolatorTime(0us);
-	return *this;
+	return FollowOrigin(target, duration);
 }
 
 Camera& Camera::ScriptMoveFocus(const glm::vec3& target, std::chrono::microseconds duration)
 {
 	++_scriptMoveCount;
-	using namespace std::chrono_literals;
-	const auto zero = glm::zero<glm::vec3>();
-	_scriptFocusTarget = target;
-	SetOriginInterpolator(GetOrigin(), _scriptOriginTarget, zero, zero);
-	SetFocusInterpolator(GetFocus(), _scriptFocusTarget, zero, zero);
-	SetInterpolatorDuration(duration);
-	SetInterpolatorTime(0us);
+	return FollowFocus(target, duration);
+}
+
+Camera& Camera::MoveLens(float degrees, std::chrono::microseconds duration)
+{
+	_lensFrom = GetLens(degrees);
+	_lensTo = degrees;
+	_lensTime = std::chrono::microseconds::zero();
+	_lensDuration = duration;
+	return *this;
+}
+
+float Camera::GetLens(float fallback) const
+{
+	if (!_lensFrom)
+	{
+		return fallback;
+	}
+	if (_lensDuration.count() <= 0 || _lensTime >= _lensDuration)
+	{
+		return _lensTo;
+	}
+	// From rest to rest, as the camera's moves.
+	const float t = static_cast<float>(_lensTime.count()) / static_cast<float>(_lensDuration.count());
+	const float eased = t * t * (6.0f - 8.0f * t + 3.0f * t * t);
+	return *_lensFrom + (_lensTo - *_lensFrom) * eased;
+}
+
+bool Camera::HasScriptMoveArrived() const
+{
+	const auto origin = MovedOrigin() - _originInterpolators.p1;
+	const auto focus = MovedFocus() - _focusInterpolators.p1;
+	return glm::dot(origin, origin) < 0.001f && glm::dot(focus, focus) < 0.001f;
+}
+
+Camera& Camera::FollowOrigin(const glm::vec3& target, std::chrono::microseconds duration)
+{
+	const float seconds = std::chrono::duration<float>(duration).count();
+	if (seconds < 0.001f)
+	{
+		SetOrigin(target);
+		_interpolatorDuration = _interpolatorTime = std::chrono::microseconds::zero();
+		return *this;
+	}
+	SetOriginInterpolator(MovedOrigin(), target, GetOriginVelocity() * seconds, glm::zero<glm::vec3>());
+	_interpolatorDuration = duration;
+	_interpolatorTime = std::chrono::microseconds::zero();
+	return *this;
+}
+
+Camera& Camera::FollowFocus(const glm::vec3& target, std::chrono::microseconds duration)
+{
+	const float seconds = std::chrono::duration<float>(duration).count();
+	if (seconds < 0.001f)
+	{
+		SetFocus(target);
+		_focusDuration = _focusTime = std::chrono::microseconds::zero();
+		return *this;
+	}
+	SetFocusInterpolator(MovedFocus(), target, GetFocusVelocity() * seconds, glm::zero<glm::vec3>());
+	_focusDuration = duration;
+	_focusTime = std::chrono::microseconds::zero();
 	return *this;
 }
 
@@ -322,7 +392,7 @@ glm::vec3 Camera::GetOrigin(Interpolation interpolation) const
 	switch (interpolation)
 	{
 	case Interpolation::Current:
-		return _originInterpolators.PositionAt(GetInterpolatorT());
+		return MovedOrigin() + glm::vec3(0.0f, _lift, 0.0f);
 	case Interpolation::Start:
 		return _originInterpolators.p0;
 	case Interpolation::Target:
@@ -338,7 +408,7 @@ glm::vec3 Camera::GetFocus(Interpolation interpolation) const
 	switch (interpolation)
 	{
 	case Interpolation::Current:
-		return _focusInterpolators.PositionAt(GetInterpolatorT());
+		return MovedFocus() + glm::vec3(0.0f, _lift, 0.0f);
 	case Interpolation::Start:
 		return _focusInterpolators.p0;
 	case Interpolation::Target:
@@ -381,7 +451,7 @@ glm::vec3 Camera::GetFocusVelocity(Interpolation interpolation) const
 	switch (interpolation)
 	{
 	case Interpolation::Current:
-		result = _focusInterpolators.VelocityAt(GetInterpolatorT());
+		result = _focusInterpolators.VelocityAt(GetFocusT());
 		break;
 	case Interpolation::Start:
 		result = _focusInterpolators.v0;
@@ -394,11 +464,11 @@ glm::vec3 Camera::GetFocusVelocity(Interpolation interpolation) const
 		std::unreachable();
 	}
 
-	if (_interpolatorDuration == decltype(_interpolatorDuration)::zero())
+	if (_focusDuration == decltype(_focusDuration)::zero())
 	{
 		return result;
 	}
-	return result / std::chrono::duration_cast<std::chrono::duration<float>>(_interpolatorDuration).count();
+	return result / std::chrono::duration_cast<std::chrono::duration<float>>(_focusDuration).count();
 }
 
 glm::vec3 Camera::GetRotation() const
@@ -450,6 +520,7 @@ Camera& Camera::SetFocusInterpolator(const glm::vec3& p0, const glm::vec3& p1, c
 Camera& Camera::SetInterpolatorDuration(std::chrono::microseconds duration)
 {
 	_interpolatorDuration = duration;
+	_focusDuration = duration;
 
 	return *this;
 }

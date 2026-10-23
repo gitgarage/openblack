@@ -3289,16 +3289,12 @@ enum class SpeedState : uint32_t
 	MetresSec_100 = MakeSpeedState(100.0f),
 };
 
-// How fast the living go, against info.dat's speeds: at those, villagers (2.25 m/s, 1.63 tall) looked as if in fast
-// forward at x1 (Mike, 2026-10-17). Two thirds, with the animation clocks (CHLApi.cpp) slowed the same.
-constexpr float k_LivingPace = 2.0f / 3.0f;
-
 constexpr float GetSpeedStateSpeed(SpeedState state)
 {
 	constexpr uint32_t ms100 = 0x10000;
 	constexpr float ms1 = static_cast<float>(ms100) * 0.01f;
 	float scaled = static_cast<uint32_t>(state) - 0.5f;
-	return scaled / ms1 * k_LivingPace;
+	return scaled / ms1;
 }
 
 constexpr uint32_t MakeTurnAngleState(float degrees)

@@ -69,6 +69,7 @@
 #include "Resources/ResourcesInterface.h"
 #include "Temple.h"
 #include "TextureViewer.h"
+#include "Subtitles.h"
 #include "Video/MoviePlayer.h"
 #include "Windowing/WindowingInterface.h"
 
@@ -291,7 +292,10 @@ bool Gui::Loop() noexcept
 		window->WindowUpdate();
 	}
 	NewFrame();
-	if (ShowMenu())
+	// The debug menu bar along the top is hidden (Mike, 2026-10-22: "i no longer want to see it");
+	// OPENBLACK_SHOW_MENU brings it back.
+	static const bool s_showMenu = std::getenv("OPENBLACK_SHOW_MENU") != nullptr;
+	if (s_showMenu && ShowMenu())
 	{
 		// Exit option selected
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Quitting: the debug menu's Quit");
@@ -362,6 +366,16 @@ bool Gui::Loop() noexcept
 			}
 		}
 	}
+
+	// The scripts' fade over the picture (behind the lines and the menus).
+	if (const auto fade = chlapi::ScreenFade(); fade[3] > 0)
+	{
+		ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0.0f, 0.0f), ImGui::GetIO().DisplaySize,
+		                                              IM_COL32(fade[0], fade[1], fade[2], fade[3]));
+	}
+
+	// The spoken lines, along the bottom.
+	subtitles::Draw();
 
 	// A movie playing covers everything, this overlay too (drawn last).
 	video::DrawMovie();
@@ -703,7 +717,7 @@ bool Gui::ShowMenu() noexcept
 
 		// The leash's state beside the frame rate: off, on (and which kind), or tied to something...
 		// ...and the play speed (the stick presses' x1/8 to x8).
-		// Shown against normal play, which is secretly 1.6 times the clock (Mike, 2026-10-19): normal reads x1.
+		// Shown against normal play (Game::k_NormalPlaySpeed): normal reads x1.
 		const float playSpeed = Game::Instance() != nullptr ? Game::Instance()->GetShownPlaySpeed() : 1.0f;
 		const auto status = fmt::format("{}   Speed x{:g}   {:.2f} FPS ({:.2f} ms)", chlapi::LeashStatus(), playSpeed,
 		                                ImGui::GetIO().Framerate, 1000.0f / ImGui::GetIO().Framerate);

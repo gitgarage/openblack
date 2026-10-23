@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <optional>
 #include <string>
@@ -47,6 +48,8 @@ private:
 void NotifyGameThingClicked(uint32_t entity);
 // After the scripts' turn: what was clicked before it has been seen by all of them.
 void EndScriptTurn();
+// The scripts' screen fade (SET_FADE / SET_FADE_IN): its colour and its alpha (0 none, 255 all), drawn over the picture.
+std::array<uint8_t, 4> ScreenFade();
 // The food (or wood) in a town's village store, for the villagers' town desires (LivingActionSystem).
 float TownStoreAmount(uint32_t town, bool wood);
 // A villager goes for wood for its town (its wood desire): false if there is no tree or wood for it to get.

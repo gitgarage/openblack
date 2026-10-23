@@ -92,9 +92,10 @@ are.
 | **D-pad down / right** | Load save point 1 / 2 |
 | **Right stick press** | Play faster (twice as fast each press, up to ×8) |
 | **Left stick press** | Play slower (half as fast each press, down to ×1/8) |
-
-Normal speed (shown as ×1) is paced to match the original game.
 | **Any button** | Skip the intro movie |
+
+Normal speed (shown as ×1) is the original game's own pace: ten game turns a second, so scripted scenes, walks
+and camera moves take the time they take in the original.
 
 ### Touchscreen
 
@@ -135,7 +136,8 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
 **Running on the Switch**
 - openblack builds for the Switch unchanged, through its own CMake, with devkitPro's toolchain.
 - Rendering through bgfx's OpenGL ES 3.1 backend on Mesa, with skinned (animated) models, at about 44 FPS with
-  minimal graphics (no water reflection pass, no bump maps).
+  minimal graphics (no bump maps). The sea reflects only the sky, as the original's does with its land
+  reflection turned off.
 - Joy-Con and touchscreen controls mapped onto openblack's own input.
 - Full-memory launch and a log on the SD card.
 - The game clock follows the Switch's clock, as the original followed the PC's.
@@ -153,6 +155,26 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
 - The original's camera positions, camera paths and hand demonstrations (the tutorial's recorded hand) are read
   from the game's own data files.
 
+**The opening**
+
+The opening, from the fade-in on the beach to taking control on the path, was compared shot by shot with the
+original running in Wine and rebuilt from the original's code where it differed:
+- The screen fades in from black at the start and out to black before the intro movie, as the scripts ask.
+- The family walks, the sharks swim and the camera moves at the original's speeds. The sharks follow their
+  recorded paths, head first, at twice their model's size, leaving white wakes in the water.
+- After the movie the god's hand arrives as the original's fire ball. It streaks down out of the sky and lands in
+  the sea, then a hand rises from the water, picks up the drowning boy, and sets him down beside his parents.
+- The sun hangs low over the sea at dusk. Its glare shows through gaps in the palms, as in the original.
+- Your two advisors, the Yogi and the Demon, are built from the original's own files. They fly in, hover with
+  flapping wings, come closer when they speak, point at what they talk about, and fly home when a conversation
+  ends.
+- Subtitles show each spoken line along the bottom in the original's own fonts. The Demon's lines are pink
+  hand-lettering, the Yogi's a cream serif and the villagers' white.
+- The camera follows the original's views: kept above the land, following and facing people, and zooming.
+  The coast is drawn at sea level, as the original draws it, so the scripted camera shots line up with the
+  original's.
+- Dawn turns to day over the original's time, in the original's colours.
+
 **Your creature**
 - Choose the Ape, Cow or Tiger in the glade. Your creature walks, eats, sleeps, poos and wanders on its own.
 - Stroke and slap it, lead it on the leash, tie it up, feed it, and teach it to fight.
@@ -168,7 +190,8 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
 **The world**
 - Villagers live their days as in the original: they work, rest and chill out, get hungry and eat from the
   village store, housewives fetch food home for dinner, and they go home to sleep at night and come out in the
-  morning. They walk at the original's pace.
+  morning. They walk at the original's pace, and their walking and running keep pace with the ground, so their
+  feet never slide, including when a scene moves them.
 - Farmers sow and harvest the grain fields; villagers build: they fetch wood from the store, carry it to the site
   and build the Temple and other buildings.
 - People dance around the statue at the start, to the original's own choreography.
@@ -194,6 +217,8 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
 - **Particle effects:** the original's effect system is being ported a piece at a time. The water and fire
   spheres use it; the heal, lightning, shield and teleport spheres show their icon without their effect so far.
 - Some objects do not topple when hit, and thrown things pass through trees.
+- **Camera shake** in scripted scenes is not done yet.
+- **The intro's clouds and boat** and the camera bookmarks the opening script asks for are not drawn yet.
 - Saving uses two test save points on the D-pad, not the original's save menu.
 
 Bug reports are welcome. Please include `sdmc:/switch/openblack/openblack.log`, and say what you were doing.

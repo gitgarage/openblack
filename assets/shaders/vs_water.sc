@@ -17,7 +17,9 @@ void main()
 {
 	vec4 vertex = vec4(vec3(a_position.x, 0.0, a_position.y), 1.0);
 	vec4 viewSpacePos = mul(u_view, vertex);
-	vec4 position = mul(u_viewProj, vertex);
+	// Drawn 1% further along its view ray, so land at sea level - the shore, which the original draws at 0 - wins against
+	// the sea it lies in rather than fighting it for the depth, near and far alike (no land lies below the sea).
+	vec4 position = mul(u_proj, vec4(viewSpacePos.xyz * 1.01, 1.0));
 	gl_Position = position;
 
 	v_texcoord0 = vec4(vertex.x / 500.0f, vertex.z / 500.0f, viewSpacePos.z, 0.0f);

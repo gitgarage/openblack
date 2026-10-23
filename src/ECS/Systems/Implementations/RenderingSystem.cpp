@@ -313,7 +313,10 @@ void RenderingSystem::PrepareDrawUploadUniforms(bool drawBoundingBox)
 	    [&](entt::entity entity, const Mesh& mesh, const Transform& transform, const Animated& animated) {
 		    // Far-off villagers and animals are drawn as just their shadows (ShownAsShadow, set by CHLApi's shadows).
 		    // And villagers asleep in their houses (Asleep) aren't seen at all.
-		    if (!inView(mesh.id, transform) || registry.AnyOf<ShownAsShadow, Asleep>(entity))
+		    // The opening's hand is never culled: its animation carries it tens of units from its origin (down out of the
+		    // sky), so the box round where it stands says nothing of where it is drawn.
+		    static const auto s_introHand = entt::hashed_string("hand_intro").value();
+		    if ((mesh.id != s_introHand && !inView(mesh.id, transform)) || registry.AnyOf<ShownAsShadow, Asleep>(entity))
 		    {
 			    return; // not drawn: no pose worked out either
 		    }
