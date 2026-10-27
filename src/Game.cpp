@@ -13,6 +13,7 @@
 
 #include "HandPoses.h"
 #include "HelpSpirits.h"
+#include "LoadingScreen.h"
 #include "Subtitles.h"
 #include "PSys/PSys.h"
 
@@ -129,11 +130,9 @@ Game::Game(Arguments&& args) noexcept
 	config.graphicsBackend = args.graphicsBackend;
 	config.vsync = args.vsync;
 	config.guiScale = args.guiScale;
-#if defined(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
-	// Switch minimal graphics (with the skipped reflection pass in Renderer.cpp): no bump mapping.
-	config.bumpMapStrength = 0.0f;
-	config.smallBumpMapStrength = 0.0f;
-#endif
+	// The land's bump maps stay on on the Switch: they are its texture detail (the large one over each block, the small
+	// one's fine grain near the camera), and without them the ground looked low-res and blurry beside the PC's
+	// (Mike, 2026-10-23). Two texture reads a pixel.
 }
 
 Game::~Game() noexcept
@@ -988,26 +987,12 @@ void ShowLoading(std::string_view what, float fraction)
 	{
 		return;
 	}
+	SPDLOG_LOGGER_DEBUG(spdlog::get("game"), "Loading: {} ({:.0f}%)", what, fraction * 100.0f);
 	const auto size = Locator::windowing::value().GetSize();
 	bgfx::setViewRect(0, 0, 0, static_cast<uint16_t>(size.x), static_cast<uint16_t>(size.y));
 	bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000ff, 1.0f, 0);
-	bgfx::touch(0);
-	bgfx::setDebug(BGFX_DEBUG_TEXT);
-	bgfx::dbgTextClear();
-	const int columns = size.x / 8; // the debug font is 8 x 16
-	const int rows = size.y / 16;
-	constexpr int k_BarWidth = 40;
-	const std::string title = "Black & White  -  loading";
-	const auto line = fmt::format("{}...", what);
-	const int filled = std::clamp(static_cast<int>(fraction * k_BarWidth + 0.5f), 0, k_BarWidth);
-	const auto bar = fmt::format("[{}{}] {:3d}%", std::string(static_cast<size_t>(filled), '#'),
-	                             std::string(static_cast<size_t>(k_BarWidth - filled), '.'), static_cast<int>(fraction * 100.0f + 0.5f));
-	auto centred = [columns](const std::string& text) { return static_cast<uint16_t>(std::max((columns - static_cast<int>(text.size())) / 2, 0)); };
-	const auto top = static_cast<uint16_t>(std::max(rows / 2 - 2, 0));
-	bgfx::dbgTextPrintf(centred(title), top, 0x0f, "%s", title.c_str());
-	bgfx::dbgTextPrintf(centred(bar), static_cast<uint16_t>(top + 2), 0x0e, "%s", bar.c_str());
-	bgfx::dbgTextPrintf(centred(line), static_cast<uint16_t>(top + 4), 0x07, "%s", line.c_str());
-	bgfx::frame();
+	// The original's loading screen (LoadingScreen.cpp): its tip and its bar sweeping, drawn each time loading looks up.
+	loading::Draw();
 }
 } // namespace
 
@@ -1114,6 +1099,7 @@ bool Game::Initialize() noexcept
 	fileSystem.Iterate( //
 	    fileSystem.GetPath<filesystem::Path::Citadel>() / "engine", false,
 	    [&meshManager, &glowManager](const std::filesystem::path& f) {
+		    ShowLoading("The Temple", 0.08f);
 		    if (f.extension() == ".zzz")
 		    {
 			    if (f.stem().string().ends_with("lo_l3d"))
@@ -1176,6 +1162,7 @@ bool Game::Initialize() noexcept
 	const auto& textures = pack.GetTextures();
 	for (auto const& [name, g3dTexture] : textures)
 	{
+		ShowLoading("Textures", 0.40f); // the loading screen's sweep kept going (it draws at most every 150 ms)
 		textureManager.Load(g3dTexture.header.id, resources::Texture2DLoader::FromPackTag {}, name, g3dTexture);
 	}
 
@@ -1192,10 +1179,12 @@ bool Game::Initialize() noexcept
 	// TODO (#749) use std::views::enumerate
 	for (size_t i = 0; i < animations.size(); i++)
 	{
+		ShowLoading("Animations", 0.48f);
 		animationManager.Load(i, resources::L3DAnimLoader::FromBufferTag {}, animations[i]);
 	}
 
 	fileSystem.Iterate(fileSystem.GetPath<Path::CreatureMesh>(), false, [&meshManager](const std::filesystem::path& f) {
+		ShowLoading("Creatures", 0.5f);
 		const auto& fileName = f.stem().string();
 		SPDLOG_LOGGER_DEBUG(spdlog::get("game"), "Loading creature mesh: {}", fileName);
 		try
@@ -1235,6 +1224,7 @@ bool Game::Initialize() noexcept
 		meshManager.Load("metre_sphere", LFromDiskTag {}, fileSystem.GetPath<Path::Data>() / "metre_sphere.l3d");
 		// The spells' own models (Data/Spells/Meshes): the portal's Vortex, the miracle sphere's Seed... as spell/<name>.
 		fileSystem.Iterate(fileSystem.GetPath<Path::Data>() / "Spells" / "Meshes", false, [&meshManager](const std::filesystem::path& f) {
+			ShowLoading("Miracles", 0.55f);
 			if (string_utils::LowerCase(f.extension().string()) != ".l3d")
 			{
 				return;
@@ -1308,6 +1298,7 @@ bool Game::Initialize() noexcept
 	auto& audioManager = Locator::audio::value();
 	fileSystem.Iterate(
 	    fileSystem.GetPath<Path::Audio>(), true, [&audioManager, &soundManager, &fileSystem](const std::filesystem::path& f) {
+		    ShowLoading("Sounds", 0.60f);
 		    if (f.extension() != ".sad")
 		    {
 			    return;
@@ -1546,47 +1537,7 @@ bool Game::Initialize() noexcept
 				}
 			}
 		}
-		// OPENBLACK_TEST_EFFECT=<name>: runs SF_<name> (magnitude 0.65) for 2 s, closes it down, runs it out, printing
-		// what it draws; and reads every on-holder effect, saying which of their classes are not run yet.
-		if (const char* effectName = std::getenv("OPENBLACK_TEST_EFFECT"); effectName != nullptr)
-		{
-			for (const char* other : {"WaterOnHolder", "FireBallOnHolder", "HealChakraOnHolder", "LightningStormOnHolder",
-			                          "LightningBoltOnHolder", "DefenseSphereOnHolder", "TeleportOnHolder"})
-			{
-				psys::EffectFile::Load(other);
-			}
-			psys::Effect effect(psys::EffectFile::Load(effectName));
-			effect.SetMagnitude(0.65f);
-			effect.SetOrigin(glm::vec3(100.0f, 10.0f, 200.0f));
-			std::vector<psys::Drawable> drawn;
-			for (int step = 0; step < 120 && !effect.Finished(); ++step)
-			{
-				if (step == 60)
-				{
-					effect.CloseDown();
-				}
-				effect.Update(1.0f / 30.0f);
-				drawn.clear();
-				effect.Collect(drawn);
-				if (step % 10 == 0 || step == 61)
-				{
-					for (const auto& d : drawn)
-					{
-						SPDLOG_LOGGER_INFO(spdlog::get("game"), "EFFECT {} t={:.2f} {} at ({:.2f},{:.2f},{:.2f}) radius {:.2f} ratio {:.1f} "
-						                   "colour ({:.2f},{:.2f},{:.2f},{:.2f}) frame {} {} uv ({:.3f},{:.3f}) offset ({:.2f},{:.2f}){}",
-						                   effectName, step / 30.0f, d.kind == psys::Drawable::Kind::Mist ? "mist" : "sprite", d.position.x,
-						                   d.position.y, d.position.z, d.radius, d.ratio, d.colour.r, d.colour.g, d.colour.b, d.colour.a,
-						                   d.frame, d.texture, d.uvMin.x, d.uvMin.y, d.screenOffset.x, d.screenOffset.y,
-						                   d.additive ? " additive" : "");
-					}
-					if (drawn.empty())
-					{
-						SPDLOG_LOGGER_INFO(spdlog::get("game"), "EFFECT {} t={:.2f} nothing drawn", effectName, step / 30.0f);
-					}
-				}
-			}
-			SPDLOG_LOGGER_INFO(spdlog::get("game"), "EFFECT {} finished: {}", effectName, effect.Finished());
-		}
+
 		// OPENBLACK_DUMP_SPELLSEEDS=1: each spell seed's model (info +0x140) and particle effect type (+0x174).
 		if (std::getenv("OPENBLACK_DUMP_SPELLSEEDS") != nullptr)
 		{
@@ -1880,6 +1831,7 @@ bool Game::Run() noexcept
 	_frameCount = 0;
 	auto lastTime = std::chrono::high_resolution_clock::now();
 	auto& profiler = Locator::profiler::value();
+	loading::Finish(); // the game's first frame is next
 	while (Update())
 	{
 		auto duration = std::chrono::high_resolution_clock::now() - lastTime;

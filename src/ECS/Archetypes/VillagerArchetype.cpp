@@ -9,6 +9,7 @@
 
 #include "VillagerArchetype.h"
 
+
 #include <glm/gtx/euler_angles.hpp>
 #include <glm/vec3.hpp>
 
@@ -37,14 +38,13 @@ entt::entity VillagerArchetype::Create([[maybe_unused]] const glm::vec3& abodePo
 	const auto entity = hint == entt::null ? registry.Create() : registry.Create(hint);
 
 	const auto& info = Locator::infoConstants::value().villager.at(static_cast<size_t>(type));
-
-	registry.Assign<Transform>(entity, position, glm::eulerAngleY(glm::radians(180.0f)), glm::vec3(1.0));
+	registry.Assign<Transform>(entity, position, glm::eulerAngleY(glm::radians(180.0f)), glm::vec3(ScaleForAge(type, age)));
 	registry.Assign<Mobile>(entity);
 	const float life = info.life;
 	// Villager::Villager: fed to a random point above hungry (bw1-decomp).
 	const float food = std::min(Locator::rng::value().NextValue(0.0f, 0.6f) + info.hungryForFood, 1.0f);
 
-	const auto lifeStage = age < 18 ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
+	const auto lifeStage = IsChild(type, age) ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
 	const auto sex = info.villagerNumber == VillagerNumber::Housewife ? Villager::Sex::FEMALE : Villager::Sex::MALE;
 	const auto task = Villager::Task::IDLE;
 
@@ -73,6 +73,24 @@ entt::entity VillagerArchetype::Create([[maybe_unused]] const glm::vec3& abodePo
 entt::id_type VillagerArchetype::MeshResource(VillagerInfo type, uint32_t age)
 {
 	const auto& info = Locator::infoConstants::value().villager.at(static_cast<size_t>(type));
-	const bool child = age < 18 && info.childMeshHigh != MeshId::Dummy;
+	const bool child = IsChild(type, age) && info.childMeshHigh != MeshId::Dummy;
 	return resources::HashIdentifier(child ? info.childMeshHigh : info.highDetail);
+}
+
+bool VillagerArchetype::IsChild(VillagerInfo type, uint32_t age)
+{
+	return age < Locator::infoConstants::value().villager.at(static_cast<size_t>(type)).grownUpAge; // GLivingInfo::TeenAge
+}
+
+float VillagerArchetype::ScaleForAge(VillagerInfo type, uint32_t age)
+{
+	const auto& info = Locator::infoConstants::value().villager.at(static_cast<size_t>(type));
+	const auto& table = info.ageToScale.values;
+	auto& rng = Locator::rng::value();
+	if (IsChild(type, age) && age + 1 < table.size())
+	{
+		const float scale = table.at(age);
+		return scale + rng.NextValue(0.0f, std::max(table.at(age + 1) - scale, 0.0f) * 0.75f);
+	}
+	return std::max(1.0f + (0.05f - rng.NextValue(0.0f, 0.1f)), 0.9f);
 }

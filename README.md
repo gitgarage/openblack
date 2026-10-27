@@ -135,9 +135,9 @@ Land 1 can be played from the opening to the portal at its end. Over the course 
 
 **Running on the Switch**
 - openblack builds for the Switch unchanged, through its own CMake, with devkitPro's toolchain.
-- Rendering through bgfx's OpenGL ES 3.1 backend on Mesa, with skinned (animated) models, at about 44 FPS with
-  minimal graphics (no bump maps). The sea reflects only the sky, as the original's does with its land
-  reflection turned off.
+- Rendering through bgfx's OpenGL ES 3.1 backend on Mesa, with skinned (animated) models, at about 44 FPS. The
+  land's detail (bump) maps are drawn near the ground and left out when the camera is high above it. The sea
+  reflects only the sky, as the original's does with its land reflection turned off.
 - Joy-Con and touchscreen controls mapped onto openblack's own input.
 - Full-memory launch and a log on the SD card.
 - The game clock follows the Switch's clock, as the original followed the PC's.

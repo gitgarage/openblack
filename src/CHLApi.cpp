@@ -1459,6 +1459,7 @@ bool CameraPathRunning();
 namespace
 {
 float SeaDepthAt(glm::vec2 at); // below, with the walkers
+bool IsWaterAt(glm::vec2 at);   // likewise
 } // namespace
 
 // A script's camera is drawn at least a unit above the land or sea floor under it, its focus raised alike, each frame
@@ -1766,6 +1767,7 @@ float YawDegrees(const glm::mat3& rotation)
 namespace
 {
 float SeaDepthAt(glm::vec2 at); // below, with the walkers
+bool IsWaterAt(glm::vec2 at);   // likewise
 } // namespace
 
 void GetProperty() // 021 GET_PROPERTY
@@ -1817,9 +1819,10 @@ void GetProperty() // 021 GET_PROPERTY
 		if (villager != nullptr && transform != nullptr && value == 0.0f && object != g_heldObject &&
 		    std::none_of(g_creatureHolding.begin(), g_creatureHolding.end(), [object](const auto& held) { return held.second == object; }))
 		{
-			// The sea is drawn as a plane at height 0 (vs_water.sc): under it is in the water. The land's water flags
-			// also mark the shore, and a villager put down there stayed drowning.
-			value = SeaDepthAt(glm::vec2(transform->position.x, transform->position.z)) > 0.5f ? 1.0f : 0.0f;
+			// In a water cell, as the original's IsDrowning (its drowning state is entered on one). Our guess of the
+			// sea's depth (deeper than 0.5) instead had four of Land 1's five drowning men and the opening's boy, all
+			// in the shallows, not drowning (Mike, 2026-10-23).
+			value = IsWaterAt(glm::vec2(transform->position.x, transform->position.z)) ? 1.0f : 0.0f;
 		}
 		break;
 	case Prop::Player:
@@ -1907,11 +1910,15 @@ void SetProperty() // 022 SET_PROPERTY
 		{
 			using openblack::ecs::components::Villager;
 			villager->age = static_cast<uint32_t>(std::max(value, 0.0f));
-			villager->lifeStage = villager->age < 18 ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
+			const auto type = openblack::GVillagerInfo::Find(villager->tribe, villager->number);
+			villager->lifeStage = VillagerArchetype::IsChild(type, villager->age) ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
 			if (auto* mesh = registry.TryGet<openblack::ecs::components::Mesh>(entity))
 			{
-				const auto type = openblack::GVillagerInfo::Find(villager->tribe, villager->number);
 				mesh->id = VillagerArchetype::MeshResource(type, villager->age);
+			}
+			if (transform != nullptr)
+			{
+				transform->scale = glm::vec3(VillagerArchetype::ScaleForAge(type, villager->age)); // Villager::SetAge
 			}
 		}
 		break;
@@ -2417,6 +2424,7 @@ void EndScriptMove(uint32_t object)
 	g_scriptMoves.erase(object);
 	g_walks.erase(object);
 	g_moveAnimations.erase(object);
+	g_moverSpeeds.erase(object); // its speed from the frame before is not a move now
 }
 
 // How deep the sea is at a point. The land keeps no depth: its sea cells lie flat at the water's height (0), drawn
@@ -2488,6 +2496,22 @@ float SeaDepthAt(glm::vec2 at)
 	return d <= 0.0f ? 0.0f : 0.04f * d + 0.0008f * d * d;
 }
 
+// In the water, as the original decides who is drowning (MapCoords::IsWater, LH3DIsland::IsWater): the land cell under
+// the point has its water flag (LNDCell's hasWater, the cell's 0x10), or the point is off the map. Not how deep it is:
+// Villager's constructor and HasSunk put anyone in such a cell into VILLAGER_STATE_DROWNING.
+bool IsWaterAt(glm::vec2 at)
+{
+	constexpr float k_Cell = 10.0f;
+	constexpr int k_Cells = 512;
+	const int x = static_cast<int>(std::floor(at.x / k_Cell));
+	const int z = static_cast<int>(std::floor(at.y / k_Cell));
+	if (x < 0 || z < 0 || x >= k_Cells || z >= k_Cells)
+	{
+		return true;
+	}
+	return Locator::terrainSystem::value().GetCell(glm::u16vec2(x, z)).properties.hasWater;
+}
+
 // Where the bottom is: the sea's bed (under its depth) out in the sea, else the land.
 float SeabedAt(glm::vec2 at)
 {
@@ -2548,6 +2572,7 @@ void HoldInScriptState(uint32_t object, int32_t state)
 	}
 	g_walks.erase(object);
 	g_moveAnimations.erase(object);
+	g_moverSpeeds.erase(object);
 	if (g_scriptMoves.erase(object) != 0)
 	{
 		SPDLOG_LOGGER_INFO(spdlog::get("scripting"), "MOVE_GAME_THING {} cut short by SET_SCRIPT_STATE", object);
@@ -5009,6 +5034,53 @@ MagicType MagicOfSpellSeed(SpellSeedType seed)
 	}
 }
 
+// The pours being cast (food, wood): closed down when their hand pour is over.
+std::vector<openblack::psys::Handle> g_pours;
+
+// Pot::AddResourceToPos: food or wood landed at `at` - into the store it fell on, a pile of it already there, else a
+// new pile.
+void AddMiracleResource(bool food, const glm::vec3& at, float amount)
+{
+	using namespace openblack::ecs::components;
+	auto& registry = Locator::entitiesRegistry::value();
+	constexpr float k_StoreReach = 20.0f; // a storage pit's footprint
+	constexpr float k_PileReach = 5.0f;   // MapCoords::IsCloseToEqual: the same spot
+	const auto resourceType = static_cast<int32_t>(food ? ResourceType::Food : ResourceType::Wood);
+	entt::entity pit = entt::null;
+	float nearest = k_StoreReach;
+	registry.Each<const StoragePit, const Transform>([&](entt::entity entity, const StoragePit&, const Transform& transform) {
+		const float d = glm::distance(glm::vec2(transform.position.x, transform.position.z), glm::vec2(at.x, at.z));
+		if (d < nearest)
+		{
+			nearest = d;
+			pit = entity;
+		}
+	});
+	if (pit != entt::null && ResourcePot(pit, resourceType) != nullptr)
+	{
+		ChangeContainerResource(static_cast<uint32_t>(pit), resourceType, amount);
+		return;
+	}
+	const auto kind = food ? PotInfo::MagicFood : PotInfo::MagicWood;
+	Pot* pile = nullptr;
+	float nearestPile = k_PileReach;
+	registry.Each<Pot, const Transform>([&](entt::entity, Pot& pot, const Transform& transform) {
+		const float d = glm::distance(glm::vec2(transform.position.x, transform.position.z), glm::vec2(at.x, at.z));
+		if (pot.type == kind && d < nearestPile && pot.amount < pot.maxAmount)
+		{
+			nearestPile = d;
+			pile = &pot;
+		}
+	});
+	if (pile != nullptr)
+	{
+		pile->amount = static_cast<uint16_t>(std::min<float>(pile->amount + amount, pile->maxAmount));
+		return;
+	}
+	const glm::vec3 ground(at.x, Locator::terrainSystem::value().GetHeightAt(glm::vec2(at.x, at.z)), at.z);
+	PotArchetype::Create(ground, 0.0f, kind, static_cast<int32_t>(amount));
+}
+
 // A miracle let go of from the hand happens where it lands. So far food and wood (into the storage pit they fall
 // by, or a pile on the ground) and heal (the people round about); the rest only log.
 void CastMiracle(int spellSeed, const glm::vec3& at)
@@ -5021,6 +5093,41 @@ void CastMiracle(int spellSeed, const glm::vec3& at)
 	ImpressTowns(MagicOfSpellSeed(seed), ground, 1); // the hand's player: you
 	if (seed == SpellSeedType::Food || seed == SpellSeedType::Wood)
 	{
+		// As the original's (SpellResource): poured from the hand - its effect, SF_Food or SF_Wood (the magic info's
+		// particle type), the hand raised and tipped as it pours - and each piece that lands is the info's amount,
+		// the first more (resourceAmountFirstEvent, then resourceAmountPerEvent), into whatever is under it
+		// (SpellResource::SpellEvent, Pot::AddResourceToPos): the store, a pile already there, else a new pile. Not in
+		// the sea.
+		const bool isFood = seed == SpellSeedType::Food;
+		const auto& resourceInfo = isFood ? static_cast<const GMagicResourceInfo&>(info.magicFood.at(0))
+		                                  : static_cast<const GMagicResourceInfo&>(info.magicWood.at(0));
+		openblack::psys::Start start;
+		start.type = static_cast<openblack::psys::Type>(resourceInfo.particleType);
+		start.origin = ground;
+		start.humanCasting = true;
+		const auto first = std::make_shared<bool>(true);
+		const auto firstAmount = static_cast<float>(resourceInfo.resourceAmountFirstEvent);
+		const auto perAmount = static_cast<float>(resourceInfo.resourceAmountPerEvent);
+		start.onEvent = [isFood, first, firstAmount, perAmount](const openblack::psys::Event& event) {
+			if (event.type == openblack::psys::EventType::Spell)
+			{
+				return true;
+			}
+			const float amount = *first ? firstAmount : perAmount;
+			*first = false;
+			if (amount > 0.0f && !IsWaterAt(glm::vec2(event.position.x, event.position.z)))
+			{
+				AddMiracleResource(isFood, event.position, amount);
+			}
+			return true;
+		};
+		if (const auto system = openblack::psys::Create(start); system != 0)
+		{
+			g_pours.push_back(system);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Miracle {}: poured (SF_{}, {:.0f} for the first to land, {:.0f} each after)",
+			                   isFood ? "food" : "wood", isFood ? "Food" : "Wood", firstAmount, perAmount);
+			return;
+		}
 		const bool food = seed == SpellSeedType::Food;
 		const auto& resource = food ? static_cast<const GMagicResourceInfo&>(info.magicFood.at(0))
 		                            : static_cast<const GMagicResourceInfo&>(info.magicWood.at(0));
@@ -5169,9 +5276,61 @@ void UpdateDispensers()
 	}
 }
 
+// A spell seed's miracle's info (its magic type's), for its effects.
+const GMagicInfo* MagicInfoOfSeed(int spellSeed)
+{
+	const auto& info = Locator::infoConstants::value();
+	switch (static_cast<SpellSeedType>(spellSeed))
+	{
+	case SpellSeedType::Food: return &info.magicFood.at(0);
+	case SpellSeedType::Wood: return &info.magicWood.at(0);
+	case SpellSeedType::Water: return &info.magicWater.at(0);
+	case SpellSeedType::Heal: return &info.magicHeal.at(0);
+	case SpellSeedType::Shield: return &info.magicShield.at(0);
+	case SpellSeedType::PhysicalShield: return &info.magicShield.at(1);
+	case SpellSeedType::Nature: return &info.magicForest.at(0);
+	case SpellSeedType::Storm: return &info.magicStormAndTornado.at(0);
+	case SpellSeedType::FlockFlying: return &info.magicFlockFlying.at(0);
+	case SpellSeedType::FlockGround: return &info.magicFlockGround.at(0);
+	default: return nullptr;
+	}
+}
+
+// The miracle in the hand's own effect (SpellSeed's in-hand drawing: its magic info's particleTypeInHand - water's
+// SF_WaterInHand, heal's chakra), at the hand.
+openblack::psys::Handle g_inHandEffect = 0;
+
+void EndInHandEffect()
+{
+	if (g_inHandEffect != 0)
+	{
+		openblack::psys::CloseDown(g_inHandEffect);
+		g_inHandEffect = 0;
+	}
+}
+
+// OneOffSpellSeed::InterfaceTap: the bubble taken - it pops (G_SpellBubblePop_04, the interface's sound 0x6d) and the
+// miracle is in the hand, showing its own effect there.
+void TakeSeedIntoHand(int spellSeed)
+{
+	PlayBankSound(1, 109, nullptr);
+	EndInHandEffect();
+	if (const auto* magic = MagicInfoOfSeed(spellSeed); magic != nullptr && static_cast<int>(magic->particleTypeInHand) != 0)
+	{
+		openblack::psys::Start start;
+		start.type = static_cast<openblack::psys::Type>(magic->particleTypeInHand);
+		start.humanCasting = true;
+		start.magnitude = 1.0f; // the hand's render scale
+		g_inHandEffect = openblack::psys::Create(start);
+		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Spell seed {} in the hand: effect {} ({})", spellSeed,
+		                   static_cast<int>(magic->particleTypeInHand), g_inHandEffect != 0 ? "running" : "no file");
+	}
+}
+
 // The held sphere's miracle happens: a creature spell on your creature, anything else at the point.
 void UseHeldSphere(const glm::vec3& at)
 {
+	EndInHandEffect();
 	auto& registry = Locator::entitiesRegistry::value();
 	const auto entity = static_cast<entt::entity>(g_heldObject);
 	const auto spell = g_oneShotSpells.find(g_heldObject);
@@ -5209,6 +5368,7 @@ bool MiracleClick(const glm::vec3& ground)
 	if (g_heldObject == 0 && g_objectUnderHand != 0 && g_oneShotSpells.contains(g_objectUnderHand))
 	{
 		PutInHand(g_objectUnderHand);
+		TakeSeedIntoHand(g_oneShotSpells[g_heldObject]);
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Sphere {} (spell seed {}) taken: click where it should happen", g_heldObject,
 		                   g_oneShotSpells[g_heldObject]);
 		return true;
@@ -7336,8 +7496,7 @@ std::unordered_set<uint32_t> g_fallenDead;         // killed by a landing: they 
 std::unordered_map<uint32_t, float> g_thrownAnimalLanding; // animals getting up (or falling dead) after a landing
 std::unordered_map<uint32_t, uint32_t> g_animalDefaultAnimation; // what a thrown animal goes back to once up
 // In the water out of their depth (Mike, 2026-10-17): people tread water a while, then drown; animals sooner.
-// Seconds in so far. k_DrownDepth: deeper than a villager's chest.
-constexpr float k_DrownDepth = 1.2f;
+// Seconds in so far.
 constexpr float k_PersonDrownSeconds = 30.0f;
 constexpr float k_AnimalDrownSeconds = 15.0f;
 std::unordered_map<uint32_t, float> g_inDeepWater;
@@ -7853,17 +8012,19 @@ void UpdateAnimations(float seconds)
 		    const bool woman = villager.sex == Villager::Sex::FEMALE;
 		    uint32_t wanted;
 		    // Drowning only in the water: a drowning man put on the land stops (Mike, 2026-10-17: carried out, he
-		    // went on drowning there). Land is where the sea is shallower than the Drowning property's 0.5, not the
-		    // land's height: the sea's own cells are at 0-1, and the rescue quest's five men stood up in it (2026-10-19).
+		    // went on drowning there). Land is a cell without the water flag, as the original's ExitDrowning.
 		    if (const auto drowning = g_scriptAnimations.find(id);
 		        drowning != g_scriptAnimations.end() && drowning->second.animation == static_cast<uint32_t>(AnimId::PDrowning) &&
-		        SeaDepthAt(glm::vec2(transform.position.x, transform.position.z)) <= 0.5f)
+		        !IsWaterAt(glm::vec2(transform.position.x, transform.position.z)))
 		    {
 			    g_scriptAnimations.erase(drowning);
 		    }
 		    // Moved by a script, it plays a moving animation - the one the script gave it, else its walk or run - never a
 		    // standing one with its feet sliding over the ground.
-		    const bool scriptMoving = moved != g_moverSpeeds.end() && moved->second.frame + 1 >= g_scriptFrame && speed > 0.2f;
+		    // (A move still going: a speed from the frame before a SET_POSITION stopped it took the opening's son's swim away
+		    // and stood him up in the sea, 2026-10-23.)
+		    const bool scriptMoving = moved != g_moverSpeeds.end() && moved->second.frame + 1 >= g_scriptFrame && speed > 0.2f &&
+		                              (g_scriptMoves.contains(id) || g_walks.contains(id) || g_followers.contains(id));
 		    if (scriptMoving)
 		    {
 			    g_scriptAnimations.erase(id);
@@ -9362,6 +9523,7 @@ bool TakeSphereUnderHand()
 	if (sphere != 0)
 	{
 		PutInHand(sphere);
+		TakeSeedIntoHand(g_oneShotSpells[g_heldObject]);
 		SPDLOG_LOGGER_INFO(spdlog::get("game"), "Sphere {} picked up: let go or tap where it should happen", sphere);
 		return true;
 	}
@@ -12183,6 +12345,70 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 	UpdateIntro(seconds);
 	UpdateSharkWakes(seconds);
 	UpdateSun(seconds);
+	openblack::psys::Update(seconds); // the particle systems' game turns
+	if (g_inHandEffect != 0 && (g_heldObject == 0 || !g_oneShotSpells.contains(g_heldObject)))
+	{
+		EndInHandEffect(); // the miracle is no longer in the hand
+	}
+	for (auto it = g_pours.begin(); it != g_pours.end();)
+	{
+		const float pourTime = openblack::psys::PourTime(*it);
+		if (!openblack::psys::Exists(*it) || (pourTime >= 0.0f && openblack::psys::Age(*it) >= pourTime))
+		{
+			openblack::psys::CloseDown(*it);
+			it = g_pours.erase(it);
+			continue;
+		}
+		++it;
+	}
+	// Test hook: OPENBLACK_TEST_EFFECT=<particle type>[,<type>...] starts each, cast from a point 20 in front of the
+	// camera, every 6 seconds (closed down after 3), saying how many atoms they have.
+	if (static const char* s_test = std::getenv("OPENBLACK_TEST_EFFECT"); s_test != nullptr)
+	{
+		static float s_since = 5.0f;
+		static std::vector<openblack::psys::Handle> s_running;
+		s_since += seconds;
+		const auto& camera = Locator::camera::value();
+		const auto at = camera.GetOrigin() + camera.GetForward() * 20.0f + camera.GetUp() * 4.0f;
+		if (s_since > 6.0f)
+		{
+			s_since = 0.0f;
+			s_running.clear();
+			std::string types = s_test;
+			for (size_t from = 0; from < types.size();)
+			{
+				const size_t comma = types.find(',', from);
+				openblack::psys::Start start;
+				start.type = static_cast<openblack::psys::Type>(std::stoi(types.substr(from, comma - from)));
+				start.origin = at;
+				start.humanCasting = false;
+				start.onEvent = [](const openblack::psys::Event& event) {
+					SPDLOG_LOGGER_DEBUG(spdlog::get("game"), "Effect event {} at ({:.1f}, {:.1f}, {:.1f})", static_cast<int>(event.type),
+					                    event.position.x, event.position.y, event.position.z);
+					return true;
+				};
+				s_running.push_back(openblack::psys::Create(start));
+				from = comma == std::string::npos ? types.size() : comma + 1;
+			}
+		}
+		static float s_logged = 0.0f;
+		s_logged += seconds;
+		if (s_since > 3.0f)
+		{
+			for (const auto system : s_running)
+			{
+				openblack::psys::CloseDown(system);
+			}
+		}
+		if (s_logged > 0.5f)
+		{
+			s_logged = 0.0f;
+			int systems = 0;
+			int atoms = 0;
+			openblack::psys::Stats(systems, atoms);
+			SPDLOG_LOGGER_INFO(spdlog::get("game"), "Effects: {} systems, {} atoms (t {:.1f})", systems, atoms, s_since);
+		}
+	}
 	UpdateBuilders(seconds);
 	UpdateForesters(seconds);
 	UpdateFarmers(seconds);
@@ -12582,154 +12808,44 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 			// centre: by its origin, as GetSpellGraphicPos puts it, the icons sat a little high (Mike, 2026-10-19).
 			const float phase = static_cast<float>(id % 7);
 			transform.rotation = glm::mat3(glm::eulerAngleY(s_spin + phase));
-			transform.scale = glm::vec3(scale);
+			transform.scale = glm::vec3(id == g_heldObject ? 0.0f : scale); // taken: popped, the miracle in the hand
 			transform.position = at.position - transform.rotation * (box.Center() * scale);
 		}
 		// Each sphere's own effect, as the original's (SpellSeedGraphic::CreateGraphic): its spell seed info's particle
-		// type (+0x174), played by the original's effect file (PSys), at the sphere, at magnitude 1 - water's
-		// SF_WaterOnHolder, a mist that hangs in it; heal, fire, lightning, shield and the
-		// creature spells theirs as their classes are run. Its mists are drawn as the original's LH3DMist: a frame of
-		// the smoke sheet (Data/Textures/smoke.raw, its alpha smokea.raw) turned to the camera, flattened by its ratio
-		// when seen from the side.
+		// type (+0x164) - water's SF_WaterOnHolder, a mist hanging in it; heal's chakra; fire's, lightning's, the
+		// shields' and the creature spells' - run by the particle systems (src/PSys) at the sphere, magnitude 1.
 		{
-			static const std::map<uint32_t, const char*> k_EffectFiles = {
-			    {18, "WaterOnHolder"},          {47, "FireBallOnHolder"},        {51, "HealChakraOnHolder"},
-			    {58, "LightningStormOnHolder"}, {60, "LightningBoltOnHolder"},   {66, "DefenseSphereOnHolder"},
-			    {74, "TeleportOnHolder"},       {89, "CreatureSpellItchOnHolder"}, {92, "CreatureSpellFreezeOnHolder"},
-			    {95, "CreatureSpellCompassionOnHolder"}};
-			struct SphereEffect
-			{
-				std::unique_ptr<openblack::psys::Effect> effect;
-				std::vector<entt::entity> sprites;
-			};
-			static std::unordered_map<uint32_t, SphereEffect> s_effects;
-			static openblack::graphics::Texture2D* s_smokeTexture = nullptr; // never freed: see the bubble's
-			static bool s_triedSmoke = false;
-			if (!s_triedSmoke)
-			{
-				s_triedSmoke = true;
-				try
-				{
-					auto& fs = Locator::filesystem::value();
-					const auto textures = fs.GetPath<openblack::filesystem::Path::Data>() / "Textures";
-					const auto rgb = fs.ReadAll(textures / "smoke.raw");
-					const auto alpha = fs.ReadAll(textures / "smokea.raw");
-					constexpr size_t k_Texels = 256 * 256;
-					if (rgb.size() >= k_Texels * 3 && alpha.size() >= k_Texels)
-					{
-						std::vector<uint8_t> pixels(k_Texels * 4);
-						for (size_t t = 0; t < k_Texels; ++t)
-						{
-							pixels[t * 4 + 0] = rgb[t * 3 + 0];
-							pixels[t * 4 + 1] = rgb[t * 3 + 1];
-							pixels[t * 4 + 2] = rgb[t * 3 + 2];
-							pixels[t * 4 + 3] = alpha[t];
-						}
-						s_smokeTexture = new openblack::graphics::Texture2D("smoke sheet");
-						s_smokeTexture->Create(256, 256, 1, openblack::graphics::TextureFormat::RGBA8,
-						                       openblack::graphics::Wrapping::ClampEdge, openblack::graphics::Filter::Linear,
-						                       bgfx::copy(pixels.data(), static_cast<uint32_t>(pixels.size())));
-					}
-				}
-				catch (const std::exception& e)
-				{
-					SPDLOG_LOGGER_WARN(spdlog::get("game"), "Smoke sheet: {}", e.what());
-				}
-			}
+			static auto& s_effects = *new std::unordered_map<uint32_t, openblack::psys::Handle>();
 			for (auto it = s_effects.begin(); it != s_effects.end();)
 			{
-				if (!g_oneShotSpells.contains(it->first) || !registry.Valid(static_cast<entt::entity>(it->first)))
+				if (!g_oneShotSpells.contains(it->first) || !registry.Valid(static_cast<entt::entity>(it->first)) || it->first == g_heldObject)
 				{
-					for (const auto sprite : it->second.sprites)
-					{
-						if (registry.Valid(sprite))
-						{
-							registry.Destroy(sprite);
-						}
-					}
+					openblack::psys::Destroy(it->second);
 					it = s_effects.erase(it);
 					continue;
 				}
 				++it;
 			}
 			const auto& infos = Locator::infoConstants::value().spellSeed;
-			const auto eye = Locator::camera::value().GetOrigin();
-			std::vector<openblack::psys::Drawable> drawables;
 			for (const auto& [id, seed] : g_oneShotSpells)
 			{
 				const auto sphere = static_cast<entt::entity>(id);
-				if (seed < 0 || static_cast<size_t>(seed) >= infos.size() || !registry.Valid(sphere) || !registry.AllOf<Transform>(sphere))
+				if (seed < 0 || static_cast<size_t>(seed) >= infos.size() || !registry.Valid(sphere) || !registry.AllOf<Transform>(sphere) ||
+				    id == g_heldObject)
 				{
 					continue;
 				}
-				const auto file = k_EffectFiles.find(infos[static_cast<size_t>(seed)].field0x164);
-				if (file == k_EffectFiles.end())
-				{
-					continue;
-				}
-				auto [entry, made] = s_effects.try_emplace(id);
+				auto [entry, made] = s_effects.try_emplace(id, 0);
 				if (made)
 				{
-					entry->second.effect = std::make_unique<openblack::psys::Effect>(openblack::psys::EffectFile::Load(file->second));
-					entry->second.effect->SetMagnitude(1.0f); // SpellSeedGraphic's Size, 1 for a sphere's
+					openblack::psys::Start start;
+					start.type = static_cast<openblack::psys::Type>(infos[static_cast<size_t>(seed)].field0x164);
+					start.origin = registry.Get<Transform>(sphere).position;
+					start.magnitude = 1.0f; // SpellSeedGraphic's Size, 1 for a sphere's
+					start.humanCasting = false;
+					entry->second = openblack::psys::Create(start);
 				}
-				auto& effect = *entry->second.effect;
-				effect.SetOrigin(registry.Get<Transform>(sphere).position);
-				effect.Update(seconds);
-				drawables.clear();
-				effect.Collect(drawables);
-				auto& sprites = entry->second.sprites;
-				while (sprites.size() < drawables.size() && s_smokeTexture != nullptr)
-				{
-					const auto sprite = registry.Create();
-					auto& made2 = registry.Assign<openblack::ecs::components::Sprite>(sprite, s_smokeTexture->GetNativeHandle(),
-					                                                                  glm::vec2(0.0f), glm::vec2(0.125f), glm::vec4(1.0f));
-					made2.fullColour = true; // the sheet's own colour and alpha
-					registry.Assign<Transform>(sprite, glm::vec3(0.0f), glm::mat3(1.0f), glm::vec3(1.0f));
-					sprites.push_back(sprite);
-				}
-				const auto& camera = Locator::camera::value();
-				for (size_t d = 0; d < sprites.size(); ++d)
-				{
-					auto& transform = registry.Get<Transform>(sprites[d]);
-					if (d >= drawables.size())
-					{
-						transform.scale = glm::vec3(0.0f); // nothing to show this frame
-						continue;
-					}
-					const auto& drawable = drawables[d];
-					auto& sprite = registry.Get<openblack::ecs::components::Sprite>(sprites[d]);
-					sprite.tint = drawable.colour;
-					if (drawable.kind == openblack::psys::Drawable::Kind::Sprite)
-					{
-						const auto* sheet = SpriteSheet(drawable.texture);
-						if (sheet == nullptr)
-						{
-							transform.scale = glm::vec3(0.0f);
-							continue;
-						}
-						sprite.texture = sheet->GetNativeHandle();
-						sprite.uvMin = drawable.uvMin;
-						sprite.uvExtent = drawable.uvExtent;
-						sprite.darkens = !drawable.additive; // added light, or blended over what is behind
-						transform.position = drawable.position + camera.GetRight() * drawable.screenOffset.x +
-						                     camera.GetUp() * drawable.screenOffset.y;
-						transform.scale = glm::vec3(drawable.radius, drawable.radius * drawable.ratio, 1.0f);
-						continue;
-					}
-					sprite.texture = s_smokeTexture->GetNativeHandle();
-					sprite.darkens = true; // blended over what is behind
-					// Frames 0-15: the sheet's rows 2 and 3, eight across (LH3DMist's u = frame % 8 / 8, v = frame / 8 / 8 + 1/4).
-					sprite.uvMin = glm::vec2(static_cast<float>(drawable.frame % 8) * 0.125f,
-					                         0.25f + static_cast<float>(drawable.frame / 8) * 0.125f) +
-					               glm::vec2(0.002f);
-					sprite.uvExtent = glm::vec2(0.121f);
-					// Its height: the radius over 1 + (ratio - 1) x (1 - how straight down it is seen from).
-					const auto toEye = glm::normalize(eye - drawable.position);
-					const float height = drawable.radius / (1.0f + (drawable.ratio - 1.0f) * (1.0f - std::abs(toEye.y)));
-					transform.position = drawable.position;
-					transform.scale = glm::vec3(drawable.radius, height, 1.0f);
-				}
+				openblack::psys::SetOrigin(entry->second, registry.Get<Transform>(sphere).position);
 			}
 		}
 		// The bubble itself, as the original's (OneOffSpellSeed): Data/Spells/Meshes/O_Bibble_up.l3d, whose drawn part is
@@ -12831,7 +12947,7 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 				// Along its own line to the eye (OneOffSpellSeed::Draw: camera less centre), not the camera's view: the
 				// view's direction slid the bubbles off their contents away from the middle of the screen.
 				transform.position = centre + glm::normalize(camera.GetOrigin() - centre) * (2.0f * k_BubbleRadius);
-				transform.scale = glm::vec3(k_BubbleDiscRadius);
+				transform.scale = glm::vec3(id == g_heldObject ? 0.0f : k_BubbleDiscRadius);
 			}
 		}
 	}
@@ -13667,8 +13783,8 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		}
 		if (sea && living)
 		{
-			// In the water: no landing hurt; out of its depth it starts to drown.
-			if (-ground > k_DrownDepth)
+			// In the water: no landing hurt; in a water cell it starts to drown (Villager::HasSunk).
+			if (IsWaterAt(glm::vec2(position.x, position.z)))
 			{
 				g_inDeepWater.try_emplace(it->first, 0.0f);
 				SPDLOG_LOGGER_INFO(spdlog::get("game"), "{} is in the sea out of its depth ({:.1f} deep)", it->first, -ground);
@@ -13709,7 +13825,8 @@ void UpdateScriptFrame(std::chrono::microseconds dt)
 		const auto entity = static_cast<entt::entity>(it->first);
 		auto* transform = registry.Valid(entity) ? registry.TryGet<Transform>(entity) : nullptr;
 		const float ground = transform != nullptr ? SeabedAt(glm::vec2(transform->position.x, transform->position.z)) : 0.0f;
-		if (transform == nullptr || it->first == g_heldObject || g_flying.contains(it->first) || -ground <= k_DrownDepth)
+		if (transform == nullptr || it->first == g_heldObject || g_flying.contains(it->first) ||
+		    !IsWaterAt(glm::vec2(transform->position.x, transform->position.z)))
 		{
 			if (transform != nullptr && it->first != g_heldObject && !g_flying.contains(it->first))
 			{
@@ -18279,7 +18396,12 @@ bool LoadTestPoint(int slot)
 			{
 				villager->age = age;
 				villager->life = life > 1.0f ? life / 100.0f : life; // saves before 2026-10-19 kept 0-100
-				villager->lifeStage = age < 18 ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
+				const auto type = openblack::GVillagerInfo::Find(villager->tribe, villager->number);
+				villager->lifeStage = VillagerArchetype::IsChild(type, age) ? Villager::LifeStage::Child : Villager::LifeStage::Adult;
+				if (auto* transform = registry.TryGet<Transform>(static_cast<entt::entity>(id)))
+				{
+					transform->scale = glm::vec3(VillagerArchetype::ScaleForAge(type, age));
+				}
 			}
 		}
 		else if (kind == "held")

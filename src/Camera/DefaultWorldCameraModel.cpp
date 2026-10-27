@@ -22,6 +22,7 @@
 #include "Audio/AudioManagerInterface.h"
 #include "Camera.h"
 #include "Common/RandomNumberManager.h"
+#include "EngineConfig.h"
 #include "ECS/Components/Transform.h"
 #include "ECS/Systems/DynamicsSystemInterface.h"
 #include "Input/GameActionMapInterface.h"
@@ -666,6 +667,21 @@ void DefaultWorldCameraModel::HandleActions(std::chrono::microseconds dt)
 		{
 			_keyBoardMoveDelta.x += distance;
 		}
+	}
+
+	if (g_gestureYaw != 0.0f || g_gestureTilt != 0.0f || g_gestureZoomRatio != 1.0f)
+	{
+		// TiltZoom turns these into the yaw (x pi / the window's width), the pitch (x 0.002, the original's MouseTiltRate)
+		// and, as the held zoom below, metres.
+		constexpr float k_TiltMouseScale = 2.33333f;
+		const auto windowSize = Locator::windowing::value().GetSize();
+		const float fov = glm::radians(Locator::config::value().cameraXFov);
+		_rotateAroundDelta.y += g_gestureYaw * static_cast<float>(windowSize.x) / glm::pi<float>();
+		_rotateAroundDelta.x += g_gestureTilt * k_TiltMouseScale * fov / 0.002f;
+		_rotateAroundDelta.z += (g_gestureZoomRatio - 1.0f) * _originFocusDistanceAtInteractionStart / (0.0015f * 60.0f);
+		g_gestureYaw = 0.0f;
+		g_gestureTilt = 0.0f;
+		g_gestureZoomRatio = 1.0f;
 	}
 
 	if (g_heldZoomInput != 0.0f)

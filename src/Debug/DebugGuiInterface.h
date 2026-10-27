@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include "Graphics/RenderPass.h"
@@ -35,5 +36,7 @@ public:
 	virtual bool ProcessEvents(const SDL_Event& event) noexcept = 0;
 	virtual bool Loop() noexcept = 0;
 	virtual void Draw() noexcept = 0;
+	// One frame of only what `draw` puts on ImGui's background list (the loading screen, before the game runs).
+	virtual void DrawAlone(const std::function<void()>& draw) noexcept = 0;
 };
 } // namespace openblack::debug::gui

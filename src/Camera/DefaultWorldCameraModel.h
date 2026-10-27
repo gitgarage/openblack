@@ -23,6 +23,16 @@ namespace openblack
 // A held zoom from a control of its own (R / L on the Switch): -1 in, 1 out, 0 none. Kept apart from the
 // keyboard's Ctrl + Up / Down so it leaves the movement keys (the left stick) alone.
 inline float g_heldZoomInput = 0.0f;
+// Touch gestures since the last frame (switch_input.cpp), applied as the original's player camera applies the hand
+// (CameraModeNew3::Update):
+// - held at a side of the screen, the angle the hand went round the screen's middle (HAND_STATUS_PANNING: the yaw
+//   goes on by just that, one turn of the hand one turn of the view);
+// - held at the top or bottom, how far it went down the screen over the screen's height (HAND_STATUS_TILTING: the
+//   pitch less that times 2.33333 times the field of view);
+// - two fingers, the distance between them a frame ago over now (a pinch, the modern way: apart zooms in).
+inline float g_gestureYaw = 0.0f;
+inline float g_gestureTilt = 0.0f;
+inline float g_gestureZoomRatio = 1.0f;
 
 class DefaultWorldCameraModel final: public CameraModel
 {

@@ -9,7 +9,9 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <vector>
 
 // The original's Bink movies (Data/INTRO.bik...), played over the whole screen with their sound. Decoded by
 // ffmpeg where the build has it (OPENBLACK_HAVE_FFMPEG: the Switch's portlibs); without it nothing plays and
@@ -25,4 +27,7 @@ void UpdateMovie();
 void StopMovie();
 // Over everything, from the debug GUI's frame: black, with the movie fitted in the middle.
 void DrawMovie();
+// Picture `index` (from 0) of a movie, as RGBA: the loading screen's tip from Data/tips.bik, one picture a tip.
+// False without a decoder or such a picture.
+bool DecodeMovieFrame(const std::filesystem::path& path, int index, int& width, int& height, std::vector<uint8_t>& rgba);
 } // namespace openblack::video

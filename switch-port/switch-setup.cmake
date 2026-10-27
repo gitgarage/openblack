@@ -23,9 +23,9 @@ add_compile_definitions(
   _GNU_SOURCE=1
 )
 add_compile_options("-D__is_target_os(x)=0")
-# Minimal graphics on the Switch: no water-reflection pass (the scene rendered twice), no bump maps.
-# Off with -DOPENBLACK_SWITCH_MINIMAL_GRAPHICS=OFF.
-option(OPENBLACK_SWITCH_MINIMAL_GRAPHICS "Switch: skip water reflections and bump mapping" ON)
+# Minimal graphics on the Switch: the water's reflection of models drawn only for those near the sea (the land's bump
+# maps are on, 2026-10-23). Off with -DOPENBLACK_SWITCH_MINIMAL_GRAPHICS=OFF.
+option(OPENBLACK_SWITCH_MINIMAL_GRAPHICS "Switch: lighter water reflections" ON)
 if(OPENBLACK_SWITCH_MINIMAL_GRAPHICS)
   add_compile_definitions(OPENBLACK_SWITCH_MINIMAL_GRAPHICS=1)
 endif()

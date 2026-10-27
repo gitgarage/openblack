@@ -40,6 +40,7 @@ public:
 	bool ProcessEvents(const SDL_Event& event) noexcept override;
 	bool Loop() noexcept override;
 	void Draw() noexcept override;
+	void DrawAlone(const std::function<void()>& draw) noexcept override;
 
 private:
 	bool CreateFontsTextureBgfx() noexcept;

@@ -55,9 +55,11 @@ void main()
 	// add the 3 blended textures together
 	vec4 col = colOne + colTwo + colThree;
 
-	// apply bump map (2x because it's half bright?)
-	float bump = mix(1.0f, texture2D(s1_bump, v_texcoord0.xy).r * 2.0f, bumpMapStrength);
-	col = col * bump;
+	// apply bump map (2x because it's half bright?) - not at all with the camera high over the land (Renderer.cpp)
+	if (bumpMapStrength > 0.0f) {
+		float bump = mix(1.0f, texture2D(s1_bump, v_texcoord0.xy).r * 2.0f, bumpMapStrength);
+		col = col * bump;
+	}
 
 	// don't apply smallbump unless we're close
 	if (v_distToCamera < 200.0f) {

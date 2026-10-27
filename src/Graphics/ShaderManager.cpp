@@ -78,6 +78,11 @@
 #define SHADER_NAME fs_sprite
 #include "ShaderIncluder.h"
 
+#define SHADER_NAME vs_particle
+#include "ShaderIncluder.h"
+#define SHADER_NAME fs_particle
+#include "ShaderIncluder.h"
+
 #define SHADER_NAME vs_footprint_instanced
 #include "ShaderIncluder.h"
 #define SHADER_NAME fs_footprint
@@ -94,7 +99,7 @@ struct ShaderDefinition
 	const std::string_view fragmentShaderName;
 };
 
-const std::array<bgfx::EmbeddedShader, 17> k_EmbeddedShaders = {{
+const std::array<bgfx::EmbeddedShader, 19> k_EmbeddedShaders = {{
     BGFX_EMBEDDED_SHADER(vs_line), BGFX_EMBEDDED_SHADER(vs_line_instanced),                                                   //
     BGFX_EMBEDDED_SHADER(fs_line),                                                                                            //
     BGFX_EMBEDDED_SHADER(vs_object), BGFX_EMBEDDED_SHADER(vs_object_instanced), BGFX_EMBEDDED_SHADER(vs_object_hm_instanced), //
@@ -102,6 +107,7 @@ const std::array<bgfx::EmbeddedShader, 17> k_EmbeddedShaders = {{
     BGFX_EMBEDDED_SHADER(vs_terrain), BGFX_EMBEDDED_SHADER(fs_terrain),                                                       //
     BGFX_EMBEDDED_SHADER(vs_water), BGFX_EMBEDDED_SHADER(fs_water),                                                           //
     BGFX_EMBEDDED_SHADER(vs_sprite), BGFX_EMBEDDED_SHADER(fs_sprite),                                                         //
+    BGFX_EMBEDDED_SHADER(vs_particle), BGFX_EMBEDDED_SHADER(fs_particle),                                                     //
     BGFX_EMBEDDED_SHADER(vs_footprint_instanced), BGFX_EMBEDDED_SHADER(fs_footprint),                                         //
     BGFX_EMBEDDED_SHADER_END()                                                                                                //
 }};
@@ -116,6 +122,7 @@ constexpr std::array k_Shaders {
     ShaderDefinition {"Sky", "vs_object", "fs_sky"},
     ShaderDefinition {"Water", "vs_water", "fs_water"},
     ShaderDefinition {"Sprite", "vs_sprite", "fs_sprite"},
+    ShaderDefinition {"Particle", "vs_particle", "fs_particle"},
     ShaderDefinition {"FootprintInstanced", "vs_footprint_instanced", "fs_footprint"},
 };
 

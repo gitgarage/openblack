@@ -9,104 +9,129 @@
 
 #pragma once
 
-#include <map>
-#include <memory>
-#include <set>
-#include <string>
-#include <vector>
+#include <cstdint>
+#include <functional>
 
-#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
-#include <glm/vec4.hpp>
 
-// The original's particle systems (its PSys): each effect is a file in Data/Spells/ZSpellFiles (SF_<name>_txt.zzz,
-// deflated text) naming its objects - particle creators, the rules that create, change and remove atoms (particles)
-// in numbered groups, float providers and event conditions - with their properties. An effect runs here as the
-// original runs it (bw1-decomp's PSysModifiers.cpp for the rules), and says what to draw.
+// The original's particle systems (runblack.exe's PSys*, reconstructed in bw1-decomp): every miracle's look and sound -
+// the food falling from the hand, the rain cone, the chakra round the healed - is a file of rules in
+// Data/Spells/ZSpellFiles (SF_<name>_txt.zzz: zlib text, its length before it), run here as the original runs them.
+//
+// A system is groups of rules (each rule's Group); a group's collection of atoms is made when the system starts
+// (InitiallyCreated) or under an atom a rule makes (its NextGroups). Each game turn (100 ms) every collection's rules
+// run in the file's order, each kept while it says so; an atom is drawn as its creator's particle (a sprite from a sheet,
+// a mist, a mesh, nothing), and a rule can tell the spell something happened (an atom landed: food there).
 namespace openblack::psys
 {
-// What an effect draws this frame.
-struct Drawable
+// The original's particle types: the index of runblack.exe's table of SF_ files (its init at BW1W120 0068ea00), as
+// info.dat's magic infos name them (particleType, particleTypeInHand).
+enum class Type : int32_t
 {
-	enum class Kind
-	{
-		Mist,   // LH3DMist: a dome turned to the camera, showing a frame of the smoke sheet (rows 2-3)
-		Sprite, // LH3DSprite: a quad turned to the camera, showing a frame of its sprite sheet
-	};
-	Kind kind;
-	glm::vec3 position;
-	float radius;     // a mist's dome: 20 units at scale 1 (Data/Landscape/mist.l3d); a sprite's half-width
-	float ratio;      // a mist: seen from the side its height is radius / ratio. A sprite: its height over its width
-	glm::vec4 colour; // 0-1, alpha included
-	int frame;        // a mist's, of the 16 on the smoke sheet's rows 2 and 3
-	// A sprite's: its sheet (Data/Textures/<texture>.raw, alpha <texture>a.raw), the frame's place on it (0-1), how
-	// far it is moved across and up the screen from its position, and whether it adds light (else blends over).
-	std::string texture;
-	glm::vec2 uvMin {0.0f};
-	glm::vec2 uvExtent {1.0f};
-	glm::vec2 screenOffset {0.0f};
-	bool additive = false;
+	None = 0,
+	Firework = 2,
+	Forest = 4,
+	LightningStormPush = 6,
+	LightningBolt = 7,
+	Food = 9,
+	FoodPoisoned = 10,
+	BeamExplosionSingle = 11,
+	Wood = 15,
+	Water = 16,
+	WaterPuOne = 17,
+	WaterOnHolder = 18,
+	WaterInHand = 19,
+	WaterInHandPuOne = 20,
+	Heal = 21,
+	SpellFail = 26,
+	SpellSelection = 28,
+	MagicObjectCreated = 30,
+	Fireball = 43,
+	FireballInHand = 44,
+	FireballOnHolder = 47,
+	HealInHand = 50,
+	HealOnHolder = 51,
+	HealPuOne = 54,
+	LightningStormInHand = 55,
+	LightningStormOnHolder = 58,
+	LightningBoltInHand = 59,
+	LightningBoltOnHolder = 60,
+	Shield = 64,
+	ShieldInHand = 65,
+	ShieldOnHolder = 66,
+	TeleportOnHolder = 74,
+	CreatureSpellItchyOnHolder = 89,
+	CreatureSpellFreezeOnHolder = 92,
+	CreatureSpellCompassionOnHolder = 95,
+	FoodPickup = 107,
+	FoodPickupPoisoned = 108,
+	FoodPickupFish = 109,
+	WoodPickup = 110,
+	FoodPutdownPoisoned = 111,
+	WoodPutdown = 112,
+	FoodPutdown = 113,
 };
 
-// One object of an effect file: its class, name and properties (each kept as its words).
-struct FileObject
+// SPELL_EVENT_TYPE: what a rule tells the spell.
+enum class EventType : int32_t
 {
-	std::string type;
-	std::string name;
-	std::map<std::string, std::vector<std::string>, std::less<>> properties;
-
-	[[nodiscard]] float Float(std::string_view property, float fallback = 0.0f) const;
-	[[nodiscard]] int Int(std::string_view property, int fallback = 0) const;
-	[[nodiscard]] bool Bool(std::string_view property, bool fallback = false) const;
-	[[nodiscard]] std::string Ref(std::string_view property) const; // a PERSIS_PNTR's target, "" for none
-	[[nodiscard]] std::vector<int> Ints(std::string_view property) const; // an ARRAY's values
+	Atom = 0,
+	Spell = 1,
+	Heal = 2,
+	Landed = 3, // LandscapeCollide: an atom fell to the land
 };
 
-// An effect file, read once.
-struct EffectFile
+struct Event
 {
-	std::string name;
-	std::vector<int> initiallyCreated; // per group: has a collection from the start
-	std::vector<int> hierarchies;      // per group: its atoms carry the atoms of their next groups (position, scale)
-	std::vector<std::unique_ptr<FileObject>> objects;
-	std::map<std::string, const FileObject*, std::less<>> byName;
-
-	// SF_<name>_txt.zzz from Data/Spells/ZSpellFiles; null if missing or unreadable.
-	static std::shared_ptr<const EffectFile> Load(const std::string& name);
+	EventType type = EventType::Atom;
+	glm::vec3 position {0.0f};
+	glm::vec3 velocity {0.0f};
+	float strength = 1.0f;
+	uint32_t target = 0; // what it is about (a healed villager), if anything
 };
 
-class Effect
+// A running system; 0 is none.
+using Handle = uint32_t;
+
+struct Start
 {
-public:
-	explicit Effect(std::shared_ptr<const EffectFile> file);
-	~Effect();
-
-	void SetOrigin(const glm::vec3& origin) { _origin = origin; }
-	void SetMagnitude(float magnitude) { _magnitude = magnitude; }
-	// The original's PSYS_MANAGER_STATE_CLOSE_DOWN: its atoms fade and go by their own rules.
-	void CloseDown();
-	[[nodiscard]] bool Finished() const;
-	void Update(float seconds);
-	void Collect(std::vector<Drawable>& out) const;
-
-private:
-	struct Atom;
-	struct Collection;
-	void CreateCollection(int group, Atom* parent);
-	Atom* CreateAtom(Collection& collection, const FileObject& rule);
-	void RemoveAtom(Collection& collection, size_t index);
-	[[nodiscard]] float ProviderValue(const std::string& name) const;
-	[[nodiscard]] bool ConditionTrue(const std::string& name) const;
-	[[nodiscard]] glm::vec3 GlobalPosition(const Atom& atom) const;
-	[[nodiscard]] float GlobalScale(const Atom& atom) const;
-	[[nodiscard]] const Atom* Carrier(const Atom& atom) const; // the parent it moves and scales with, if any
-
-	std::shared_ptr<const EffectFile> _file;
-	std::vector<std::unique_ptr<Collection>> _collections;
-	glm::vec3 _origin {0.0f};
-	float _magnitude = 1.0f;
-	float _age = 0.0f;
-	bool _closing = false;
-	float _closeDownAge = 0.0f;
+	Type type = Type::None;
+	glm::vec3 origin {0.0f};  // the spell's point (FollowOrigin, the base collections' atoms start there)
+	float magnitude = 1.0f;   // PSysManager::Magnitude (MagnitudeFloatProvider; the hand's scale for an effect in it)
+	bool humanCasting = true; // cast by your hand: the hand's point is where it is cast from
+	std::function<bool(const Event&)> onEvent; // the spell's part (false: not taken)
+	bool enabled = true;      // PSYS_MANAGER_STATE_ENABLED from the start
 };
+
+Handle Create(const Start& start);
+// The spell moved (a sphere carried, a heal on a villager who walks): the base collections' origin.
+void SetOrigin(Handle system, const glm::vec3& origin);
+void SetMagnitude(Handle system, float magnitude);
+// ProcessInfo's strength (StrengthFloatProvider; how hard it is being cast, 0 - 1).
+void SetStrength(Handle system, float strength);
+// One of its targets (SpellTargets: UR_HealSpellChakra's villagers), for its rules to take.
+void AddTarget(Handle system, uint32_t object);
+// PSYS_MANAGER_STATE_ENABLED: being cast (an emitter waiting on EventConditionTrueWhenEnabled emits).
+void SetEnabled(Handle system, bool enabled);
+// PSYS_MANAGER_STATE_CLOSE_DOWN: over; its rules wind down and it ends once they have.
+void CloseDown(Handle system);
+[[nodiscard]] bool Exists(Handle system);
+// A hand pour's (UR_HandSprinkle, HandStateGrain::StartTimedPour): how far up the hand is now, and how long into the
+// system its pour is over (when the spell closes it down; -1 for none).
+[[nodiscard]] float HandRaise(Handle system);
+[[nodiscard]] float PourTime(Handle system);
+[[nodiscard]] float Age(Handle system);
+[[nodiscard]] bool IsClosingDown(Handle system);
+// Gone at once, without winding down.
+void Destroy(Handle system);
+
+// Each frame, with the game's time: runs every system's game turns (100 ms each) as they fall due.
+void Update(float seconds);
+// Each frame, from the renderer: every system's particles, interpolated between their last two turns, with the
+// particle shader `program` (a bgfx program handle's index).
+void Draw(uint16_t viewId, uint16_t program);
+// Everything gone (a new land).
+void Clear();
+// How many systems and atoms are running, for the log.
+void Stats(int& systems, int& atoms);
 } // namespace openblack::psys

@@ -12,6 +12,12 @@
 //                                                               on, on a tree or house: tie it there (untie: again)
 //                              move straight away              -> no button (hover: drawing a gesture)
 //                              quick tap without moving        -> left click
+//                              press at a side, then circle    -> rotate the view about the screen's middle (the
+//                                                               original's rotate arrow: one turn of the hand round
+//                                                               the middle turns the view once), at once, no hold
+//                              press at the top or bottom, then
+//                              move up or down                  -> tilt the view (the original's pitch arrow)
+//                              two fingers apart / together     -> zoom in / out (a pinch)
 //   ZR (hold)             -> left mouse button at the cursor (also turns any touch into a grab at once)
 //   ZL                    -> right mouse button (action); pressed on the finished Temple's door, go in
 //   Left stick            -> arrow keys (move the camera)
@@ -28,6 +34,8 @@
 //   A                     -> cycle your creature's leash: none, regular, reward, punishment
 //   Right stick press     -> play twice as fast (again for faster still, up to x8)
 //   Left stick press      -> play half as fast (down to x1/8)
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 #include <SDL.h>
@@ -56,11 +64,40 @@ enum class Touch
 	Grab,
 	Collect, // a long press over wood
 	Hover,
+	Rotate, // a long press at a side of the screen: circling rotates the view
+	Tilt,   // a long press at the top or bottom: moving up and down tilts it
+	Pinch,  // two fingers: zoom, until both lift
 };
 Touch g_touch = Touch::None;
 u64 g_touchStart = 0;
 int g_touchStartX = 0, g_touchStartY = 0;
 bool g_tapPending = false; // a tap's button-down was sent; send the up next frame
+float g_rotateAngle = 0.0f;  // Rotate: the hand's angle about the screen's middle last frame
+int g_tiltY = 0;             // Tilt: the finger's height last frame
+float g_pinchDistance = 0.0f; // Pinch: the fingers' distance apart last frame (0 before the first)
+
+// The edges a long press rotates or tilts from, out from the screen's middle as a share of its width and height. The
+// original's arrows show past 0.45 to the sides and 0.43-0.49 up and down (CameraModeNew3::UpdateTricons's
+// TriconSideThreshold, TriconTopThreshold) for a mouse; a finger is given the screen's outer tenth. Any press there.
+constexpr float k_EdgeShare = 0.4f;
+
+// CameraModeNew3::Update, HAND_STATUS_PANNING: the hand kept on the ellipse 0.9 of the way out to the screen's edges,
+// and its angle round the middle (atan2 of its pixels across and down from it).
+float RotateAngle(int& x, int& y, int w, int h)
+{
+	float nx = (static_cast<float>(x) - static_cast<float>(w) * 0.5f) / (static_cast<float>(w) * 0.5f);
+	float ny = (static_cast<float>(y) - static_cast<float>(h) * 0.5f) / (static_cast<float>(h) * 0.5f);
+	const float radius = nx * nx + ny * ny;
+	if ((radius < 0.89f || radius > 0.91f) && radius != 0.0f)
+	{
+		const float scale = 0.9f / std::sqrt(radius);
+		nx *= scale;
+		ny *= scale;
+		x = static_cast<int>(((nx + 1.0f) * static_cast<float>(w) + 1.0f) * 0.5f);
+		y = static_cast<int>((ny * static_cast<float>(h) + static_cast<float>(h) + 1.0f) * 0.5f);
+	}
+	return std::atan2(static_cast<float>(x - w / 2), static_cast<float>(y - h / 2));
+}
 
 SDL_Window* gameWindow()
 {
@@ -112,6 +149,7 @@ bool touchFrame(u64 now, bool forceGrab)
 	{
 		const bool wasTap = g_touch == Touch::Undecided;
 		g_touch = Touch::None;
+		g_pinchDistance = 0.0f;
 		if (wasTap)
 		{
 			g_tapPending = true; // lifted before deciding: a click
@@ -126,8 +164,54 @@ bool touchFrame(u64 now, bool forceGrab)
 	{
 		SDL_GetWindowSize(window, &w, &h);
 	}
-	const int x = static_cast<int>(touch.touches[0].x) * w / 1280;
-	const int y = static_cast<int>(touch.touches[0].y) * h / 720;
+	int x = static_cast<int>(touch.touches[0].x) * w / 1280;
+	int y = static_cast<int>(touch.touches[0].y) * h / 720;
+
+	// Two fingers: a pinch, whatever the first was doing; it lasts till both are lifted.
+	if (touch.count >= 2 || g_touch == Touch::Pinch)
+	{
+		g_touch = Touch::Pinch;
+		if (touch.count >= 2)
+		{
+			const float dx = static_cast<float>(touch.touches[1].x) - static_cast<float>(touch.touches[0].x);
+			const float dy = static_cast<float>(touch.touches[1].y) - static_cast<float>(touch.touches[0].y);
+			const float distance = std::sqrt(dx * dx + dy * dy);
+			if (g_pinchDistance > 0.0f && distance > 0.0f)
+			{
+				openblack::g_gestureZoomRatio *= g_pinchDistance / distance;
+			}
+			g_pinchDistance = distance;
+		}
+		else
+		{
+			g_pinchDistance = 0.0f;
+		}
+		return false;
+	}
+	if (g_touch == Touch::Rotate)
+	{
+		const float angle = RotateAngle(x, y, w, h);
+		float turn = angle - g_rotateAngle;
+		if (turn > 3.14159265f)
+		{
+			turn -= 6.28318531f;
+		}
+		if (turn < -3.14159265f)
+		{
+			turn += 6.28318531f;
+		}
+		g_rotateAngle = angle;
+		openblack::g_gestureYaw += turn;
+		SDL_WarpMouseInWindow(window, x, y); // the hand rides the ellipse, as the original's
+		return false;
+	}
+	if (g_touch == Touch::Tilt)
+	{
+		openblack::g_gestureTilt += static_cast<float>(y - g_tiltY) / static_cast<float>(h);
+		g_tiltY = y;
+		SDL_WarpMouseInWindow(window, x, y);
+		return false;
+	}
 	SDL_WarpMouseInWindow(window, x, y); // the hand follows the finger in every state
 
 	if (g_touch == Touch::None)
@@ -137,6 +221,25 @@ bool touchFrame(u64 now, bool forceGrab)
 		g_touchStart = now;
 		g_touchStartX = x;
 		g_touchStartY = y;
+		// At an edge: rotate from a side, tilt from the top or bottom (the nearer edge, in a corner) - straight away, as
+		// the original's arrows take the button the moment it is pressed there (Mike, 2026-10-23: no long press).
+		const float acrossMiddle = std::abs(static_cast<float>(x) / static_cast<float>(w) - 0.5f);
+		const float upMiddle = std::abs(static_cast<float>(y) / static_cast<float>(h) - 0.5f);
+		if (!forceGrab && !openblack::chlapi::InTemple() && std::max(acrossMiddle, upMiddle) > k_EdgeShare)
+		{
+			if (acrossMiddle >= upMiddle)
+			{
+				g_touch = Touch::Rotate;
+				g_rotateAngle = RotateAngle(x, y, w, h);
+			}
+			else
+			{
+				g_touch = Touch::Tilt;
+				g_tiltY = y;
+			}
+			SDL_WarpMouseInWindow(window, x, y);
+			return false;
+		}
 	}
 	if (g_touch == Touch::Undecided)
 	{

@@ -37,6 +37,7 @@
 #include "Camera/Camera.h"
 #include "ECS/Components/Mesh.h"
 #include "ECS/Components/Sprite.h"
+#include "PSys/PSys.h"
 #include "ECS/Registry.h"
 #include "ECS/Systems/RenderingSystemInterface.h"
 #include "EngineConfig.h"
@@ -794,7 +795,12 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 			auto islandExtent = glm::vec4(island.GetExtent().minimum, island.GetExtent().maximum);
 
 			auto texture = Locator::resources::value().GetTextures().Handle(LandIslandInterface::k_SmallBumpTextureId);
-			const glm::vec4 u_skyAndBump = {skyType, desc.bumpMapStrength, desc.smallBumpMapStrength, 0.0f};
+			// The land's bump detail is for near the ground: with the camera high over the land (Mike, 2026-10-23) it fades
+			// out from 200 to 300 above it, and the shader skips it at 0. The small bump already stops 200 from the camera.
+			const auto eye = desc.camera->GetOrigin();
+			const float above = eye.y - std::max(island.GetHeightAt(glm::vec2(eye.x, eye.z)), 0.0f);
+			const float nearGround = 1.0f - glm::clamp((above - 200.0f) / 100.0f, 0.0f, 1.0f);
+			const glm::vec4 u_skyAndBump = {skyType, desc.bumpMapStrength * nearGround, desc.smallBumpMapStrength, 0.0f};
 
 			terrainShader->SetTextureSampler("s0_materials", 0, island.GetAlbedoArray());
 			terrainShader->SetTextureSampler("s1_bump", 1, island.GetBump());
@@ -1025,6 +1031,15 @@ void Renderer::DrawPass(const DrawSceneDesc& desc) const
 
 					    bgfx::submit(static_cast<bgfx::ViewId>(desc.viewId), toBgfx(spriteShader->GetRawHandle()));
 				    });
+				// The particle systems' atoms (src/PSys), after the sprites, as the original draws its spells after the
+				// world's objects; not in the sea's reflection.
+				if (desc.viewId == RenderPass::Main)
+				{
+					if (const auto* particleShader = _shaderManager->GetShader("Particle"); particleShader != nullptr)
+					{
+						psys::Draw(static_cast<uint16_t>(desc.viewId), toBgfx(particleShader->GetRawHandle()).idx);
+					}
+				}
 			}
 		}
 	}

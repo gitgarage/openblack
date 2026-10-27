@@ -9,8 +9,10 @@
 
 #include "Subtitles.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -77,20 +79,22 @@ std::optional<glm::vec2> g_demoHand;
 std::chrono::steady_clock::time_point g_demoHandSet {};
 bgfx::TextureHandle g_mouseSheet = BGFX_INVALID_HANDLE; // 4 x 4 mice, the first with no button pressed
 bool g_mouseSheetLoaded = false;
+bgfx::TextureHandle g_keySheet = BGFX_INVALID_HANDLE; // Data/Textures/ATMOS.RAW, its key cap at u 0.5 - 0.75, v 0 - 0.25
+bool g_keySheetLoaded = false;
 
-void LoadMouseSheet()
+// A 256 x 256 picture from Data/Textures: its colours from `name`, its alpha from `alphaName`.
+bgfx::TextureHandle LoadSheet(const char* name, const char* alphaName)
 {
-	g_mouseSheetLoaded = true;
 	try
 	{
 		auto& fs = Locator::filesystem::value();
 		const auto textures = fs.GetPath<filesystem::Path::Data>() / "Textures";
-		const auto rgb = fs.ReadAll(textures / "mousehelp.raw");
-		const auto alpha = fs.ReadAll(textures / "mousehelpa.raw");
+		const auto rgb = fs.ReadAll(textures / name);
+		const auto alpha = fs.ReadAll(textures / alphaName);
 		constexpr size_t k_Texels = 256 * 256;
 		if (rgb.size() < k_Texels * 3 || alpha.size() < k_Texels)
 		{
-			return;
+			return BGFX_INVALID_HANDLE;
 		}
 		std::vector<uint8_t> pixels(k_Texels * 4);
 		for (size_t t = 0; t < k_Texels; ++t)
@@ -100,13 +104,20 @@ void LoadMouseSheet()
 			pixels[t * 4 + 2] = rgb[t * 3 + 2];
 			pixels[t * 4 + 3] = alpha[t];
 		}
-		g_mouseSheet = bgfx::createTexture2D(256, 256, false, 1, bgfx::TextureFormat::RGBA8, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP,
-		                                     bgfx::copy(pixels.data(), static_cast<uint32_t>(pixels.size())));
+		return bgfx::createTexture2D(256, 256, false, 1, bgfx::TextureFormat::RGBA8, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP,
+		                             bgfx::copy(pixels.data(), static_cast<uint32_t>(pixels.size())));
 	}
 	catch (const std::exception& e)
 	{
-		SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Subtitles: mouse help: {}", e.what());
+		SPDLOG_LOGGER_ERROR(spdlog::get("game"), "Subtitles: {}: {}", name, e.what());
 	}
+	return BGFX_INVALID_HANDLE;
+}
+
+void LoadMouseSheet()
+{
+	g_mouseSheetLoaded = true;
+	g_mouseSheet = LoadSheet("mousehelp.raw", "mousehelpa.raw");
 }
 
 // Scripts/InfoScript2.txt: UTF-16 lines `ADD_TEXT( 1, HELP_TEXT_NARRATOR_<WHO>, "<NAME>", "<text>")`.
@@ -305,6 +316,8 @@ ImTextureID TextureId(bgfx::TextureHandle handle)
 	return texture.ptr;
 }
 
+void LoadFonts(); // below
+
 float Width(const Font& font, const std::u16string& words)
 {
 	float width = 0.0f;
@@ -342,6 +355,219 @@ void DrawLine(ImDrawList& draw, const Font& font, const std::u16string& words, f
 		x += g.advance * scale;
 	}
 }
+
+// The original's "$" codes (fn_005760C0 draws a word that begins with one): "$m<n>" a picture of what does bindable
+// action n - a mouse with its button lit, or a key (HelpSystem::ConvertActionToKMIcon, CameraHelp::DrawKeyOrMouse);
+// "$g<n>" gesture n; "$I", "$s" and "$p" a number, words and a percentage that the info panels fill in. Spoken lines
+// only ever end with pictures; anything else is left out.
+struct Piece
+{
+	std::u16string words;
+	int action = -1; // a picture of it, if not -1
+};
+
+// ControlMap::LoadDefaults: each action's mouse code (1 the left button, 2 the middle, 3 and 4 the wheel either way, 5
+// the right), or else its key.
+struct Binding
+{
+	uint8_t mouse;
+	const char16_t* key;
+};
+constexpr std::array<Binding, 33> k_Defaults {{
+    {0, u"F1"},        {1, nullptr},     {5, nullptr},   {4, nullptr},    {3, nullptr},    {0, u"T"},       {0, u"Right Ctrl"},
+    {0, u"Left"},      {0, u"Right"},    {0, u"Up"},     {0, u"Down"},    {0, u"A"},       {0, u"Q"},       {0, u"Z"},
+    {0, u"U"},         {0, u"Right Shift"}, {2, nullptr}, {0, u"Space"},  {0, u"C"},       {0, u"F3"},      {0, u"F4"},
+    {0, u"F5"},        {0, u"F6"},       {0, u"F7"},     {0, u"F8"},      {0, u"F9"},      {0, u"L"},       {0, u"N"},
+    {0, u"S"},         {0, u"Ctrl + S"}, {0, u"Ctrl + L"}, {0, u"V"},     {0, u"B"},
+}};
+
+#if defined(__SWITCH__)
+// What does each action on the Switch (switch_input.cpp), on a key cap as the original names a key; none, no picture.
+constexpr std::array<const char16_t*, 33> k_SwitchControls {
+    nullptr,    u"ZR",       u"ZL",       u"L",        u"R",        nullptr,     u"L  R",     u"L Stick",  u"L Stick",
+    u"L Stick", u"L Stick",  u"R Stick",  u"R Stick",  u"R Stick",  u"R Stick",  u"R Stick",  u"R Stick",  nullptr,
+    nullptr,    nullptr,     nullptr,     nullptr,     nullptr,     nullptr,     nullptr,     nullptr,     u"A",
+    nullptr,    nullptr,     nullptr,     nullptr,     nullptr,     nullptr,
+};
+#endif
+
+// The key cap's words for `action`, if it is drawn as one.
+const char16_t* KeyOf(int action)
+{
+	if (action < 0 || static_cast<size_t>(action) >= k_Defaults.size())
+	{
+		return nullptr;
+	}
+#if defined(__SWITCH__)
+	return k_SwitchControls.at(static_cast<size_t>(action));
+#else
+	return k_Defaults.at(static_cast<size_t>(action)).mouse == 0 ? k_Defaults.at(static_cast<size_t>(action)).key : nullptr;
+#endif
+}
+
+// Its mouse code, if it is drawn as a mouse.
+int MouseOf(int action)
+{
+#if defined(__SWITCH__)
+	(void)action;
+	return 0;
+#else
+	return action < 0 || static_cast<size_t>(action) >= k_Defaults.size() ? 0 : k_Defaults.at(static_cast<size_t>(action)).mouse;
+#endif
+}
+
+std::vector<Piece> PiecesOf(const std::u16string& words)
+{
+	std::vector<Piece> pieces(1);
+	for (size_t i = 0; i < words.size();)
+	{
+		if (words[i] != u'$' && words[i] != u'\\')
+		{
+			pieces.back().words += words[i++];
+			continue;
+		}
+		size_t end = i + 1;
+		for (; end < words.size() && words[end] != u' ' && words[end] != u'\n' && words[end] != 0xF8FE; ++end)
+		{
+		}
+		if (words[i] == u'$' && end > i + 2 && words[i + 1] == u'm')
+		{
+			int action = 0; // _wtoi
+			for (size_t d = i + 2; d < end && words[d] >= u'0' && words[d] <= u'9'; ++d)
+			{
+				action = action * 10 + (words[d] - u'0');
+			}
+			// The same key twice running is shown once ("$m9 $m10" both the left stick on the Switch).
+			const auto* key = KeyOf(action);
+			const bool again = pieces.size() >= 2 && key != nullptr && pieces[pieces.size() - 2].action >= 0 &&
+			                   KeyOf(pieces[pieces.size() - 2].action) != nullptr &&
+			                   std::u16string(KeyOf(pieces[pieces.size() - 2].action)) == key &&
+			                   pieces.back().words.find_first_not_of(u' ') == std::u16string::npos;
+			if ((key != nullptr || MouseOf(action) != 0) && !again)
+			{
+				pieces.back().action = action;
+				pieces.emplace_back();
+			}
+		}
+		i = end;
+	}
+	// (A picture is the piece's words then it, so the words after the last one are the last piece's.)
+	while (!pieces.back().words.empty() && pieces.back().words.back() == u' ')
+	{
+		pieces.back().words.pop_back();
+	}
+	return pieces;
+}
+
+// The key cap (fn_00447990): its ends a quarter of its height across and its middle stretched to fit the key's name.
+float KeyWidth(const char16_t* key, float height)
+{
+	const auto& font = g_fonts.at(static_cast<size_t>(Speaker::Villager));
+	return std::max(height, Width(font, key) * (height * 0.5f / font.lineHeight) + height * 0.5f);
+}
+
+float PictureWidth(int action, float height)
+{
+	if (const auto* key = KeyOf(action); key != nullptr)
+	{
+		return KeyWidth(key, height);
+	}
+	return MouseOf(action) != 0 ? height : 0.0f;
+}
+
+void DrawPicture(ImDrawList& draw, int action, float left, float top, float height)
+{
+	if (const auto* key = KeyOf(action); key != nullptr)
+	{
+		if (!g_keySheetLoaded)
+		{
+			g_keySheetLoaded = true;
+			g_keySheet = LoadSheet("ATMOS.RAW", "ATMOSA.RAW");
+		}
+		const auto& font = g_fonts.at(static_cast<size_t>(Speaker::Villager));
+		const float width = KeyWidth(key, height);
+		const float end = height * 0.25f;
+		const float bottom = top + height;
+		if (bgfx::isValid(g_keySheet))
+		{
+			const auto texture = TextureId(g_keySheet);
+			draw.AddImage(texture, ImVec2(left, top), ImVec2(left + end, bottom), ImVec2(0.502f, 0.00195f), ImVec2(0.5645f, 0.248f));
+			draw.AddImage(texture, ImVec2(left + end, top), ImVec2(left + width - end, bottom), ImVec2(0.5645f, 0.00195f),
+			              ImVec2(0.6855f, 0.248f));
+			draw.AddImage(texture, ImVec2(left + width - end, top), ImVec2(left + width, bottom), ImVec2(0.6855f, 0.00195f),
+			              ImVec2(0.748f, 0.248f));
+		}
+		DrawLine(draw, font, key, left + width * 0.5f, top + height * 0.46f, height * 0.5f / font.lineHeight, IM_COL32(40, 36, 20, 255));
+		return;
+	}
+	if (!g_mouseSheetLoaded)
+	{
+		LoadMouseSheet();
+	}
+	if (!bgfx::isValid(g_mouseSheet))
+	{
+		return;
+	}
+	// fn_00447450 for a wheel mouse (HelpProfile::GetMouseType 2, its third row of mousehelp's four by four): the button
+	// held lit - the left one the right one's picture mirrored - or the wheel turning, a frame each 10th of a second.
+	const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	const int turn = static_cast<int>((ms / 100) % 5);
+	int frame = 0;
+	bool mirrored = false;
+	switch (MouseOf(action))
+	{
+	case 1: // click type 1
+		frame = 9;
+		mirrored = true;
+		break;
+	case 2: // click type 4
+		frame = 11;
+		break;
+	case 3: // click type 16
+		frame = turn > 3 ? 11 : 12 + turn;
+		break;
+	case 4: // click type 8
+		frame = turn > 3 ? 11 : 15 - turn;
+		break;
+	default: // 5, click type 2
+		frame = 9;
+		break;
+	}
+	const float u0 = static_cast<float>(frame % 4) * 0.25f;
+	const float v0 = static_cast<float>(frame / 4) * 0.25f;
+	draw.AddImage(TextureId(g_mouseSheet), ImVec2(left, top), ImVec2(left + height, top + height),
+	              ImVec2(mirrored ? u0 + 0.25f : u0, v0), ImVec2(mirrored ? u0 : u0 + 0.25f, v0 + 0.25f));
+}
+
+// A spoken line, centred, with its pictures after its words as the original's are: each the line's height and a bit.
+void DrawSpoken(ImDrawList& draw, const Font& font, const std::u16string& words, float centreX, float centreY, float scale,
+                ImU32 colour)
+{
+	const auto pieces = PiecesOf(words);
+	const float height = font.lineHeight * scale * 1.15f;
+	const float gap = height * 0.15f;
+	float width = 0.0f;
+	for (const auto& piece : pieces)
+	{
+		width += Width(font, piece.words) * scale;
+		if (piece.action >= 0)
+		{
+			width += PictureWidth(piece.action, height) + gap;
+		}
+	}
+	float x = centreX - width * 0.5f;
+	for (const auto& piece : pieces)
+	{
+		const float w = Width(font, piece.words) * scale;
+		DrawLine(draw, font, piece.words, x + w * 0.5f, centreY, scale, colour);
+		x += w;
+		if (piece.action >= 0)
+		{
+			DrawPicture(draw, piece.action, x + gap, centreY - height * 0.5f, height);
+			x += PictureWidth(piece.action, height) + gap;
+		}
+	}
+}
 } // namespace
 
 void Show(int32_t textId)
@@ -358,6 +584,86 @@ void Show(int32_t textId)
 	while (g_lines.size() > k_MostLines)
 	{
 		g_lines.pop_back();
+	}
+}
+
+std::u16string TextOf(int32_t textId)
+{
+	if (!g_textsLoaded)
+	{
+		LoadTexts();
+	}
+	if (textId < 0 || static_cast<size_t>(textId) >= g_texts.size())
+	{
+		return {};
+	}
+	auto words = g_texts[static_cast<size_t>(textId)].words;
+	for (size_t i = 0; i < words.size(); ++i)
+	{
+		if (words[i] == u'$' || words[i] == u'\\')
+		{
+			for (; i < words.size() && words[i] != u' ' && words[i] != u'\n' && words[i] != 0xF8FE; ++i)
+			{
+				words[i] = u' ';
+			}
+		}
+	}
+	return words;
+}
+
+void DrawWrapped(ImDrawList& draw, const std::u16string& words, float left, float top, float right, float bottom, float size,
+                 uint32_t colour, uint32_t shadow)
+{
+	LoadFonts();
+	const auto& font = g_fonts.at(static_cast<size_t>(Speaker::Villager));
+	if (font.lineHeight <= 0.0f)
+	{
+		return;
+	}
+	std::vector<std::u16string> lines;
+	float scale = 1.0f;
+	for (; size >= 8.0f; size -= 2.0f)
+	{
+		scale = size / font.lineHeight;
+		lines.clear();
+		std::u16string line;
+		size_t at = 0;
+		while (at < words.size())
+		{
+			const size_t space = words.find(u' ', at);
+			const auto word = words.substr(at, space == std::u16string::npos ? std::u16string::npos : space - at);
+			at = space == std::u16string::npos ? words.size() : space + 1;
+			if (word.empty())
+			{
+				continue;
+			}
+			const auto longer = line.empty() ? word : line + u' ' + word;
+			if (!line.empty() && Width(font, longer) * scale > right - left)
+			{
+				lines.push_back(line);
+				line = word;
+			}
+			else
+			{
+				line = longer;
+			}
+		}
+		if (!line.empty())
+		{
+			lines.push_back(line);
+		}
+		if (static_cast<float>(lines.size()) * size <= bottom - top)
+		{
+			break;
+		}
+	}
+	const float centreX = (left + right) * 0.5f;
+	float y = (top + bottom) * 0.5f - static_cast<float>(lines.size()) * size * 0.5f + size * 0.5f;
+	for (const auto& line : lines)
+	{
+		DrawLine(draw, font, line, centreX + 2.0f, y + 2.0f, scale, shadow);
+		DrawLine(draw, font, line, centreX, y, scale, colour);
+		y += size;
 	}
 }
 
@@ -439,6 +745,21 @@ void DrawDemoHand(ImDrawList& draw, const ImVec2& display, float unit)
 
 void Draw()
 {
+	// Test hook: OPENBLACK_TEST_TEXTS (text numbers, comma separated) says them every 100 frames.
+	if (static const char* s_test = std::getenv("OPENBLACK_TEST_TEXTS"); s_test != nullptr)
+	{
+		static int s_frames = 0;
+		if (++s_frames % 100 == 1)
+		{
+			std::string ids = s_test;
+			for (size_t at = 0; at < ids.size();)
+			{
+				const size_t comma = ids.find(',', at);
+				Show(std::stoi(ids.substr(at, comma - at)));
+				at = comma == std::string::npos ? ids.size() : comma + 1;
+			}
+		}
+	}
 	const auto now = std::chrono::steady_clock::now();
 	while (!g_lines.empty() && now - g_lines.back().shown > k_LineLife)
 	{
@@ -466,7 +787,7 @@ void Draw()
 	{
 		const auto& text = *g_lines[i].text;
 		const auto speaker = static_cast<size_t>(text.speaker);
-		DrawLine(*draw, g_fonts.at(speaker), text.words, display.x * 0.5f, y, (i == 0 ? 1.1f : 0.88f) * unit, k_Colours.at(speaker));
+		DrawSpoken(*draw, g_fonts.at(speaker), text.words, display.x * 0.5f, y, (i == 0 ? 1.1f : 0.88f) * unit, k_Colours.at(speaker));
 		y += 30.0f * unit;
 	}
 }

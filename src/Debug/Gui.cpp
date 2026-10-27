@@ -539,6 +539,14 @@ void Gui::Draw() noexcept
 	RenderDrawDataBgfx(ImGui::GetDrawData());
 }
 
+void Gui::DrawAlone(const std::function<void()>& draw) noexcept
+{
+	NewFrame();
+	draw();
+	ImGui::Render();
+	Draw();
+}
+
 bool Gui::ShowMenu() noexcept
 {
 	if (ImGui::BeginMainMenuBar())

@@ -333,10 +333,69 @@ void DrawMovie()
 }
 } // namespace openblack::video
 
+namespace openblack::video
+{
+bool DecodeMovieFrame(const std::filesystem::path& path, int index, int& width, int& height, std::vector<uint8_t>& rgba)
+{
+	AVFormatContext* format = nullptr;
+	const auto url = "file:" + path.generic_string();
+	if (avformat_open_input(&format, url.c_str(), nullptr, nullptr) < 0 || avformat_find_stream_info(format, nullptr) < 0)
+	{
+		if (format != nullptr)
+		{
+			avformat_close_input(&format);
+		}
+		return false;
+	}
+	const int stream = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+	AVCodecContext* video = stream >= 0 ? OpenDecoder(format, stream) : nullptr;
+	bool found = false;
+	if (video != nullptr)
+	{
+		AVPacket* packet = av_packet_alloc();
+		AVFrame* frame = av_frame_alloc();
+		int seen = 0;
+		while (!found && av_read_frame(format, packet) >= 0)
+		{
+			if (packet->stream_index == stream && avcodec_send_packet(video, packet) >= 0)
+			{
+				while (!found && avcodec_receive_frame(video, frame) >= 0)
+				{
+					if (seen++ == index)
+					{
+						width = frame->width;
+						height = frame->height;
+						rgba.assign(static_cast<size_t>(width * height * 4), 0);
+						SwsContext* scale = sws_getContext(width, height, static_cast<AVPixelFormat>(frame->format), width, height,
+						                                   AV_PIX_FMT_RGBA, SWS_POINT, nullptr, nullptr, nullptr);
+						std::array<uint8_t*, 1> planes {rgba.data()};
+						std::array<int, 1> strides {width * 4};
+						sws_scale(scale, frame->data, frame->linesize, 0, height, planes.data(), strides.data());
+						sws_freeContext(scale);
+						found = true;
+					}
+				}
+			}
+			av_packet_unref(packet);
+		}
+		av_frame_free(&frame);
+		av_packet_free(&packet);
+		avcodec_free_context(&video);
+	}
+	avformat_close_input(&format);
+	return found;
+}
+} // namespace openblack::video
+
 #else
 
 namespace openblack::video
 {
+bool DecodeMovieFrame(const std::filesystem::path&, int, int&, int&, std::vector<uint8_t>&)
+{
+	return false;
+}
+
 bool StartMovie(const std::filesystem::path& path)
 {
 	SPDLOG_LOGGER_WARN(spdlog::get("game"), "Movie {}: this build has no movie decoder (ffmpeg), not played", path.generic_string());
